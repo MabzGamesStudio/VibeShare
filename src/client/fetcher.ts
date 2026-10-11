@@ -167,7 +167,17 @@ export class Fetcher {
       const from = index === first ? offset : 0;
       const to = index === last ? end - index * manifest.chunkSize + 1 : current.length;
       const piece = current.subarray(from, to);
-      if (!res.write(piece)) await new Promise<void>((resolve) => res.once('drain', resolve).once('close', resolve));
+      if (!res.write(piece)) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            res.off('drain', done);
+            res.off('close', done);
+            resolve();
+          };
+          res.on('drain', done);
+          res.on('close', done);
+        });
+      }
     }
     res.end();
   }

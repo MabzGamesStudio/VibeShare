@@ -120,7 +120,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.path('storage-service.json'),
       this.ledger,
       () => this.config.storageService,
-      (id) => this.store.getChunk(id)
+      (id, options) => this.store.getChunk(id, options)
     );
     this.store = new ContentStore({
       indexPath: this.path('content-index.json'),

@@ -81,8 +81,9 @@ function fail(message: string): never {
 }
 
 export function openInBrowser(url: string): void {
-  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '""', url.replace(/&/g, '^&')] : [url];
+  // rundll32 avoids cmd.exe, which would split the URL at "&".
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'rundll32' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url];
   try {
     spawn(command, args, { stdio: 'ignore', detached: true }).on('error', () => undefined).unref();
   } catch {

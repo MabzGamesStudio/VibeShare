@@ -88,7 +88,8 @@ export class StorageService {
     path: string | null,
     private readonly ledger: Ledger,
     private readonly config: () => StorageServiceConfig,
-    private readonly readChunk: (id: string) => Promise<Buffer | null>
+    /** Reads a chunk; `peers: false` restricts it to the provider's own storage. */
+    private readonly readChunk: (id: string, options?: { peers?: boolean }) => Promise<Buffer | null>
   ) {
     this.store = new JsonFile<ServiceData>(path, () => ({ jobs: {}, assignments: {} }));
     this.timer = setInterval(() => void this.tick().catch((error) => log.warn('storage service tick:', error)), 5000);
@@ -373,7 +374,8 @@ export class StorageService {
     const chunkId = assignment.chunkIds[Math.floor(Math.random() * assignment.chunkIds.length)];
     assignment.lastChallengeAt = Date.now();
     const nonce = randomBytes(16).toString('hex');
-    const own = await this.readChunk(chunkId).catch(() => null);
+    // Never from client storage: that would ask the holders to answer their own challenge.
+    const own = await this.readChunk(chunkId, { peers: false }).catch(() => null);
     // With its own copy the provider asks for a proof; without one it asks for the chunk itself.
     const expected = own ? sha256hex(Buffer.concat([Buffer.from(nonce), own])) : undefined;
     this.addTask({ type: 'challenge', assignmentId: assignment.id, accountId: assignment.accountId, chunkId, nonce: expected ? nonce : undefined, expected });

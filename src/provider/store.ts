@@ -127,8 +127,11 @@ export class ContentStore {
     this.index.changed();
   }
 
-  /** Reads and checks a chunk: memory cache, known locations, every other backend, then peers. */
-  async getChunk(id: string): Promise<Buffer | null> {
+  /**
+   * Reads and checks a chunk: memory cache, known locations, every other backend, then
+   * (unless `peers` is false) client nodes holding it for the storage service.
+   */
+  async getChunk(id: string, options: { peers?: boolean } = {}): Promise<Buffer | null> {
     const cached = this.cache.get(id);
     if (cached) return cached;
     const record = this.index.data.chunks[id];
@@ -150,7 +153,7 @@ export class ContentStore {
         log.debug(`Backend ${backend.id} could not read ${id.slice(0, 12)}: ${(error as Error).message}`);
       }
     }
-    if (this.options.peerFallback) {
+    if (this.options.peerFallback && options.peers !== false) {
       const data = await this.options.peerFallback(id);
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
