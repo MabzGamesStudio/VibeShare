@@ -78,8 +78,8 @@ export class NodeManager {
   async add(text: string): Promise<{ added: NodeEntry[]; errors: { ref: string; error: string }[] }> {
     const { refs, invalid } = parseNodeRefs(text);
     const errors = invalid.map((ref) => ({ ref, error: 'Not a node reference or http(s) URL' }));
-    const added: NodeEntry[] = [];
-    await Promise.all(
+    // Nodes are checked in parallel but added in the pasted order, which is their priority.
+    const results = await Promise.all(
       refs.map(async (ref) => {
         const label = ref.id ? formatNodeRef(ref as Required<typeof ref>) : ref.url;
         try {
@@ -93,27 +93,39 @@ export class NodeManager {
           });
           const started = Date.now();
           const info = await probe.fetchInfo();
-          if (this.get(info.id)) throw new Error('Already added');
-          const entry: NodeEntry = {
-            id: info.id,
-            type: info.type,
-            url: ref.url,
-            name: info.name,
-            description: info.description,
-            enabled: true,
-            auth: this.store.data.data.settings.defaultAuth,
-            addedAt: new Date().toISOString(),
-            info,
-            status: { online: true, latencyMs: Date.now() - started, checkedAt: new Date().toISOString() },
-            ref: formatNodeRef({ type: info.type, id: info.id, url: ref.url }),
-          };
-          this.nodes.push(entry);
-          added.push(entry);
+          return { ok: true as const, ref, info, latencyMs: Date.now() - started };
         } catch (error) {
-          errors.push({ ref: label, error: errorText(error) });
+          return { ok: false as const, label, error: errorText(error) };
         }
       })
     );
+    const added: NodeEntry[] = [];
+    for (const result of results) {
+      if (!result.ok) {
+        errors.push({ ref: result.label, error: result.error });
+        continue;
+      }
+      const { ref, info, latencyMs } = result;
+      if (this.get(info.id)) {
+        errors.push({ ref: formatNodeRef({ type: info.type, id: info.id, url: ref.url }), error: 'Already added' });
+        continue;
+      }
+      const entry: NodeEntry = {
+        id: info.id,
+        type: info.type,
+        url: ref.url,
+        name: info.name,
+        description: info.description,
+        enabled: true,
+        auth: this.store.data.data.settings.defaultAuth,
+        addedAt: new Date().toISOString(),
+        info,
+        status: { online: true, latencyMs, checkedAt: new Date().toISOString() },
+        ref: formatNodeRef({ type: info.type, id: info.id, url: ref.url }),
+      };
+      this.nodes.push(entry);
+      added.push(entry);
+    }
     this.store.changed();
     await Promise.all(added.map((node) => this.refreshBalance(node)));
     return { added, errors };

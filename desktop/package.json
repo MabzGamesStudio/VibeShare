@@ -1,0 +1,43 @@
+{
+  "name": "vibeshare-desktop",
+  "productName": "VibeShare",
+  "version": "0.1.0",
+  "description": "VibeShare client node as a desktop app",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "author": "VibeShare",
+  "homepage": "https://github.com/MabzGamesStudio/VibeShare",
+  "repository": { "type": "git", "url": "https://github.com/MabzGamesStudio/VibeShare.git" },
+  "scripts": {
+    "prepare-app": "node scripts/prepare.mjs",
+    "start": "npm run prepare-app && electron .",
+    "dist": "npm run prepare-app && electron-builder",
+    "dist:mac": "npm run prepare-app && electron-builder --mac",
+    "dist:win": "npm run prepare-app && electron-builder --win",
+    "dist:linux": "npm run prepare-app && electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "org.vibeshare.desktop",
+    "productName": "VibeShare",
+    "artifactName": "VibeShare-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["main.mjs", "core/**", "gui/**", "build/icon.png", "package.json"],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }, { "target": "zip", "arch": ["x64", "arm64"] }]
+    },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "zip", "arch": ["x64"] }] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "linux": {
+      "category": "AudioVideo",
+      "target": [{ "target": "AppImage", "arch": ["x64"] }, { "target": "deb", "arch": ["x64"] }, { "target": "tar.gz", "arch": ["x64"] }],
+      "maintainer": "VibeShare"
+    }
+  }
+}

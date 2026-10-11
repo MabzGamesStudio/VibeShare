@@ -1,0 +1,18 @@
+# /etc/systemd/system/vibeshare-provider.service
+#   sudo useradd --system --home /var/lib/vibeshare vibeshare
+#   sudo systemctl enable --now vibeshare-provider
+[Unit]
+Description=VibeShare content provider node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vibeshare
+ExecStart=/usr/local/bin/vibeshare provider --data /var/lib/vibeshare/provider --public-url https://cdn.example.org
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vibeshare
+
+[Install]
+WantedBy=multi-user.target

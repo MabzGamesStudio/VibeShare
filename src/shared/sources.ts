@@ -77,7 +77,7 @@ export function parseSource(text: string): ExternalSource | null {
   const scheme = text.slice(0, colon) as SourceScheme;
   const value = text.slice(colon + 1);
   if (!SCHEMES.includes(scheme) || !value || value.length > 2048) return null;
-  if (/[\s~]/.test(value)) return null;
+  if (/[\s~]/.test(value) || value.startsWith('/')) return null;
   return { scheme, value };
 }
 
@@ -106,8 +106,13 @@ export function baseId(id: string): string {
 export function withSources(id: string, sources: ExternalSource[]): string {
   const parsed = parseContentId(id);
   if (!parsed) return id;
-  const seen = new Set(parsed.sources.map(formatSource));
-  const extra = sources.map(formatSource).filter((text) => !seen.has(text) && text !== parsed.base);
+  const seen = new Set([parsed.base, ...parsed.sources.map(formatSource)]);
+  const extra: string[] = [];
+  for (const text of sources.map(formatSource)) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    extra.push(text);
+  }
   return extra.length ? [parsed.full, ...extra].join('~') : parsed.full;
 }
 
@@ -158,7 +163,7 @@ export function sourceFromUrl(input: string): ExternalSource | null {
   if (path[0] === 'videos' && (path[1] === 'watch' || path[1] === 'embed') && path[2]) {
     return { scheme: 'peertube', value: `${url.host}/${path[2]}` };
   }
-  if (path[0] === 'w' && path[1] && /^[A-Za-z0-9]{20,}$/.test(path[1])) {
+  if (path[0] === 'w' && path[1] && /^([1-9A-HJ-NP-Za-km-z]{20,24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(path[1])) {
     return { scheme: 'peertube', value: `${url.host}/${path[1]}` };
   }
   if (path[0] === 'ipfs' && path[1]) return { scheme: 'ipfs', value: path.slice(1).join('/') };

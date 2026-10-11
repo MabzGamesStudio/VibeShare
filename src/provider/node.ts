@@ -174,7 +174,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           config.id,
           async (key) => {
             try {
-              const response = await client.fetch(`/v1/chunks/${key}`, { timeoutMs: 30000 });
+              const path = key.startsWith('m-') ? `/v1/content/${key.slice(2)}` : `/v1/chunks/${key}`;
+              const response = await client.fetch(path, { timeoutMs: 30000 });
               return Buffer.from(await response.arrayBuffer());
             } catch (error) {
               if (error instanceof RemoteError && error.status === 404) return null;
@@ -272,9 +273,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const manifest = this.store.getManifest(cid);
     if (manifest || !isNativeId(cid)) return manifest;
     const recovered = await this.store.recoverManifest(cid);
-    if (recovered && recovered.chunks.every((chunk) => this.store.hasChunk(chunk.id))) {
-      await this.store.addContent(recovered, 'operator').catch(() => undefined);
-    }
+    if (recovered) this.store.adopt(recovered, 'operator');
     return recovered;
   }
 

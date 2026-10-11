@@ -1,0 +1,24 @@
+{
+  "name": "Science & Learning",
+  "description": "Hand-reviewed educational content. Family friendly: nothing above 13+.",
+  "publicUrl": "https://feed.example.org",
+  "host": "0.0.0.0",
+  "port": 7702,
+  "trustProxy": true,
+  "signup": { "grant": 100, "powBits": 16, "anonymous": true, "perIpPerHour": 20 },
+  "peers": ["vs:provider:vk1REPLACE_WITH_REAL_KEY@https://cdn.example.org"],
+  "pricing": { "feed": 0, "search": 0, "lookup": 0, "submission": 5 },
+  "rewards": { "vote": 1, "voteDailyCap": 30, "acceptedSuggestion": 15, "requireIdentity": true, "autoAcceptAgreement": 3 },
+  "ranking": {
+    "strategy": "custom",
+    "module": "/etc/vibeshare/ranker.mjs",
+    "description": "Favours well-rated lessons and long-form explainers; new creators get a boost.",
+    "weights": { "quality": 1.2, "recency": 0.6, "preference": 1.5, "discovery": 0.4 },
+    "halfLifeHours": 168,
+    "gravity": 1.5
+  },
+  "policy": { "maxRating": "13+", "defaultMaxRating": "13+", "autoListSubmissions": false },
+  "topics": ["science", "learning", "technology", "history", "nature", "health", "diy"],
+  "pageSize": 24,
+  "payments": [{ "id": "voucher", "type": "voucher" }]
+}

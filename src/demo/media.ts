@@ -23,24 +23,28 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, body, crc]);
 }
 
-/** A PNG drawn by `pixel(x, y) → [r, g, b]`. */
-export function png(width: number, height: number, pixel: (x: number, y: number) => [number, number, number]): Buffer {
-  const raw = Buffer.alloc((width * 3 + 1) * height);
+/** A PNG drawn by `pixel(x, y) → [r, g, b]` (or [r, g, b, a] with `alpha`). */
+export function png(
+  width: number,
+  height: number,
+  pixel: (x: number, y: number) => [number, number, number] | [number, number, number, number],
+  alpha = false
+): Buffer {
+  const channels = alpha ? 4 : 3;
+  const raw = Buffer.alloc((width * channels + 1) * height);
   for (let y = 0; y < height; y++) {
-    const row = y * (width * 3 + 1);
+    const row = y * (width * channels + 1);
     raw[row] = 0;
     for (let x = 0; x < width; x++) {
-      const [r, g, b] = pixel(x, y);
-      raw[row + 1 + x * 3] = r;
-      raw[row + 2 + x * 3] = g;
-      raw[row + 3 + x * 3] = b;
+      const color = pixel(x, y);
+      for (let c = 0; c < channels; c++) raw[row + 1 + x * channels + c] = Math.round(color[c] ?? 255);
     }
   }
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
-  header[9] = 2;
+  header[9] = alpha ? 6 : 2;
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', header),

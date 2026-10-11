@@ -6,6 +6,7 @@ dist/
 gui/dist/
 desktop/dist/
 desktop/core/
+desktop/gui/
 desktop/release/
 release/
 .vite/

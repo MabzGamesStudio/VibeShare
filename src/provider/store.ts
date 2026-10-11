@@ -190,9 +190,43 @@ export class ContentStore {
     for (const id of unique) this.index.data.chunks[id].refs++;
     const text = JSON.stringify(manifest);
     this.index.data.manifests[cid] = text;
-    for (const backend of this.sortedBackends().filter((b) => b.writable).slice(0, 1)) {
-      backend.put(`m-${cid}`, Buffer.from(text)).catch(() => undefined);
+    // Manifests are tiny; keeping copies next to the chunks lets another node (or a
+    // reinstall) pointed at the same storage recover the content.
+    const writable = this.sortedBackends().filter((b) => b.writable).slice(0, Math.max(1, this.options.replication()));
+    await Promise.all(writable.map((backend) => backend.put(`m-${cid}`, Buffer.from(text)).catch(() => undefined)));
+    const record: ContentRecord = {
+      cid,
+      name: manifest.name,
+      mime: manifest.mime,
+      size: manifest.size,
+      chunks: manifest.chunks.length,
+      title: manifest.meta?.title,
+      creator: manifest.creator?.id,
+      uploader,
+      createdAt: new Date().toISOString(),
+      downloads: 0,
+      bytesServed: 0,
+      creditsEarned: 0,
+    };
+    this.index.data.contents[cid] = record;
+    this.index.data.order.push(cid);
+    this.index.changed();
+    return record;
+  }
+
+  /**
+   * Registers content whose bytes live in the backends (a shared bucket, a mirror,
+   * another provider) without copying them first: chunks are fetched on demand.
+   */
+  adopt(manifest: Manifest, uploader: string): ContentRecord {
+    const cid = contentIdOf(manifest);
+    const existing = this.index.data.contents[cid];
+    if (existing) return existing;
+    for (const chunk of manifest.chunks) {
+      this.index.data.chunks[chunk.id] ??= { size: chunk.size, refs: 0, locations: {}, addedAt: Date.now() };
     }
+    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) this.index.data.chunks[id].refs++;
+    this.index.data.manifests[cid] = JSON.stringify(manifest);
     const record: ContentRecord = {
       cid,
       name: manifest.name,

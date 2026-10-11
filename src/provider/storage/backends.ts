@@ -3,7 +3,6 @@ import { mkdir, readFile, rename, rm, statfs, writeFile } from 'node:fs/promises
 import { isAbsolute, join } from 'node:path';
 import { request, RemoteError } from '../../shared/http.js';
 import { signS3Request } from './s3sign.js';
-import { sha256hex } from '../../shared/crypto.js';
 
 /**
  * Where a provider keeps blobs (chunks and manifests). A provider can use several
@@ -350,7 +349,7 @@ export class HttpBackend implements BlobBackend {
   }
 }
 
-/** Fetches chunks from another provider node. The constructor gets a fetcher bound to that node. */
+/** Reads chunks and manifests from another provider node (a pull-through mirror). */
 export class ProviderBackend implements BlobBackend {
   readonly type = 'provider';
   readonly writable = false;
@@ -363,17 +362,11 @@ export class ProviderBackend implements BlobBackend {
     throw new Error('Other providers are read-only backends');
   }
   async get(key: string) {
-    if (!key.startsWith('vc1')) return null;
+    if (!key.startsWith('vc1') && !key.startsWith('m-vs1')) return null;
     return this.fetchChunk(key);
   }
   async delete() {}
   async check() {
     return this.describe();
   }
-}
-
-/** Content hash check used after reading from any backend that is not trusted to return the right bytes. */
-export function matchesKey(key: string, data: Buffer, chunkIdOf: (data: Buffer) => string): boolean {
-  if (key.startsWith('vc1')) return chunkIdOf(data) === key;
-  return sha256hex(data).length > 0;
 }
