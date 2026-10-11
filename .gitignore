@@ -1,0 +1,28 @@
+# Dependencies
+**/node_modules/
+
+# Build outputs
+dist/
+gui/dist/
+desktop/dist/
+desktop/core/
+desktop/gui/
+desktop/release/
+release/
+.vite/
+
+# Node data created by running nodes locally
+.vibeshare/
+data/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+
+# Environment / Local Config
+.env
+.env.local
+.vscode/

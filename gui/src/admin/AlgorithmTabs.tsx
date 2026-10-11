@@ -1,0 +1,580 @@
+import { useCallback, useEffect, useState } from 'react';
+import { formatSource, parseContentId, sourceFromUrl } from '../../../src/shared/sources';
+import {
+  CREATOR_KIND_LABELS,
+  CREATOR_KINDS,
+  FORMAT_LABELS,
+  FORMATS,
+  RATING_LABELS,
+  RATINGS,
+  type CreatorKind,
+  type Format,
+  type Rating,
+} from '../../../src/shared/taxonomy';
+import { Loading, Modal } from '../components/ui';
+import { formatDuration, splitList, timeAgo } from '../util';
+import { admin, message } from './api';
+import { useToast } from './AdminApp';
+
+interface Submission {
+  id: string;
+  contentId: string;
+  accountId: string;
+  verifiedCreator?: string;
+  thumbnail?: string;
+  createdAt: string;
+  request: {
+    title: string;
+    description?: string;
+    format?: Format;
+    rating?: Rating;
+    topics?: string[];
+    tags?: string[];
+    creator?: { name?: string; kind?: CreatorKind };
+    providers?: string[];
+  };
+}
+
+interface Suggestion {
+  id: string;
+  contentId: string;
+  title?: string;
+  kind: string;
+  value: string;
+  votes: { account: string; reason: string; timestamp?: number }[];
+  createdAt: string;
+}
+
+function SubmissionCard({ submission, done }: { submission: Submission; done: () => void }) {
+  const r = submission.request;
+  const [title, setTitle] = useState(r.title);
+  const [format, setFormat] = useState<Format>(r.format ?? 'other');
+  const [rating, setRating] = useState<Rating>(r.rating ?? 'all');
+  const [tags, setTags] = useState((r.tags ?? []).join(', '));
+  const [topics, setTopics] = useState((r.topics ?? []).join(', '));
+  const [note, setNote] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const act = async (action: 'accept' | 'reject') => {
+    try {
+      await admin(`/v1/admin/submissions/${submission.id}/${action}`, {
+        body: action === 'accept' ? { title, format, rating, tags: splitList(tags), topics: splitList(topics), note } : { note },
+      });
+      done();
+    } catch (e) {
+      setError(message(e));
+    }
+  };
+
+  return (
+    <div className="card" style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 18 }}>
+      <div className="preview-thumb">{submission.thumbnail ? <img src={submission.thumbnail} alt="" /> : <span className="faint small">No thumbnail</span>}</div>
+      <div className="form-stack" style={{ gap: 10 }}>
+        <div className="row between">
+          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} style={{ fontWeight: 600 }} />
+        </div>
+        <div className="small muted">
+          {r.creator?.name ?? 'No creator name'} ({r.creator?.kind ?? 'unknown'}){' '}
+          {submission.verifiedCreator ? <span className="badge ok">key verified</span> : <span className="badge">unverified</span>} ·{' '}
+          {timeAgo(submission.createdAt)}
+        </div>
+        <div className="mono tiny faint">{submission.contentId}</div>
+        {r.description && <p className="small">{r.description}</p>}
+        <div className="form-grid">
+          <label className="field">
+            Format
+            <select value={format} onChange={(e) => setFormat(e.target.value as Format)}>
+              {FORMATS.map((f) => (
+                <option key={f} value={f}>
+                  {FORMAT_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Rating
+            <select value={rating} onChange={(e) => setRating(e.target.value as Rating)}>
+              {RATINGS.map((x) => (
+                <option key={x} value={x}>
+                  {RATING_LABELS[x]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Topics
+            <input type="text" value={topics} onChange={(e) => setTopics(e.target.value)} />
+          </label>
+          <label className="field">
+            Tags
+            <input type="text" value={tags} onChange={(e) => setTags(e.target.value)} />
+          </label>
+        </div>
+        {r.providers?.length ? <div className="tiny faint">Hosted on {r.providers.length} provider(s)</div> : null}
+        <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note to the submitter (optional)" />
+        {error && <div className="banner danger small">{error}</div>}
+        <div className="row">
+          <button className="primary" onClick={() => act('accept')}>
+            List it
+          </button>
+          <button onClick={() => act('reject')}>Reject</button>
+          <a className="link small" href={`/v1/content/${encodeURIComponent(submission.contentId)}`} target="_blank" rel="noreferrer">
+            raw
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Review() {
+  const [submissions, setSubmissions] = useState<Submission[] | null>(null);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ submissions: Submission[] }>('/v1/admin/submissions').then((r) => setSubmissions(r.submissions)).catch((e) => show(message(e)));
+    admin<{ suggestions: Suggestion[] }>('/v1/admin/suggestions').then((r) => setSuggestions(r.suggestions)).catch(() => undefined);
+  }, [show]);
+  useEffect(load, [load]);
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <h2>Submissions</h2>
+      {!submissions ? (
+        <Loading />
+      ) : submissions.length === 0 ? (
+        <p className="muted small">Nothing waiting.</p>
+      ) : (
+        submissions.map((submission) => <SubmissionCard key={submission.id} submission={submission} done={load} />)
+      )}
+      <h2 style={{ marginTop: 20 }}>Suggestions</h2>
+      {suggestions.length === 0 ? (
+        <p className="muted small">Nothing waiting.</p>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {suggestions.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <strong>
+                      {s.kind}: {s.value}
+                    </strong>{' '}
+                    on {s.title ?? s.contentId}
+                    {s.votes.map((vote, i) => (
+                      <div key={i} className="small muted">
+                        “{vote.reason}”{vote.timestamp !== undefined && <span className="badge">at {formatDuration(vote.timestamp)}</span>}
+                      </div>
+                    ))}
+                  </td>
+                  <td className="small">{s.votes.length} agree</td>
+                  <td>
+                    <div className="row">
+                      <button
+                        className="small primary"
+                        onClick={async () => {
+                          await admin(`/v1/admin/suggestions/${s.id}/accept`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        {s.kind === 'report' ? 'Block content' : 'Accept'}
+                      </button>
+                      <button
+                        className="small"
+                        onClick={async () => {
+                          await admin(`/v1/admin/suggestions/${s.id}/reject`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface Entry {
+  id: string;
+  sources: string[];
+  status: 'listed' | 'blocked';
+  reason?: string;
+  title: string;
+  description?: string;
+  format: Format;
+  rating: Rating;
+  topics: string[];
+  tags: string[];
+  language?: string;
+  creatorId?: string;
+  likes: number;
+  dislikes: number;
+  updatedAt: string;
+}
+
+const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', rating: 'all', topics: [], tags: [], status: 'listed' });
+
+function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClose: () => void; onSaved: () => void }) {
+  const [draft, setDraft] = useState(entry);
+  const [idText, setIdText] = useState(entry.id ? [entry.id, ...(entry.sources ?? [])].join('~') : '');
+  const [error, setError] = useState<string | null>(null);
+  const resolvedId = (() => {
+    const text = idText.trim();
+    if (parseContentId(text)) return text;
+    const source = sourceFromUrl(text);
+    return source ? formatSource(source) : '';
+  })();
+
+  const save = async () => {
+    try {
+      await admin('/v1/admin/content', {
+        method: 'PUT',
+        body: { ...draft, id: resolvedId, sources: undefined, likes: undefined, dislikes: undefined, updatedAt: undefined },
+      });
+      onSaved();
+    } catch (e) {
+      setError(message(e));
+    }
+  };
+
+  return (
+    <Modal
+      title={entry.id ? 'Edit entry' : 'Add content'}
+      onClose={onClose}
+      actions={
+        <button className="primary" onClick={save} disabled={!resolvedId || !draft.title}>
+          Save
+        </button>
+      }
+    >
+      <div className="form-stack">
+        <label className="field">
+          Content id or link
+          <input type="text" className="mono" value={idText} onChange={(e) => setIdText(e.target.value)} disabled={Boolean(entry.id)} placeholder="vs1… or https://youtube.com/watch?v=…" />
+          {resolvedId && resolvedId !== idText.trim() && <span className="hint">Id: {resolvedId}</span>}
+        </label>
+        <label className="field">
+          Title
+          <input type="text" value={draft.title ?? ''} onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
+        </label>
+        <label className="field">
+          Description
+          <textarea value={draft.description ?? ''} onChange={(e) => setDraft({ ...draft, description: e.target.value })} rows={3} />
+        </label>
+        <div className="form-grid">
+          <label className="field">
+            Status
+            <select value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as Entry['status'] })}>
+              <option value="listed">Listed (whitelist)</option>
+              <option value="blocked">Blocked (blacklist)</option>
+            </select>
+          </label>
+          <label className="field">
+            Format
+            <select value={draft.format} onChange={(e) => setDraft({ ...draft, format: e.target.value as Format })}>
+              {FORMATS.map((f) => (
+                <option key={f} value={f}>
+                  {FORMAT_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Rating
+            <select value={draft.rating} onChange={(e) => setDraft({ ...draft, rating: e.target.value as Rating })}>
+              {RATINGS.map((x) => (
+                <option key={x} value={x}>
+                  {RATING_LABELS[x]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Language
+            <input type="text" value={draft.language ?? ''} onChange={(e) => setDraft({ ...draft, language: e.target.value || undefined })} />
+          </label>
+        </div>
+        <label className="field">
+          Topics
+          <input type="text" defaultValue={(draft.topics ?? []).join(', ')} onBlur={(e) => setDraft({ ...draft, topics: splitList(e.target.value) })} />
+        </label>
+        <label className="field">
+          Tags
+          <input type="text" defaultValue={(draft.tags ?? []).join(', ')} onBlur={(e) => setDraft({ ...draft, tags: splitList(e.target.value) })} />
+        </label>
+        <label className="field">
+          Creator id
+          <input type="text" value={draft.creatorId ?? ''} onChange={(e) => setDraft({ ...draft, creatorId: e.target.value || undefined })} />
+        </label>
+        {draft.status === 'blocked' && (
+          <label className="field">
+            Reason shown to clients
+            <input type="text" value={draft.reason ?? ''} onChange={(e) => setDraft({ ...draft, reason: e.target.value })} />
+          </label>
+        )}
+        {error && <div className="banner danger small">{error}</div>}
+      </div>
+    </Modal>
+  );
+}
+
+function Catalog() {
+  const [q, setQ] = useState('');
+  const [status, setStatus] = useState('');
+  const [page, setPage] = useState<{ items: Entry[]; cursor?: string } | null>(null);
+  const [editing, setEditing] = useState<Partial<Entry> | null>(null);
+  const [provider, setProvider] = useState('');
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<{ items: Entry[]; cursor?: string }>(`/v1/admin/content?q=${encodeURIComponent(q)}&status=${status}`)
+      .then(setPage)
+      .catch((e) => show(message(e)));
+  }, [q, status, show]);
+  useEffect(load, [load]);
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="card form-stack">
+        <h3>Import from a provider</h3>
+        <p className="small muted">Queues everything a provider hosts for review. Nothing is listed until you accept it.</p>
+        <div className="row">
+          <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="vs:provider:vk1…@https://… or URL" style={{ flex: 1 }} />
+          <button
+            disabled={!provider.trim()}
+            onClick={async () => {
+              try {
+                const result = await admin<{ queued: number; skipped: number }>('/v1/admin/import', { body: { provider: provider.trim() } });
+                show(`Queued ${result.queued} for review (${result.skipped} already known)`);
+              } catch (e) {
+                show(message(e));
+              }
+            }}
+          >
+            Import
+          </button>
+        </div>
+      </div>
+      <div className="row">
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search titles or ids" style={{ flex: 1 }} />
+        <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 'auto' }}>
+          <option value="">All</option>
+          <option value="listed">Listed</option>
+          <option value="blocked">Blocked</option>
+        </select>
+        <button className="primary" onClick={() => setEditing(blankEntry())}>
+          Add content
+        </button>
+      </div>
+      <p className="hint">Ids that are not here are reported to clients as “unknown”.</p>
+      {!page ? (
+        <Loading />
+      ) : (
+        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+          <table className="table">
+            <tbody>
+              {page.items.map((entry) => (
+                <tr key={entry.id}>
+                  <td>
+                    <strong>{entry.title}</strong>
+                    <div className="mono tiny faint">{entry.id}</div>
+                    {entry.reason && <div className="tiny" style={{ color: 'var(--danger)' }}>{entry.reason}</div>}
+                  </td>
+                  <td>
+                    <span className={`badge ${entry.status === 'listed' ? 'ok' : 'danger'}`}>{entry.status}</span>
+                  </td>
+                  <td className="small">
+                    {FORMAT_LABELS[entry.format]} · {RATING_LABELS[entry.rating]}
+                  </td>
+                  <td className="small">
+                    👍 {entry.likes} · 👎 {entry.dislikes}
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button className="small" onClick={() => setEditing(entry)}>
+                        Edit
+                      </button>
+                      {entry.status === 'listed' ? (
+                        <button
+                          className="small danger"
+                          onClick={async () => {
+                            const reason = window.prompt('Reason (shown to clients)', 'Blocked by the operator');
+                            if (reason === null) return;
+                            await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}/block`, { body: { reason } }).catch((e) => show(message(e)));
+                            load();
+                          }}
+                        >
+                          Block
+                        </button>
+                      ) : (
+                        <button
+                          className="small"
+                          onClick={async () => {
+                            await admin('/v1/admin/content', { method: 'PUT', body: { id: entry.id, status: 'listed' } }).catch((e) => show(message(e)));
+                            load();
+                          }}
+                        >
+                          List
+                        </button>
+                      )}
+                      <button
+                        className="small"
+                        title="Forget it: clients see it as unknown"
+                        onClick={async () => {
+                          await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Forget
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <EntryEditor
+          entry={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+interface Creator {
+  id: string;
+  name: string;
+  kind: CreatorKind;
+  description?: string;
+  keys?: string[];
+  status: 'listed' | 'blocked';
+}
+
+function Creators() {
+  const [creators, setCreators] = useState<Creator[] | null>(null);
+  const [editing, setEditing] = useState<Partial<Creator> | null>(null);
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ creators: Creator[] }>('/v1/admin/creators').then((r) => setCreators(r.creators)).catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="row between">
+        <p className="small muted">People, companies and groups. Creators with a key id (vk1…) are proven by signatures; blocking a creator hides all their content.</p>
+        <button className="primary" onClick={() => setEditing({ id: '', name: '', kind: 'person', status: 'listed' })}>
+          Add creator
+        </button>
+      </div>
+      {!creators ? (
+        <Loading />
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {creators.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <strong>{c.name}</strong>
+                    <div className="mono tiny faint">{c.id}</div>
+                  </td>
+                  <td className="small">{CREATOR_KIND_LABELS[c.kind]}</td>
+                  <td>
+                    <span className={`badge ${c.status === 'listed' ? 'ok' : 'danger'}`}>{c.status}</span>
+                  </td>
+                  <td>
+                    <button className="small" onClick={() => setEditing(c)}>
+                      Edit
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <Modal
+          title={editing.id ? 'Edit creator' : 'Add creator'}
+          onClose={() => setEditing(null)}
+          actions={
+            <button
+              className="primary"
+              disabled={!editing.id || !editing.name}
+              onClick={async () => {
+                try {
+                  await admin('/v1/admin/creators', { method: 'PUT', body: editing });
+                  setEditing(null);
+                  load();
+                } catch (e) {
+                  show(message(e));
+                }
+              }}
+            >
+              Save
+            </button>
+          }
+        >
+          <div className="form-stack">
+            <label className="field">
+              Id <span className="hint">A key id (vk1…) or any name like name:my-studio</span>
+              <input type="text" className="mono" value={editing.id ?? ''} onChange={(e) => setEditing({ ...editing, id: e.target.value })} />
+            </label>
+            <label className="field">
+              Name
+              <input type="text" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            </label>
+            <div className="form-grid">
+              <label className="field">
+                Kind
+                <select value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value as CreatorKind })}>
+                  {CREATOR_KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {CREATOR_KIND_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                Status
+                <select value={editing.status} onChange={(e) => setEditing({ ...editing, status: e.target.value as Creator['status'] })}>
+                  <option value="listed">Listed</option>
+                  <option value="blocked">Blocked</option>
+                </select>
+              </label>
+            </div>
+            <label className="field">
+              Description
+              <textarea value={editing.description ?? ''} onChange={(e) => setEditing({ ...editing, description: e.target.value })} rows={3} />
+            </label>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+export function AlgorithmTabs({ tab }: { tab: string }) {
+  if (tab === 'review') return <Review />;
+  if (tab === 'catalog') return <Catalog />;
+  if (tab === 'creators') return <Creators />;
+  return null;
+}

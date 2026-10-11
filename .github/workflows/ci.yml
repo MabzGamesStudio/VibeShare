@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gui/package-lock.json
+      - run: npm ci
+      - run: npm --prefix gui ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  binary-smoke-test:
+    name: Standalone binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gui/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+      - run: npm ci && npm --prefix gui ci
+      - run: npm run binaries -- --targets linux-x64
+      - name: Start the demo network from the binary
+        run: |
+          ./release/vibeshare-*-linux-x64 demo --data ./demo-data --port 17700 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:17700/ >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:17701/v1/info | grep -q '"type":"provider"'
+          curl -sf http://127.0.0.1:17702/v1/info | grep -q '"type":"algorithm"'
+          curl -sf http://127.0.0.1:17700/ | grep -q '<title>VibeShare</title>'

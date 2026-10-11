@@ -1,0 +1,34 @@
+# A provider node and an algorithm node, with data in named volumes.
+#   docker compose up -d
+#   docker compose logs   # shows each node's reference and admin token
+# Set PUBLIC_HOST to the address clients use to reach this machine.
+services:
+  provider:
+    build: .
+    image: ghcr.io/mabzgamesstudio/vibeshare:latest
+    command: ['provider', '--public-url', 'http://${PUBLIC_HOST:-localhost}:7701']
+    ports: ['7701:7701']
+    volumes: ['provider-data:/data']
+    restart: unless-stopped
+
+  algorithm:
+    build: .
+    image: ghcr.io/mabzgamesstudio/vibeshare:latest
+    command: ['algorithm', '--public-url', 'http://${PUBLIC_HOST:-localhost}:7702']
+    ports: ['7702:7702']
+    volumes: ['algorithm-data:/data']
+    restart: unless-stopped
+
+  # Optional: S3-compatible storage for the provider. Add it as a backend in the
+  # provider config (storage.backends) with endpoint http://minio:9000.
+  # minio:
+  #   image: minio/minio
+  #   command: server /data --console-address :9001
+  #   environment: { MINIO_ROOT_USER: vibeshare, MINIO_ROOT_PASSWORD: change-me-please }
+  #   volumes: ['minio-data:/data']
+  #   ports: ['9001:9001']
+
+volumes:
+  provider-data:
+  algorithm-data:
+  # minio-data:

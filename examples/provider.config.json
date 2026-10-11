@@ -1,0 +1,100 @@
+{
+  "name": "Example CDN",
+  "description": "Videos and music for everyone. 100 MiB free every day.",
+  "publicUrl": "https://cdn.example.org",
+  "contact": "ops@example.org",
+  "host": "0.0.0.0",
+  "port": 7701,
+  "trustProxy": true,
+  "signup": { "grant": 500, "powBits": 18, "anonymous": true, "perIpPerHour": 20 },
+  "peers": ["vs:algorithm:vk1REPLACE_WITH_REAL_KEY@https://feed.example.org"],
+  "pricing": {
+    "manifest": 0,
+    "perMiB": 2,
+    "freeMiBPerDay": 100,
+    "creatorShare": 0.3,
+    "upload": { "mode": "paid", "perMiB": 1, "maxBytes": 8589934592 },
+    "overrides": {}
+  },
+  "storage": {
+    "replication": 2,
+    "cacheMiB": 512,
+    "cacheFetched": true,
+    "usePeers": true,
+    "backends": [
+      { "id": "disk", "type": "local", "path": "blobs", "priority": 1 },
+      {
+        "id": "r2",
+        "type": "s3",
+        "priority": 2,
+        "endpoint": "https://ACCOUNT_ID.r2.cloudflarestorage.com",
+        "region": "auto",
+        "bucket": "vibeshare",
+        "accessKeyId": "R2_ACCESS_KEY_ID",
+        "secretAccessKey": "R2_SECRET_ACCESS_KEY"
+      },
+      {
+        "id": "b2",
+        "type": "s3",
+        "priority": 3,
+        "endpoint": "https://s3.us-west-004.backblazeb2.com",
+        "region": "us-west-004",
+        "bucket": "vibeshare-backup",
+        "accessKeyId": "B2_KEY_ID",
+        "secretAccessKey": "B2_APPLICATION_KEY"
+      },
+      { "id": "nextcloud", "type": "webdav", "priority": 4, "url": "https://cloud.example.org/remote.php/dav/files/me/vibeshare", "username": "me", "password": "app-password" },
+      { "id": "ipfs", "type": "ipfs", "priority": 5, "apiUrl": "http://127.0.0.1:5001", "gatewayUrl": "http://127.0.0.1:8080" },
+      { "id": "old-mirror", "type": "http", "priority": 8, "baseUrl": "https://mirror.example.net/chunks" },
+      { "id": "friend", "type": "provider", "priority": 9, "ref": "vs:provider:vk1REPLACE_WITH_REAL_KEY@https://friend-cdn.example.com" }
+    ]
+  },
+  "catalog": true,
+  "storageService": {
+    "enabled": true,
+    "challengeIntervalSeconds": 900,
+    "minPassRatio": 0.8,
+    "offlineGraceSeconds": 120,
+    "taskTimeoutSeconds": 30,
+    "auto": {
+      "enabled": true,
+      "replicas": 3,
+      "durationDays": 30,
+      "rewards": { "upfront": 5, "perRetrieval": 1, "perChallenge": 1, "completion": 30 },
+      "requireIdentity": true
+    }
+  },
+  "payments": [
+    { "id": "voucher", "type": "voucher" },
+    {
+      "id": "usdc-base",
+      "type": "evm",
+      "label": "USDC on Base",
+      "network": "Base",
+      "chainId": 8453,
+      "rpcUrl": "https://mainnet.base.org",
+      "address": "0xYOUR_WALLET_ADDRESS",
+      "currency": "USDC",
+      "decimals": 6,
+      "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "creditsPerCoin": 1000,
+      "confirmations": 3,
+      "minCredits": 1000
+    },
+    { "id": "eth", "type": "evm", "network": "Ethereum", "chainId": 1, "rpcUrl": "https://eth.llamarpc.com", "address": "0xYOUR_WALLET_ADDRESS", "currency": "ETH", "decimals": 18, "creditsPerCoin": 3000000, "confirmations": 6 },
+    { "id": "btc", "type": "bitcoin", "apiUrl": "https://mempool.space/api", "address": "bc1qYOUR_ADDRESS", "creditsPerCoin": 60000000, "confirmations": 1 },
+    { "id": "sol", "type": "solana", "rpcUrl": "https://api.mainnet-beta.solana.com", "address": "YOUR_SOLANA_ADDRESS", "currency": "SOL", "creditsPerCoin": 150000 },
+    { "id": "lightning", "type": "lightning", "lnbitsUrl": "https://legend.lnbits.com", "invoiceKey": "LNBITS_INVOICE_KEY", "creditsPerCoin": 60000000 },
+    {
+      "id": "card",
+      "type": "checkout",
+      "label": "Card (Stripe)",
+      "format": "stripe",
+      "checkoutUrl": "https://buy.stripe.com/YOUR_PAYMENT_LINK?client_reference_id={invoice}",
+      "secret": "whsec_YOUR_STRIPE_WEBHOOK_SECRET",
+      "creditsPerUnit": 1000,
+      "currency": "USD"
+    },
+    { "id": "paypal", "type": "manual", "label": "PayPal", "instructions": "Send the amount to pay@example.org with the note {invoice}. Credits arrive once we confirm it." }
+  ]
+}

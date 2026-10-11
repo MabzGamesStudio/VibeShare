@@ -1,0 +1,32 @@
+{
+  "name": "vibeshare",
+  "version": "0.1.0",
+  "description": "A decentralized file sharing and streaming network: client, content provider and search algorithm nodes.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "vibeshare": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build:node && npm run build:gui",
+    "build:node": "tsc -p tsconfig.json",
+    "build:gui": "npm --prefix gui run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tests/tsconfig.json --noEmit && npm --prefix gui run typecheck",
+    "test": "tsx --test tests/*.test.ts",
+    "start": "npm run build && node dist/cli.js client --open",
+    "client": "tsx src/cli.ts client",
+    "provider": "tsx src/cli.ts provider",
+    "algorithm": "tsx src/cli.ts algorithm",
+    "demo": "tsx src/cli.ts demo",
+    "binaries": "tsx scripts/build-binaries.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
