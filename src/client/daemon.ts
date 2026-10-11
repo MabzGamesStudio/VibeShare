@@ -432,8 +432,9 @@ export class ClientNode {
 
     // Discovery
     r.post('/api/feed', async (ctx) => {
-      const body = await readJson<{ cursor?: string; seed?: string }>(ctx.req);
-      return this.collect('feed', { preferences: this.settings.preferences, seed: body.seed }, body.cursor);
+      const body = await readJson<{ cursor?: string; seed?: string; formats?: Preferences['formats'] }>(ctx.req);
+      const preferences = body.formats?.length ? { ...this.settings.preferences, formats: body.formats } : this.settings.preferences;
+      return this.collect('feed', { preferences, seed: body.seed }, body.cursor);
     });
     r.post('/api/search', async (ctx) => {
       const body = await readJson<{ query?: string; filters?: Preferences & { creator?: string }; sort?: string; cursor?: string }>(ctx.req);

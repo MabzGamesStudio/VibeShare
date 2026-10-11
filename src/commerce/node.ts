@@ -87,7 +87,7 @@ export abstract class BaseNode<C extends BaseConfig> {
 
   constructor(
     readonly type: NodeType,
-    defaults: C,
+    private readonly defaults: C,
     protected readonly options: NodeOptions<C>
   ) {
     const dir = options.dataDir;
@@ -213,7 +213,8 @@ export abstract class BaseNode<C extends BaseConfig> {
     router.put('/v1/admin/config', async (ctx) => {
       this.requireAdmin(ctx);
       const patch = await readJson(ctx.req);
-      const next = deepMerge(this.configFile.data, patch);
+      // ?replace=1 takes the body as the whole config (missing keys fall back to defaults).
+      const next = ctx.query.get('replace') === '1' ? deepMerge(this.defaults, patch) : deepMerge(this.configFile.data, patch);
       this.validateConfig(next);
       for (const method of next.payments) {
         if (!method.id || !method.type) throw badRequest('Every payment method needs an id and a type');
