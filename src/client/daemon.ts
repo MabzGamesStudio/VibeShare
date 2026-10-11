@@ -455,11 +455,19 @@ export class ClientNode {
       if (!thumb) {
         const entry = node(ctx);
         const response = await this.nodes.client(entry).fetch(`/v1/thumbnails/${encodeURIComponent(ctx.params.key)}`, { auth: false });
-        thumb = { type: response.headers.get('content-type') ?? 'image/jpeg', data: Buffer.from(await response.arrayBuffer()) };
+        const type = response.headers.get('content-type') ?? '';
+        const safeType = ['image/jpeg', 'image/png', 'image/webp'].find((allowed) => type.startsWith(allowed)) ?? 'application/octet-stream';
+        thumb = { type: safeType, data: Buffer.from(await response.arrayBuffer()) };
         this.thumbs.set(cacheKey, thumb);
         if (this.thumbs.size > 500) this.thumbs.delete(this.thumbs.keys().next().value!);
       }
-      ctx.res.writeHead(200, { 'content-type': thumb.type, 'content-length': thumb.data.length, 'cache-control': 'private, max-age=86400' });
+      ctx.res.writeHead(200, {
+        'content-type': thumb.type,
+        'content-length': thumb.data.length,
+        'cache-control': 'private, max-age=86400',
+        'content-security-policy': "sandbox; default-src 'none'",
+        'x-content-type-options': 'nosniff',
+      });
       ctx.res.end(thumb.data);
     });
     r.get('/api/source', (ctx) => {

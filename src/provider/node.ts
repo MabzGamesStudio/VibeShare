@@ -346,6 +346,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         'content-type': 'application/octet-stream',
         'content-length': data.length,
         'cache-control': 'private, max-age=31536000, immutable',
+        'x-content-type-options': 'nosniff',
         'x-vs-charged': String(charged),
         ...(balance !== undefined ? { 'x-vs-balance': String(balance) } : {}),
       });

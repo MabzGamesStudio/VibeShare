@@ -91,6 +91,8 @@ describe('a client using a provider and an algorithm node', async () => {
     assert.equal(range.headers.get('content-range'), `bytes ${MiB - 10}-${MiB + 9}/${video.length}`);
     assert.deepEqual(Buffer.from(await range.arrayBuffer()), video.subarray(MiB - 10, MiB + 10));
     const whole = await fetch(client.url() + view.streamUrl!);
+    assert.match(whole.headers.get('content-security-policy') ?? '', /^sandbox;/, 'untrusted content never runs in the daemon origin');
+    assert.equal(whole.headers.get('x-content-type-options'), 'nosniff');
     assert.deepEqual(Buffer.from(await whole.arrayBuffer()), video);
     const state = await api<{ nodes: NodeEntry[] }>('/api/state');
     const balance = state.nodes.find((n) => n.id === provider.identity.id)!.balance;

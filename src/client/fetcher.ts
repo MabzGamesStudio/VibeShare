@@ -130,7 +130,14 @@ export class Fetcher {
       'accept-ranges': 'bytes',
       'content-length': size === 0 ? 0 : end - start + 1,
       'cache-control': 'private, max-age=3600',
+      // Content comes from strangers and is served from the daemon's origin: if an HTML or
+      // SVG file is ever opened directly, it runs sandboxed, without scripts or access to the API.
+      'x-content-type-options': 'nosniff',
     };
+    // (Browsers refuse to show PDFs in a sandbox; their viewer does not run page scripts in our origin.)
+    if (manifest.mime !== 'application/pdf') {
+      headers['content-security-policy'] = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; media-src 'self'";
+    }
     if (partial) headers['content-range'] = `bytes ${start}-${end}/${size}`;
     if (download) headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(manifest.name)}`;
     if (size === 0) {
