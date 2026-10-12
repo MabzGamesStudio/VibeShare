@@ -157,3 +157,47 @@ export function shareLink(baseUrl: string, contentId: string, providerHint?: str
 export function newPageId(): string {
   return `p-${Math.random().toString(36).slice(2, 10)}`;
 }
+
+const LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'];
+const SOURCES = ['feed', 'search', 'subscriptions'];
+
+/**
+ * Applies a settings change, checking every value. Throws an Error whose message is
+ * meant for the user when something is invalid.
+ */
+export function applySettingsPatch(current: Settings, patch: Partial<Settings>): Settings {
+  const next = normalizeSettings({
+    ...current,
+    ...patch,
+    preferences: { ...current.preferences, ...(patch.preferences ?? {}) },
+    profile: { ...current.profile, ...(patch.profile ?? {}) },
+    storageService: { ...current.storageService, ...(patch.storageService ?? {}) },
+    pages: patch.pages ?? current.pages,
+  });
+  if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
+  if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
+  next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
+  next.storageService.quotaGiB = Math.max(0, Number(next.storageService.quotaGiB) || 0);
+  try {
+    const url = new URL(next.shareBaseUrl);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error();
+    next.shareBaseUrl = next.shareBaseUrl.replace(/\/+$/, '');
+  } catch {
+    throw new Error('The share link address must be an http(s) URL');
+  }
+  if (next.pages.length > 50) throw new Error('At most 50 pages');
+  const ids = new Set<string>();
+  for (const page of next.pages) {
+    if (!/^[a-z0-9-]{1,40}$/.test(page.id) || ids.has(page.id)) throw new Error(`Bad or duplicate page id ${page.id}`);
+    ids.add(page.id);
+    page.title = String(page.title ?? '').trim().slice(0, 40) || 'Untitled';
+    if (!LAYOUTS.includes(page.layout)) throw new Error(`Unknown layout ${page.layout}`);
+    if (!SOURCES.includes(page.source)) throw new Error(`Unknown content source ${page.source}`);
+    if (page.query !== undefined) page.query = String(page.query).slice(0, 200);
+    page.fields = [...new Set(page.fields)].slice(0, 20);
+    page.options.columns = Math.min(8, Math.max(0, Math.round(Number(page.options.columns) || 0)));
+    if (!['small', 'medium', 'large'].includes(page.options.size)) page.options.size = 'medium';
+    if (page.filters.maxRating && !RATINGS.includes(page.filters.maxRating)) delete page.filters.maxRating;
+  }
+  return next;
+}

@@ -266,6 +266,8 @@ export function embedFor(source: ExternalSource, options: EmbedOptions = {}): Em
           loop: options.loop ? '1' : undefined,
           playlist: options.loop ? value : undefined,
           rel: options.autoplay ? '0' : undefined,
+          // Lets the page pause, play and unmute the player by message.
+          enablejsapi: options.autoplay ? '1' : undefined,
         })}`,
         page: `https://www.youtube.com/watch?v=${id}`,
         label,

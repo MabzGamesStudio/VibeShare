@@ -3,7 +3,8 @@ import { useParams } from 'react-router-dom';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
 import { api, errorMessage } from '../api';
-import { ContentCard } from '../components/ContentCard';
+import { GridLayout } from '../components/feed/Cards';
+import { CARD_PAGE } from '../components/Feed';
 import { Avatar, CopyButton, Empty, Loading } from '../components/ui';
 import { useApp } from '../state';
 
@@ -56,11 +57,7 @@ export function CreatorPage() {
         </div>
       </div>
       {view.items.length ? (
-        <div className="grid">
-          {view.items.map((item) => (
-            <ContentCard key={item.id} item={item} />
-          ))}
-        </div>
+        <GridLayout items={view.items} page={CARD_PAGE} />
       ) : (
         <Empty title="No content listed">
           <p>None of your algorithm nodes lists content by this creator.</p>

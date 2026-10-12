@@ -9,6 +9,8 @@ import type {
   FeedItem,
   FeedResponse,
   NodeEntry,
+  PageFilters,
+  PageSource,
   PublishRequest,
   Settings,
 } from '../shared/clientapi.js';
@@ -39,7 +41,8 @@ import {
   type Page,
   type Preferences,
 } from '../shared/protocol.js';
-import { embedFor, formatSource, parseContentId, parseSource, sourceFromUrl, withSources } from '../shared/sources.js';
+import { embedFor, formatSource, parseContentId, parseSource, platformOf, sourceFromUrl, withSources } from '../shared/sources.js';
+import { applySettingsPatch, pagePreferences } from '../shared/clientdefaults.js';
 import { ensureDir } from '../shared/store.js';
 import { ChunkCache } from './cache.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -169,12 +172,14 @@ export class ClientNode {
   }
 
   private feedItem(node: NodeEntry, item: ContentItem): FeedItem {
-    const key = item.thumbnail?.split('/').pop();
+    // Thumbnails the algorithm node stores are proxied; those of discovered content are on the platform.
+    const remote = item.thumbnail && /^https?:\/\//.test(item.thumbnail) ? item.thumbnail : undefined;
+    const key = !remote ? item.thumbnail?.split('/').pop() : undefined;
     return {
       ...item,
       via: node.id,
       viaName: node.name,
-      thumbnailUrl: key ? `/api/thumb/${node.id}/${key}?t=${this.token}` : undefined,
+      thumbnailUrl: remote ?? (key ? `/api/thumb/${node.id}/${key}?t=${this.token}` : undefined),
     };
   }
 
@@ -321,10 +326,16 @@ export class ClientNode {
       }
     }
     const host = this.loopbackOnly() ? 'localhost' : this.host;
-    view.embeds = (parseContentId(view.id)?.sources ?? sources).map((source) => ({
+    const all = parseContentId(view.id)?.sources ?? sources;
+    view.embeds = all.map((source) => ({
       ...embedFor(source, { ipfsGateway: this.settings.ipfsGateway, parentHost: host }),
       source,
     }));
+    // Media the platform serves directly (an image, an mp4) beats an embedded player.
+    const media = view.item?.media;
+    if (media && all[0] && /^https?:\/\//.test(media.url)) {
+      view.embeds.unshift({ kind: media.type, src: media.url, page: view.item?.pageUrl ?? view.embeds[0]?.page ?? media.url, label: platformOf(view.id).name, source: all[0] });
+    }
     return view;
   }
 
@@ -343,20 +354,29 @@ export class ClientNode {
     return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subscription?.kind ?? 'unknown' }, items: [] };
   }
 
+  browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
+    const preferences = pagePreferences(this.settings.preferences, body.filters);
+    if (body.source === 'search') {
+      const sort = body.sort ?? body.filters?.sort;
+      return this.collect('search', { query: String(body.query ?? ''), filters: preferences, sort }, body.cursor);
+    }
+    if (body.source === 'subscriptions') {
+      const creators = this.store.data.data.subscriptions.map((s) => s.id);
+      if (!creators.length) return Promise.resolve({ items: [], errors: [] });
+      return this.collect('latest', { creators, preferences }, body.cursor);
+    }
+    return this.collect('feed', { preferences, seed: body.seed }, body.cursor);
+  }
+
   private updateSettings(patch: Partial<Settings>): Settings {
     const current = this.settings;
     const wasEnabled = current.storageService.enabled;
-    const next: Settings = {
-      ...current,
-      ...patch,
-      preferences: { ...current.preferences, ...(patch.preferences ?? {}) },
-      profile: { ...current.profile, ...(patch.profile ?? {}) },
-      storageService: { ...current.storageService, ...(patch.storageService ?? {}) },
-    };
-    if (!['blend', 'primary'].includes(next.feedMode)) throw badRequest('feedMode is blend or primary');
-    if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw badRequest('unknownContent is warn, hide or allow');
-    next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
-    next.storageService.quotaGiB = Math.max(0, Number(next.storageService.quotaGiB) || 0);
+    let next: Settings;
+    try {
+      next = applySettingsPatch(current, patch);
+    } catch (error) {
+      throw badRequest((error as Error).message);
+    }
     this.store.data.data.settings = next;
     this.store.changed();
     if (next.storageService.enabled && !wasEnabled) this.worker.start();
@@ -440,6 +460,11 @@ export class ClientNode {
       const body = await readJson<{ query?: string; filters?: Preferences & { creator?: string }; sort?: string; cursor?: string }>(ctx.req);
       const filters = { ...this.settings.preferences, ...Object.fromEntries(Object.entries(body.filters ?? {}).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length))) };
       return this.collect('search', { query: String(body.query ?? ''), filters, sort: body.sort }, body.cursor);
+    });
+    // One endpoint for every page: its source, query and filters, within the user's preferences.
+    r.post('/api/browse', async (ctx) => {
+      const body = await readJson<{ source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }>(ctx.req);
+      return this.browse(body);
     });
     r.post('/api/subscriptions/feed', async (ctx) => {
       const body = await readJson<{ cursor?: string }>(ctx.req);

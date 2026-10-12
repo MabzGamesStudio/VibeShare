@@ -12,8 +12,9 @@ import {
   ThumbsUp,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { ContentView, NodeEntry } from '../../../src/shared/clientapi';
+import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
 import {
   CREATOR_KIND_LABELS,
@@ -27,6 +28,7 @@ import {
 import { api, errorMessage } from '../api';
 import { FormatIcon } from '../components/ContentCard';
 import { Markdown } from '../markdown';
+import { ShareButton } from '../components/Share';
 import { Avatar, CopyButton, Loading, Modal, Spinner } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, timeAgo } from '../util';
@@ -178,7 +180,15 @@ function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: n
 }
 
 function Unavailable({ view, onAdded }: { view: ContentView; onAdded: () => void }) {
-  const { toast, refresh } = useApp();
+  const { toast, refresh, providers } = useApp();
+  // A shared link can name the provider that hosts the content (?p=<reference>).
+  const [params] = useSearchParams();
+  const hint = params.get('p');
+  const hinted = hint ? parseNodeRef(hint) : null;
+  const suggested = [...view.suggestedProviders];
+  if (hint && hinted?.type === 'provider' && !providers.some((node) => node.id === hinted.id || node.url === hinted.url) && !suggested.includes(hint)) {
+    suggested.unshift(hint);
+  }
   const add = async (ref: string) => {
     try {
       const result = await api<{ added: NodeEntry[]; errors: { error: string }[] }>('/api/nodes', { body: { text: ref } });
@@ -203,10 +213,10 @@ function Unavailable({ view, onAdded }: { view: ContentView; onAdded: () => void
             </div>
           ))}
         </div>
-        {view.suggestedProviders.length > 0 && (
+        {suggested.length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <p className="small">The algorithm node says these providers host it:</p>
-            {view.suggestedProviders.map((ref) => (
+            <p className="small">These providers host it:</p>
+            {suggested.map((ref) => (
               <div key={ref} className="row" style={{ marginTop: 8, justifyContent: 'center' }}>
                 <code className="tiny">{ref.length > 48 ? ref.slice(0, 48) + '…' : ref}</code>
                 <button className="small" onClick={() => add(ref)}>
@@ -529,6 +539,7 @@ export function WatchPage() {
                 <Download size={16} /> Download
               </a>
             )}
+            <ShareButton target={{ id: view.id, title }} className="" label="Share" />
             <CopyButton text={view.id} label="Copy id" small={false} />
           </div>
 
