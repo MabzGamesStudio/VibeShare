@@ -57,7 +57,8 @@ export async function startAlgorithm(overrides: DeepPartial<AlgorithmConfig> = {
   const node = new AlgorithmNode({
     dataDir,
     adminToken: ADMIN,
-    overrides: { host: '127.0.0.1', port: 0, ...overrides } as DeepPartial<AlgorithmConfig>,
+    // The crawler stays off unless a test turns it on: tests never reach the real internet.
+    overrides: { host: '127.0.0.1', port: 0, ...overrides, crawler: { enabled: false, ...overrides.crawler } } as DeepPartial<AlgorithmConfig>,
   });
   await node.start();
   return node;

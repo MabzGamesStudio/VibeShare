@@ -14,7 +14,7 @@ export interface Status {
   credits: { outstanding: number; earned: number; spent: number };
   content?: { contents: number; bytes: number; chunks: number };
   storageService?: { jobs: number; activeAssignments: number; onlineHolders: number };
-  registry?: { listed: number; blocked: number; creators: number };
+  registry?: { listed: number; blocked: number; creators: number; pending?: number; discovered?: number };
   pending?: { suggestions: number; submissions: number };
 }
 
@@ -548,6 +548,7 @@ export function AdminApp() {
       : ([
           ['review', `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions})` : ''}`],
           ['catalog', 'Catalog'],
+          ['crawler', 'Crawler'],
           ['creators', 'Creators'],
         ] as [string, string][])),
     ['accounts', 'Accounts'],

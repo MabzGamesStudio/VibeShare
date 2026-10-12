@@ -101,7 +101,9 @@ export interface AlgorithmInfo extends NodeInfoBase {
   rewards: AlgorithmRewards;
   ranking: { strategy: string; description: string };
   taxonomy: { topics: string[] };
-  stats: { listed: number; blocked: number; creators: number };
+  stats: { listed: number; blocked: number; creators: number; discovered?: number };
+  /** Whether the node finds content on other platforms by itself, and where. */
+  discovery?: { crawling: boolean; searchesPlatforms: boolean; platforms: string[] };
 }
 
 export type NodeInfo = ProviderInfo | AlgorithmInfo;
@@ -253,13 +255,32 @@ export interface ContentItem {
   language?: string;
   durationSeconds?: number;
   creator?: CreatorInfo;
-  /** Path of the thumbnail on the algorithm node (e.g. /v1/thumbnails/<id>). */
+  /**
+   * The thumbnail: a path on the algorithm node (/v1/thumbnails/<key>) for thumbnails it
+   * stores, or an absolute https URL for content discovered on other platforms.
+   */
   thumbnail?: string;
+  /** Directly displayable media of external content (an image, an mp4…), when the platform offers it. */
+  media?: ContentMedia;
+  /** The page of the content on its platform. */
+  pageUrl?: string;
+  /** How the algorithm node learnt about it. */
+  origin?: ContentOrigin;
   publishedAt: string;
-  stats: { likes: number; dislikes: number };
+  /** VibeShare votes on this node; views/platformLikes come from the original platform when known. */
+  stats: { likes: number; dislikes: number; views?: number; platformLikes?: number };
   /** Provider node references known to host the content. */
   providers?: string[];
   notes?: TagNote[];
+}
+
+export type ContentOrigin = 'operator' | 'submission' | 'crawler';
+
+export interface ContentMedia {
+  url: string;
+  type: 'image' | 'video' | 'audio';
+  width?: number;
+  height?: number;
 }
 
 export type LookupResult =

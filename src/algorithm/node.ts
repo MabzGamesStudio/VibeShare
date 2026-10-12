@@ -25,6 +25,8 @@ import { baseId, parseContentId } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
+import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
+import type { Discovered } from './crawler/types.js';
 import { Registry, type Entry } from './registry.js';
 
 export interface AlgorithmConfig extends BaseConfig {
@@ -42,6 +44,8 @@ export interface AlgorithmConfig extends BaseConfig {
   /** Topics offered to clients. */
   topics: string[];
   pageSize: number;
+  /** Finding content on other platforms (YouTube, PeerTube, Mastodon, Flickr…) by itself. */
+  crawler: CrawlerConfig;
 }
 
 export function algorithmDefaults(): AlgorithmConfig {
@@ -65,6 +69,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     policy: { maxRating: 'nsfw', defaultMaxRating: '18+', autoListSubmissions: false },
     topics: [...TOPICS],
     pageSize: 24,
+    crawler: crawlerDefaults(),
   };
 }
 
@@ -118,10 +123,38 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
   private contributions: JsonFile<ContributionData>;
 
+  readonly crawler: Crawler;
+  private lastPrune = 0;
+
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
     this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {} }));
+    this.crawler = new Crawler(() => this.config.crawler, this.path('crawler.json'), (items) => this.ingest(items));
+  }
+
+  /** Takes in what the crawler found, following the operator's policy. Returns how many entries are new. */
+  ingest(items: Discovered[]): number {
+    const config = this.config.crawler;
+    let added = 0;
+    for (const item of items) {
+      if (this.registry.upsertDiscovered(item, { autoList: config.autoList, defaultRating: config.defaultRating }) === 'added') added++;
+    }
+    if (added && Date.now() - this.lastPrune > 60_000) {
+      this.lastPrune = Date.now();
+      this.registry.prune(config.maxEntries);
+    }
+    return added;
+  }
+
+  async start(): Promise<void> {
+    await super.start();
+    this.crawler.start();
+  }
+
+  async stop(): Promise<void> {
+    this.crawler.stop();
+    await super.stop();
   }
 
   protected extraInfo(): Partial<AlgorithmInfo> {
@@ -135,7 +168,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         description: config.ranking.description ?? STRATEGY_DESCRIPTIONS[config.ranking.strategy],
       },
       taxonomy: { topics: config.topics },
-      stats: this.registry.stats(),
+      stats: (({ listed, blocked, creators, discovered }) => ({ listed, blocked, creators, discovered }))(this.registry.stats()),
+      discovery: {
+        crawling: config.crawler.enabled,
+        searchesPlatforms: config.crawler.enabled && config.crawler.searchPlatforms,
+        platforms: Object.entries(config.crawler.adapters)
+          .filter(([, adapter]) => adapter.enabled)
+          .map(([id]) => id),
+      },
     };
   }
 
@@ -194,6 +234,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const body = await readJson<SearchRequest>(ctx.req);
       if (typeof body.query !== 'string') throw badRequest('query is required');
       this.charge(ctx, this.config.pricing.search, 'search');
+      // The first page of a search also asks other platforms (briefly) for the query.
+      const query = body.query.trim();
+      if (!body.cursor && query && !/^(format|topic):/.test(query)) await this.crawler.search(query);
       const filters = this.preferencesOf(body.filters);
       let visible = this.registry.visible(filters, this.config.policy.maxRating);
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
@@ -510,6 +553,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       publishedAt: request.publishedAt,
       thumbnail: submission.hasThumbnail || undefined,
       creatorId,
+      origin: 'submission',
       ...overrides,
     });
     submission.status = 'accepted';
@@ -538,7 +582,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       admin(ctx);
       const body = await readJson<Partial<Entry> & { id: string; thumbnail?: string | boolean }>(ctx.req, 512 * 1024);
       const { thumbnail, ...rest } = body;
-      const entry = this.registry.upsert(rest);
+      // Whatever the operator touches is theirs: the crawler will not change it again.
+      const entry = this.registry.upsert({ ...rest, origin: rest.origin ?? 'operator' });
       if (typeof thumbnail === 'string') this.registry.setThumbnail(entry.id, thumbnail);
       return this.registry.get(entry.id);
     });
@@ -619,6 +664,45 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         return submission;
       }
       throw notFound();
+    });
+    router.get('/v1/admin/crawler', (ctx) => {
+      admin(ctx);
+      return this.crawler.status();
+    });
+    router.post('/v1/admin/crawler/run', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ adapter?: string; target?: string }>(ctx.req);
+      try {
+        return await this.crawler.runOnce(body.adapter, body.target);
+      } catch (error) {
+        throw new HttpError(502, 'crawl_failed', (error as Error).message);
+      }
+    });
+    router.post('/v1/admin/crawler/seeds', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ url?: string }>(ctx.req);
+      let url: URL;
+      try {
+        url = new URL(String(body.url ?? ''));
+      } catch {
+        throw badRequest('url must be an http(s) URL');
+      }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw badRequest('url must be an http(s) URL');
+      const seeds = this.configFile.data.crawler.adapters.web.seeds;
+      if (!seeds.includes(url.toString())) seeds.push(url.toString());
+      this.configFile.changed();
+      return { seeds };
+    });
+    router.post('/v1/admin/content/bulk', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ ids?: string[]; status?: 'listed' | 'blocked' | 'forget'; reason?: string }>(ctx.req, 4 * 1024 * 1024);
+      const ids = (body.ids ?? []).map(String).slice(0, 5000);
+      for (const id of ids) {
+        if (body.status === 'forget') this.registry.remove(id);
+        else if (body.status === 'blocked') this.registry.block(id, body.reason);
+        else if (body.status === 'listed') this.registry.upsert({ id, status: 'listed', origin: 'operator' });
+      }
+      return { updated: ids.length };
     });
     router.post('/v1/admin/import', async (ctx) => {
       admin(ctx);
@@ -711,5 +795,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     super.flush();
     this.registry.flush();
     this.contributions.flush();
+    this.crawler.flush();
   }
 }

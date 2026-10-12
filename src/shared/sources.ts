@@ -15,10 +15,14 @@ export const CHUNK_PREFIX = 'vc1';
 export type SourceScheme =
   | 'yt'
   | 'vimeo'
+  | 'dm'
   | 'sc'
   | 'spotify'
   | 'tiktok'
+  | 'ig'
   | 'x'
+  | 'bsky'
+  | 'masto'
   | 'twitch'
   | 'ia'
   | 'peertube'
@@ -33,10 +37,14 @@ export interface ExternalSource {
 export const SOURCE_LABELS: Record<SourceScheme, string> = {
   yt: 'YouTube',
   vimeo: 'Vimeo',
+  dm: 'Dailymotion',
   sc: 'SoundCloud',
   spotify: 'Spotify',
   tiktok: 'TikTok',
+  ig: 'Instagram',
   x: 'X (Twitter)',
+  bsky: 'Bluesky',
+  masto: 'Mastodon',
   twitch: 'Twitch',
   ia: 'Internet Archive',
   peertube: 'PeerTube',
@@ -137,6 +145,16 @@ export function sourceFromUrl(input: string): ExternalSource | null {
     if ((path[0] === 'shorts' || path[0] === 'embed' || path[0] === 'live') && path[1]) return { scheme: 'yt', value: path[1] };
   }
   if (host === 'youtu.be' && path[0]) return { scheme: 'yt', value: path[0] };
+  if (host === 'dailymotion.com' && (path[0] === 'video' || path[0] === 'embed') && path[path.length - 1]) {
+    return { scheme: 'dm', value: path[path.length - 1].split('_')[0] };
+  }
+  if (host === 'dai.ly' && path[0]) return { scheme: 'dm', value: path[0] };
+  if (host === 'instagram.com' && ['p', 'reel', 'reels', 'tv'].includes(path[0]) && path[1]) {
+    return { scheme: 'ig', value: `${path[0] === 'p' ? 'p' : 'reel'}/${path[1]}` };
+  }
+  if (host === 'bsky.app' && path[0] === 'profile' && path[2] === 'post' && path[1] && path[3]) {
+    return { scheme: 'bsky', value: `${path[1]}/${path[3]}` };
+  }
   if (host === 'vimeo.com' && path.length && /^\d+$/.test(path[path.length - 1])) {
     return { scheme: 'vimeo', value: path[path.length - 1] };
   }
@@ -165,6 +183,10 @@ export function sourceFromUrl(input: string): ExternalSource | null {
   }
   if (path[0] === 'w' && path[1] && /^([1-9A-HJ-NP-Za-km-z]{20,24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(path[1])) {
     return { scheme: 'peertube', value: `${url.host}/${path[1]}` };
+  }
+  // Mastodon (and compatible) posts: https://host/@user/123456789012345678
+  if (path.length === 2 && /^@[\w.]+$/.test(path[0]) && /^\d{6,20}$/.test(path[1])) {
+    return { scheme: 'masto', value: `${url.host}/${path[0]}/${path[1]}` };
   }
   if (path[0] === 'ipfs' && path[1]) return { scheme: 'ipfs', value: path.slice(1).join('/') };
   const subdomain = url.hostname.match(/^([a-z0-9]{46,})\.ipfs\./);
@@ -210,29 +232,81 @@ function kindFromPath(path: string): EmbedKind | null {
   return MEDIA_EXT[ext] ?? null;
 }
 
-/**
- * How the client shows an external source. `parentHost` is needed by Twitch, whose
- * player only loads inside pages it is told about.
- */
-export function embedFor(source: ExternalSource, options: { ipfsGateway?: string; parentHost?: string } = {}): Embed {
+export interface EmbedOptions {
+  ipfsGateway?: string;
+  /** Needed by Twitch, whose player only loads inside pages it is told about. */
+  parentHost?: string;
+  /** Start playing on load (players need `muted` for that in most browsers). */
+  autoplay?: boolean;
+  muted?: boolean;
+  loop?: boolean;
+}
+
+function query(params: Record<string, string | false | undefined>): string {
+  const pairs = Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
+  return pairs.length ? `?${pairs.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&')}` : '';
+}
+
+/** How the client shows an external source. */
+export function embedFor(source: ExternalSource, options: EmbedOptions = {}): Embed {
   const label = SOURCE_LABELS[source.scheme];
   const value = source.value;
   const gateway = (options.ipfsGateway ?? 'https://ipfs.io').replace(/\/$/, '');
+  const auto = options.autoplay ? '1' : undefined;
+  const mute = options.autoplay || options.muted ? (options.muted === false ? undefined : '1') : undefined;
   switch (source.scheme) {
-    case 'yt':
+    case 'yt': {
+      const id = encodeURIComponent(value);
       return {
         kind: 'iframe',
-        src: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(value)}`,
-        page: `https://www.youtube.com/watch?v=${encodeURIComponent(value)}`,
+        src: `https://www.youtube-nocookie.com/embed/${id}${query({
+          autoplay: auto,
+          mute,
+          playsinline: options.autoplay ? '1' : undefined,
+          loop: options.loop ? '1' : undefined,
+          playlist: options.loop ? value : undefined,
+          rel: options.autoplay ? '0' : undefined,
+        })}`,
+        page: `https://www.youtube.com/watch?v=${id}`,
         label,
       };
+    }
     case 'vimeo':
       return {
         kind: 'iframe',
-        src: `https://player.vimeo.com/video/${encodeURIComponent(value)}`,
+        src: `https://player.vimeo.com/video/${encodeURIComponent(value)}${query({ autoplay: auto, muted: mute, loop: options.loop ? '1' : undefined })}`,
         page: `https://vimeo.com/${encodeURIComponent(value)}`,
         label,
       };
+    case 'dm':
+      return {
+        kind: 'iframe',
+        src: `https://www.dailymotion.com/embed/video/${encodeURIComponent(value)}${query({ autoplay: auto, mute })}`,
+        page: `https://www.dailymotion.com/video/${encodeURIComponent(value)}`,
+        label,
+      };
+    case 'ig': {
+      const [kind, code] = value.split('/');
+      return {
+        kind: 'iframe',
+        src: `https://www.instagram.com/${kind}/${encodeURIComponent(code ?? '')}/embed`,
+        page: `https://www.instagram.com/${kind}/${encodeURIComponent(code ?? '')}/`,
+        label,
+      };
+    }
+    case 'bsky': {
+      const [actor, rkey] = value.split('/');
+      return {
+        kind: 'iframe',
+        src: `https://embed.bsky.app/embed/${actor}/app.bsky.feed.post/${rkey}`,
+        page: `https://bsky.app/profile/${actor}/post/${rkey}`,
+        label,
+      };
+    }
+    case 'masto': {
+      const page = `https://${value}`;
+      return { kind: 'iframe', src: `${page}/embed`, page, label };
+    }
     case 'sc': {
       const page = `https://soundcloud.com/${value}`;
       return { kind: 'iframe', src: `https://w.soundcloud.com/player/?url=${encodeURIComponent(page)}`, page, label };
@@ -249,7 +323,9 @@ export function embedFor(source: ExternalSource, options: { ipfsGateway?: string
     case 'tiktok':
       return {
         kind: 'iframe',
-        src: `https://www.tiktok.com/embed/v2/${encodeURIComponent(value)}`,
+        src: options.autoplay
+          ? `https://www.tiktok.com/player/v1/${encodeURIComponent(value)}${query({ autoplay: '1', muted: mute, loop: options.loop ? '1' : undefined })}`
+          : `https://www.tiktok.com/embed/v2/${encodeURIComponent(value)}`,
         page: `https://www.tiktok.com/video/${encodeURIComponent(value)}`,
         label,
       };
@@ -275,7 +351,7 @@ export function embedFor(source: ExternalSource, options: { ipfsGateway?: string
     case 'ia':
       return {
         kind: 'iframe',
-        src: `https://archive.org/embed/${encodeURIComponent(value)}`,
+        src: `https://archive.org/embed/${encodeURIComponent(value)}${query({ autoplay: auto })}`,
         page: `https://archive.org/details/${encodeURIComponent(value)}`,
         label,
       };
@@ -284,7 +360,7 @@ export function embedFor(source: ExternalSource, options: { ipfsGateway?: string
       const id = rest.join('/');
       return {
         kind: 'iframe',
-        src: `https://${host}/videos/embed/${id}`,
+        src: `https://${host}/videos/embed/${id}${query({ autoplay: auto, muted: mute, loop: options.loop ? '1' : undefined })}`,
         page: `https://${host}/w/${id}`,
         label,
       };
@@ -304,4 +380,51 @@ export function embedFor(source: ExternalSource, options: { ipfsGateway?: string
       return { kind: kindFromPath(new URL(page).pathname) ?? 'link', src: page, page, label };
     }
   }
+}
+
+/** Hosts of `url:` sources that deserve a proper platform name. */
+const HOST_NAMES: Record<string, string> = {
+  'flickr.com': 'Flickr',
+  'staticflickr.com': 'Flickr',
+  'commons.wikimedia.org': 'Wikimedia Commons',
+  'upload.wikimedia.org': 'Wikimedia Commons',
+  'wordpress.org': 'Openverse',
+  'openverse.org': 'Openverse',
+  'reddit.com': 'Reddit',
+  'imgur.com': 'Imgur',
+  'pixelfed.social': 'Pixelfed',
+  'unsplash.com': 'Unsplash',
+  'pexels.com': 'Pexels',
+  'bandcamp.com': 'Bandcamp',
+  'twitch.tv': 'Twitch',
+};
+
+export interface Platform {
+  /** Stable key, e.g. vibeshare, yt, flickr.com. */
+  key: string;
+  name: string;
+  /** Where the content lives on that platform. */
+  page?: string;
+}
+
+/**
+ * The platform a content id comes from: VibeShare for native content, otherwise the
+ * site of its source (YouTube, PeerTube, the host of a link…).
+ */
+export function platformOf(id: string): Platform {
+  const parsed = parseContentId(id);
+  if (!parsed || parsed.native) return { key: 'vibeshare', name: 'VibeShare' };
+  const source = parsed.sources[0];
+  const embed = embedFor(source);
+  if (source.scheme === 'url' || source.scheme === 'ipfs') {
+    let host = '';
+    try {
+      host = new URL(embed.page).hostname.replace(/^(www|m)\./, '');
+    } catch {
+      return { key: source.scheme, name: SOURCE_LABELS[source.scheme] };
+    }
+    const known = Object.keys(HOST_NAMES).find((name) => host === name || host.endsWith(`.${name}`));
+    return { key: known ?? host, name: known ? HOST_NAMES[known] : host || SOURCE_LABELS[source.scheme], page: embed.page || undefined };
+  }
+  return { key: source.scheme, name: SOURCE_LABELS[source.scheme], page: embed.page || undefined };
 }

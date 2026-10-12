@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { base32Decode, base32Encode } from '../shared/encoding.js';
 import { generateIdentity, identityFromSeed, type Identity } from '../shared/crypto.js';
 import type { HistoryItem, LibraryItem, NodeEntry, Settings, Subscription } from '../shared/clientapi.js';
+import { defaultSettings, normalizeSettings } from '../shared/clientdefaults.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
 import { JsonFile } from '../shared/store.js';
 
@@ -14,20 +15,7 @@ export interface ClientData {
   history: HistoryItem[];
 }
 
-export function defaultSettings(): Settings {
-  return {
-    preferences: { maxRating: '16+', formats: [], topics: [], blockedTags: [], blockedCreators: [], creatorKinds: [], languages: [] },
-    feedMode: 'blend',
-    unknownContent: 'warn',
-    defaultAuth: 'pseudonym',
-    autoplay: true,
-    cacheMiB: 1024,
-    ipfsGateway: 'https://ipfs.io',
-    profile: { name: '', kind: 'person' },
-    storageService: { enabled: false, quotaGiB: 5, providers: [] },
-    theme: 'system',
-  };
-}
+export { defaultSettings } from '../shared/clientdefaults.js';
 
 const SEED_PREFIX = 'vibeshare-seed-';
 
@@ -58,14 +46,7 @@ export class ClientStore {
       library: [],
       history: [],
     }));
-    const settings = defaultSettings();
-    this.data.data.settings = {
-      ...settings,
-      ...this.data.data.settings,
-      preferences: { ...settings.preferences, ...this.data.data.settings?.preferences },
-      profile: { ...settings.profile, ...this.data.data.settings?.profile },
-      storageService: { ...settings.storageService, ...this.data.data.settings?.storageService },
-    };
+    this.data.data.settings = normalizeSettings(this.data.data.settings);
     this.accounts = new JsonFile(this.path('accounts.json'), () => ({ accounts: {} }));
   }
 

@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { sha256hex } from '../shared/crypto.js';
 import { badRequest } from '../shared/http.js';
-import type { ContentItem, CreatorInfo, LookupResult, Preferences, SearchSort, TagNote } from '../shared/protocol.js';
+import type { ContentItem, ContentMedia, ContentOrigin, CreatorInfo, LookupResult, Preferences, SearchSort, TagNote } from '../shared/protocol.js';
+import type { Discovered } from './crawler/types.js';
 import { baseId, formatSource, parseContentId } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import {
@@ -23,7 +24,8 @@ export interface Entry {
   id: string;
   /** Fallback sources appended to the id given to clients. */
   sources: string[];
-  status: 'listed' | 'blocked';
+  /** pending: found by the crawler, waiting for review (clients see it as unknown). */
+  status: 'listed' | 'blocked' | 'pending';
   reason?: string;
   title: string;
   description?: string;
@@ -42,6 +44,15 @@ export interface Entry {
   likes: number;
   dislikes: number;
   notes: TagNote[];
+  /** How the entry got here. Entries without one predate the crawler (set by the operator). */
+  origin?: ContentOrigin;
+  /** Which crawler adapter found it. */
+  adapter?: string;
+  pageUrl?: string;
+  /** Remote thumbnail of discovered content. */
+  thumbnailUrl?: string;
+  media?: ContentMedia;
+  platformStats?: { views?: number; likes?: number };
 }
 
 export interface CreatorRecord extends CreatorInfo {
@@ -79,7 +90,8 @@ export class Registry {
     path: string | null,
     private readonly thumbDir: string | null
   ) {
-    this.store = new JsonFile<RegistryData>(path, () => ({ entries: {}, creators: {} }));
+    // Written at most every two seconds: the crawler keeps adding entries.
+    this.store = new JsonFile<RegistryData>(path, () => ({ entries: {}, creators: {} }), 2000);
     if (thumbDir) mkdirSync(thumbDir, { recursive: true });
   }
 
@@ -140,8 +152,14 @@ export class Registry {
       likes: existing?.likes ?? 0,
       dislikes: existing?.dislikes ?? 0,
       notes: input.notes ?? existing?.notes ?? [],
+      origin: input.origin ?? existing?.origin,
+      adapter: existing?.adapter,
+      pageUrl: input.pageUrl ?? existing?.pageUrl,
+      thumbnailUrl: input.thumbnailUrl ?? existing?.thumbnailUrl,
+      media: input.media ?? existing?.media,
+      platformStats: existing?.platformStats,
     };
-    if (entry.status === 'listed') delete entry.reason;
+    if (entry.status !== 'blocked') delete entry.reason;
     this.store.data.entries[entry.id] = entry;
     this.changed();
     return entry;
@@ -236,9 +254,17 @@ export class Registry {
         : entry.creatorId
           ? { id: entry.creatorId, name: entry.creatorId.slice(0, 12), kind: 'unknown' }
           : undefined,
-      thumbnail: entry.thumbnail ? `/v1/thumbnails/${this.thumbKey(entry.id)}` : undefined,
+      thumbnail: entry.thumbnail ? `/v1/thumbnails/${this.thumbKey(entry.id)}` : entry.thumbnailUrl,
+      media: entry.media,
+      pageUrl: entry.pageUrl,
+      origin: entry.origin,
       publishedAt: entry.publishedAt,
-      stats: { likes: entry.likes, dislikes: entry.dislikes },
+      stats: {
+        likes: entry.likes,
+        dislikes: entry.dislikes,
+        views: entry.platformStats?.views,
+        platformLikes: entry.platformStats?.likes,
+      },
       providers: entry.providers.length ? entry.providers : undefined,
       notes: entry.notes.length ? entry.notes : undefined,
     };
@@ -246,7 +272,7 @@ export class Registry {
 
   lookup(id: string): LookupResult {
     const entry = this.get(id);
-    if (!entry) return { id, status: 'unknown' };
+    if (!entry || entry.status === 'pending') return { id, status: 'unknown' };
     if (entry.status === 'blocked') return { id, status: 'blocked', reason: entry.reason };
     const creator = this.creator(entry.creatorId);
     if (creator?.status === 'blocked') return { id, status: 'blocked', reason: 'the creator is blocked' };
@@ -325,11 +351,92 @@ export class Registry {
     return results;
   }
 
-  stats(): { listed: number; blocked: number; creators: number } {
+  /**
+   * Stores content the crawler found. Entries the operator set (or creators submitted)
+   * are never overridden, only given a missing thumbnail or media; crawler entries are
+   * refreshed. Returns whether the entry is new.
+   */
+  upsertDiscovered(item: Discovered, policy: { autoList: boolean; defaultRating: Rating }): 'added' | 'known' | 'invalid' {
+    const parsed = parseContentId(item.id);
+    if (!parsed || !item.title) return 'invalid';
+    const now = new Date().toISOString();
+    const existing = this.store.data.entries[parsed.base];
+    if (existing) {
+      if (existing.origin === 'crawler') {
+        existing.thumbnailUrl = item.thumbnailUrl ?? existing.thumbnailUrl;
+        existing.media = item.media ?? existing.media;
+        existing.pageUrl = item.pageUrl ?? existing.pageUrl;
+        if (item.stats) existing.platformStats = { ...existing.platformStats, ...item.stats };
+        if (item.rating === 'nsfw') existing.rating = 'nsfw';
+      } else {
+        existing.thumbnailUrl ??= item.thumbnailUrl;
+        existing.media ??= item.media;
+        existing.pageUrl ??= item.pageUrl;
+      }
+      this.changed();
+      return 'known';
+    }
+    if (item.creator && !this.store.data.creators[item.creator.id]) {
+      this.store.data.creators[item.creator.id] = {
+        id: item.creator.id,
+        name: item.creator.name.slice(0, 120),
+        kind: item.creator.kind ?? 'unknown',
+        links: item.creator.url ? [item.creator.url] : undefined,
+        status: 'listed',
+        addedAt: now,
+      };
+    }
+    this.store.data.entries[parsed.base] = {
+      id: parsed.base,
+      sources: parsed.sources.map(formatSource).filter((source) => source !== parsed.base),
+      status: policy.autoList ? 'listed' : 'pending',
+      title: item.title.slice(0, 300),
+      description: item.description?.slice(0, 5000),
+      format: FORMATS.includes(item.format) ? item.format : 'other',
+      rating: item.rating ?? policy.defaultRating,
+      topics: cleanList(item.topics ?? []),
+      tags: cleanList(item.tags ?? [], 32),
+      language: item.language,
+      durationSeconds: item.durationSeconds,
+      creatorId: item.creator?.id,
+      providers: [],
+      publishedAt: item.publishedAt ?? now,
+      addedAt: now,
+      updatedAt: now,
+      likes: 0,
+      dislikes: 0,
+      notes: [],
+      origin: 'crawler',
+      adapter: item.adapter,
+      pageUrl: item.pageUrl,
+      thumbnailUrl: item.thumbnailUrl,
+      media: item.media,
+      platformStats: item.stats,
+    };
+    this.changed();
+    return 'added';
+  }
+
+  /** Keeps at most `max` crawler entries, dropping the oldest ones nobody voted on. */
+  prune(max: number): number {
+    const crawled = this.all().filter((entry) => entry.origin === 'crawler' && entry.status !== 'blocked');
+    if (crawled.length <= max) return 0;
+    const removable = crawled
+      .filter((entry) => entry.likes + entry.dislikes === 0)
+      .sort((a, b) => a.addedAt.localeCompare(b.addedAt))
+      .slice(0, crawled.length - max);
+    for (const entry of removable) delete this.store.data.entries[entry.id];
+    if (removable.length) this.changed();
+    return removable.length;
+  }
+
+  stats(): { listed: number; blocked: number; creators: number; pending: number; discovered: number } {
     const entries = this.all();
     return {
       listed: entries.filter((entry) => entry.status === 'listed').length,
       blocked: entries.filter((entry) => entry.status === 'blocked').length,
+      pending: entries.filter((entry) => entry.status === 'pending').length,
+      discovered: entries.filter((entry) => entry.origin === 'crawler').length,
       creators: Object.keys(this.store.data.creators).length,
     };
   }
