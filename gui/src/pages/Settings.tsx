@@ -1,8 +1,9 @@
-import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Pencil, Plus, RotateCcw, Share2, ShieldAlert, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Pencil, Plus, RotateCcw, Share2, Shield, ShieldAlert, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type Settings } from '../../../src/shared/clientapi';
+import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type Settings, type TorSettings } from '../../../src/shared/clientapi';
 import { DEFAULT_SHARE_BASE_URL, newPageId, presetPage, shareLink } from '../../../src/shared/clientdefaults';
+import { LANGUAGES } from '../../../src/shared/language';
 import {
   CREATOR_KIND_LABELS,
   CREATOR_KINDS,
@@ -158,6 +159,138 @@ function SharingCard() {
   );
 }
 
+const TOR_MODES: Record<TorSettings['mode'], { label: string; help: string }> = {
+  onion: {
+    label: 'Only for nodes at .onion addresses',
+    help: 'Nodes that are Tor onion services are reached through Tor; the others directly.',
+  },
+  all: {
+    label: 'For every node',
+    help: 'Nodes do not see your IP address. Requests go through the onion address of a node when it has one, and take longer.',
+  },
+  off: { label: 'Off', help: 'Nodes at .onion addresses cannot be reached.' },
+};
+
+function TorCard() {
+  const { state, updateSettings } = useApp();
+  const current = state?.settings.tor ?? { mode: 'onion' as const, proxy: '' };
+  const [proxy, setProxy] = useState(current.proxy);
+  const [check, setCheck] = useState<{ busy?: boolean; ok?: boolean; text?: string } | null>(null);
+  useEffect(() => setProxy(current.proxy), [current.proxy]);
+  if (!state) return null;
+  if (IS_STATIC) {
+    return (
+      <div className="card form-stack" id="tor">
+        <div className="row">
+          <Shield size={20} />
+          <h2>Tor</h2>
+        </div>
+        <p className="small muted">
+          To use VibeShare over Tor in a browser, open this page in Tor Browser: everything, including nodes at .onion addresses, then goes
+          through Tor. In the iPhone and iPad app, Orbot (in its VPN mode) sends the app's traffic through Tor. The desktop app and{' '}
+          <code>vibeshare client</code> can use Tor themselves.
+        </p>
+      </div>
+    );
+  }
+  const run = async () => {
+    setCheck({ busy: true });
+    try {
+      const result = await api<{ ok: boolean; proxy?: string; isTor?: boolean; ip?: string; error?: string }>('/api/tor/check', { method: 'POST' });
+      setCheck(
+        result.ok
+          ? { ok: true, text: `Connected through Tor at ${result.proxy} (exit address ${result.ip}).` }
+          : { ok: false, text: result.error ?? (result.proxy ? `${result.proxy} answers, but traffic does not leave through Tor.` : 'Tor was not found.') }
+      );
+    } catch (e) {
+      setCheck({ ok: false, text: errorMessage(e) });
+    }
+  };
+  return (
+    <div className="card form-stack" id="tor">
+      <div className="row">
+        <Shield size={20} />
+        <h2>Tor</h2>
+      </div>
+      <p className="small muted">
+        Send requests to nodes through <a className="link" href="https://www.torproject.org/download/" target="_blank" rel="noreferrer">Tor</a>{' '}
+        (the Tor service, or Tor Browser while it is open). Players and pictures from other platforms load in this window: in the desktop
+        app they go through Tor too when Tor is on for every node; in a browser, open VibeShare in Tor Browser for that.
+      </p>
+      <div className="form-grid">
+        <label className="field">
+          Use Tor
+          <select value={current.mode} onChange={(e) => void updateSettings({ tor: { ...current, mode: e.target.value as TorSettings['mode'] } })}>
+            {(['onion', 'all', 'off'] as const).map((mode) => (
+              <option key={mode} value={mode}>
+                {TOR_MODES[mode].label}
+              </option>
+            ))}
+          </select>
+          <span className="hint">{TOR_MODES[current.mode].help}</span>
+        </label>
+        <label className="field">
+          Tor address <span className="hint">Empty: found automatically (9050, or Tor Browser's 9150)</span>
+          <input
+            type="text"
+            value={proxy}
+            placeholder="127.0.0.1:9050"
+            spellCheck={false}
+            onChange={(e) => setProxy(e.target.value)}
+            onBlur={async () => {
+              if (proxy.trim() !== current.proxy && !(await updateSettings({ tor: { ...current, proxy: proxy.trim() } }))) setProxy(current.proxy);
+            }}
+          />
+        </label>
+      </div>
+      <div className="row" style={{ gap: 10 }}>
+        <button className="small" disabled={check?.busy} onClick={() => void run()}>
+          {check?.busy ? 'Checking…' : 'Test Tor'}
+        </button>
+        {check?.text && (
+          <span className="small" style={{ color: check.ok ? 'var(--ok)' : 'var(--warn)' }}>
+            {check.text}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The most common choices; the rest show on request (selected ones always show). */
+const COMMON_LANGUAGES = ['en', 'es', 'pt', 'fr', 'de', 'it', 'ru', 'ar', 'hi', 'zh', 'ja', 'ko'];
+
+function LanguagePicker({ selected, onChange }: { selected: string[]; onChange: (languages: string[]) => void }) {
+  const [all, setAll] = useState(false);
+  const shown = LANGUAGES.filter((language) => all || COMMON_LANGUAGES.includes(language.code) || selected.includes(language.code));
+  return (
+    <div className="field">
+      <span>
+        Languages{' '}
+        <span className="hint">
+          Titles are checked by the letters they use: content shows when its title could be in one of these languages. None selected = all.
+        </span>
+      </span>
+      <Chips
+        options={shown.map((language) => language.code)}
+        selected={selected}
+        labels={Object.fromEntries(LANGUAGES.map((language) => [language.code, language.name]))}
+        onToggle={(code) => onChange(toggle(selected, code))}
+      />
+      <div className="row" style={{ gap: 8 }}>
+        <button type="button" className="small" onClick={() => setAll(!all)}>
+          {all ? 'Fewer languages' : `All ${LANGUAGES.length} languages`}
+        </button>
+        {selected.length > 0 && (
+          <button type="button" className="small" onClick={() => onChange([])}>
+            Allow every language
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ListInput({ value, onChange, placeholder }: { value: string[]; onChange: (list: string[]) => void; placeholder?: string }) {
   const [text, setText] = useState(value.join(', '));
   return (
@@ -278,11 +411,8 @@ export function SettingsPage() {
               ))}
             </select>
           </label>
-          <label className="field">
-            Languages <span className="hint">Codes like en, es; empty = all</span>
-            <ListInput value={prefs.languages ?? []} onChange={(languages) => setPrefs({ languages })} placeholder="en, es" />
-          </label>
         </div>
+        <LanguagePicker selected={prefs.languages ?? []} onChange={(languages) => setPrefs({ languages })} />
         <div className="field">
           <span>
             Formats <span className="hint">None selected = all</span>
@@ -344,6 +474,8 @@ export function SettingsPage() {
           </select>
         </label>
       </div>
+
+      <TorCard />
 
       <div className="card form-stack">
         <h2>Creator profile</h2>

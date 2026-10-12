@@ -42,9 +42,42 @@ On first start a node creates in its data directory:
     "perIpPerHour": 30     // new accounts per address per hour (0 = no limit)
   },
   "peers": ["vs:algorithm:vk1…@https://feed.example.org"],   // recommended to clients
-  "payments": [ … ]
+  "payments": [ … ],
+  "tor": {
+    "onionService": false,           // publish the node at a .onion address (see Tor below)
+    "controlPort": "127.0.0.1:9051",
+    "controlPassword": "",           // for HashedControlPassword; empty = cookie authentication
+    "onionPort": 80,
+    "outbound": "onion",             // off | onion | all: which of the node's own requests use Tor
+    "proxy": ""                      // Tor's SOCKS address; empty = 127.0.0.1:9050 (or 9150)
+  }
 }
 ```
+
+### Tor
+
+A node can be a **Tor onion service**: clients with Tor reach it at a `.onion` address, without
+the node needing a public address, a domain or an open port. Run Tor with a control port, e.g. in
+`torrc`:
+
+```
+ControlPort 9051
+CookieAuthentication 1        # or HashedControlPassword (then set tor.controlPassword)
+```
+
+then start the node with `--onion` (or turn on *Settings → Publish as a Tor onion service*). The
+node asks Tor for an onion service pointing at its port, keeps the service's key in
+`<data>/onion-key` (mode 600) so the address never changes, and publishes it again if Tor
+restarts. The dashboard's overview and the startup output show the address. Without a
+`publicUrl`, the node's reference uses the onion address; with one, the onion address is also in
+the node's signed info (`onion`), and clients that send everything through Tor use it. The node
+user must be able to read Tor's cookie file (on Debian: add it to the `debian-tor` group).
+
+`tor.outbound` decides which of the node's own requests go through Tor's SOCKS port: `onion`
+(default) only those to `.onion` addresses, such as a provider you mirror that is an onion
+service; `all` also every request to other nodes and, on algorithm nodes, the crawler (names are
+then resolved by Tor; note that many sites block Tor exits); `off` none. Payment checks and
+storage backends always connect directly.
 
 ## Payment methods
 

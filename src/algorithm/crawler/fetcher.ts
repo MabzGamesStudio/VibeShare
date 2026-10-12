@@ -51,6 +51,8 @@ export interface FetcherOptions {
   blocked?: (host: string) => boolean;
   /** Spacing of official API calls to one host (their own rate limits apply too). */
   apiDelayMs?: () => number;
+  /** A fetch through Tor for this URL, when the node sends the crawler through Tor (undefined: directly). */
+  transport?: (url: URL) => typeof fetch | undefined;
 }
 
 export interface Fetched {
@@ -130,6 +132,9 @@ export class PoliteFetcher {
     if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
       throw new FetchFailed(`Refusing to crawl ${host}`);
     }
+    // Through Tor, names are resolved by Tor (looking them up here would leak them), and
+    // Tor exits do not connect to private addresses.
+    if (this.options.transport?.(url)) return;
     const cached = this.dns.get(host);
     if (cached && cached.expires > Date.now()) {
       if (!cached.ok) throw new FetchFailed(`${host} resolves to a private address`);
@@ -205,10 +210,11 @@ export class PoliteFetcher {
   private async once(url: URL, accept: string, maxBytes: number): Promise<{ location?: URL; fetched?: Fetched }> {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new FetchFailed(`Unsupported URL ${url}`);
     await this.checkAddress(url);
-    const response = await fetch(url, {
+    const tor = this.options.transport?.(url);
+    const response = await (tor ?? fetch)(url, {
       headers: { 'user-agent': this.options.userAgent, accept },
       redirect: 'manual',
-      signal: AbortSignal.timeout(this.options.timeoutMs()),
+      signal: AbortSignal.timeout(this.options.timeoutMs() * (tor ? 3 : 1)),
     });
     const location = response.headers.get('location');
     if (response.status >= 300 && response.status < 400 && location) {
@@ -312,12 +318,13 @@ export class PoliteFetcher {
     }
     let response: Response;
     try {
-      response = await fetch(target, {
+      const tor = this.options.transport?.(target);
+      response = await (tor ?? fetch)(target, {
         method: request.method ?? (body !== undefined ? 'POST' : 'GET'),
         headers,
         body,
         redirect: 'follow',
-        signal: AbortSignal.timeout(this.options.timeoutMs()),
+        signal: AbortSignal.timeout(this.options.timeoutMs() * (tor ? 3 : 1)),
       });
     } catch (error) {
       stats.errors++;

@@ -3,7 +3,7 @@
 `web/` is the VibeShare client as a static website: the same app as the desktop client (pages, shorts, search, subscriptions, publishing, credits, sharing), with a hash router so any static host can serve it, GitHub Pages included. Shared links and QR codes open it on the shared content:
 
 ```
-https://MabzGamesStudio.github.io/WebPages/VibeShare/#/watch/<content id>
+https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/#/watch/<content id>
 ```
 
 There is no server behind it. The client's backend runs in the visitor's browser, in a service worker: it keeps the visitor's keys, node list and settings in the browser, talks to provider and algorithm nodes directly, checks every chunk against its hash and streams video with seeking, exactly like the desktop client does.
@@ -21,7 +21,7 @@ Replace the placeholders in `config.json` with the references of your provider a
 
 ```json
 {
-  "shareBaseUrl": "https://MabzGamesStudio.github.io/WebPages/VibeShare",
+  "shareBaseUrl": "https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web",
   "defaultNodes": [
     "vs:provider:vk1…@https://cdn.example.org",
     "vs:algorithm:vk1…@https://feed.example.org"
@@ -49,11 +49,11 @@ To try it locally, serve the folder over http on localhost (service workers need
 Copy the contents of `web/` (including the hidden `.nojekyll`) into the `VibeShare/` folder of the Pages repository and push:
 
 ```bash
-rsync -a --delete distribution/web/ ../WebPages/VibeShare/
-cd ../WebPages && git add VibeShare && git commit -m "Update VibeShare" && git push
+rsync -a --delete distribution/web/ ../WebPages/pages/vibeShare/web/
+cd ../WebPages && git add pages/vibeShare/web && git commit -m "Update VibeShare" && git push
 ```
 
-Or let GitHub Actions do it: add a repository secret `WEBPAGES_TOKEN` (a fine-grained token with *Contents: read and write* on the Pages repository), then run the **Web client** workflow by hand. It builds the site and pushes it to `MabzGamesStudio/WebPages`, folder `VibeShare` (both can be changed when starting the run). On pushes to `main` the workflow only builds the site and keeps it as a downloadable artifact.
+Or let GitHub Actions do it: add a repository secret `WEBPAGES_TOKEN` (a fine-grained token with *Contents: read and write* on the Pages repository), then run the **Web client** workflow by hand. It builds the site and pushes it to `MabzGamesStudio/WebPages`, folder `pages/vibeShare/web` (both can be changed when starting the run). On pushes to `main` the workflow only builds the site and keeps it as a downloadable artifact.
 
 ## Good to know
 

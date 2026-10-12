@@ -62,6 +62,38 @@ function TextViewer({ url: src, markdown }: { url: string; markdown: boolean }) 
   );
 }
 
+/** Width ÷ height of what the content is expected to look like, before it loads. */
+function expectedRatio(view: ContentView): number {
+  const media = view.item?.media;
+  if (media?.width && media?.height) return media.width / media.height;
+  const format = view.item?.format;
+  if (format === 'short-video') return 9 / 16;
+  if (format === 'image') return 1;
+  return 16 / 9;
+}
+
+/** The content's own shape: what it was expected to be, then what it turns out to be. */
+function useRatio(view: ContentView): [number, (width: number, height: number) => void] {
+  const expected = expectedRatio(view);
+  const [ratio, setRatio] = useState(expected);
+  // A different content (not a refreshed view of the same one) starts from its expected shape.
+  useEffect(() => setRatio(expected), [view.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const measured = useCallback((width: number, height: number) => {
+    if (width > 0 && height > 0) setRatio(width / height);
+  }, []);
+  return [ratio, measured];
+}
+
+/** A player box with the content's proportions, as large as fits the window. */
+function Fit({ ratio, children }: { ratio: number; children: React.ReactNode }) {
+  const clamped = Math.min(4, Math.max(0.25, ratio));
+  return (
+    <div className="player fit" style={{ '--ratio': clamped } as React.CSSProperties}>
+      {children}
+    </div>
+  );
+}
+
 function NativePlayer({
   view,
   autoplay,
@@ -74,11 +106,19 @@ function NativePlayer({
   const mime = view.manifest!.mime;
   const src = useMediaSrc(view.streamUrl!);
   const download = useMediaSrc(view.downloadUrl);
+  const [ratio, measured] = useRatio(view);
   if (mime.startsWith('video/')) {
     return (
-      <div className="player">
-        <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={src} controls autoPlay={autoplay} playsInline />
-      </div>
+      <Fit ratio={ratio}>
+        <video
+          ref={mediaRef as React.RefObject<HTMLVideoElement>}
+          src={src}
+          controls
+          autoPlay={autoplay}
+          playsInline
+          onLoadedMetadata={(e) => measured(e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
+        />
+      </Fit>
     );
   }
   if (mime.startsWith('audio/')) {
@@ -94,9 +134,9 @@ function NativePlayer({
   }
   if (mime.startsWith('image/')) {
     return (
-      <div className="player">
-        <img src={src} alt={view.item?.title ?? view.manifest!.name} />
-      </div>
+      <Fit ratio={ratio}>
+        <img src={src} alt={view.item?.title ?? view.manifest!.name} onLoad={(e) => measured(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} />
+      </Fit>
     );
   }
   if (mime.startsWith('text/') || mime === 'application/json') return <TextViewer url={view.streamUrl!} markdown={mime === 'text/markdown'} />;
@@ -134,6 +174,7 @@ function DownloadButton({ url, name }: { url: string; name?: string }) {
 
 function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: number; setIndex: (i: number) => void }) {
   const embed = view.embeds[index];
+  const [ratio, measured] = useRatio(view);
   return (
     <>
       {view.embeds.length > 1 && (
@@ -146,7 +187,7 @@ function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: n
         </div>
       )}
       {embed.kind === 'iframe' ? (
-        <div className="player">
+        <Fit ratio={ratio}>
           <iframe
             src={embed.src}
             title={embed.label}
@@ -154,19 +195,19 @@ function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: n
             sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
             referrerPolicy="strict-origin-when-cross-origin"
           />
-        </div>
+        </Fit>
       ) : embed.kind === 'video' ? (
-        <div className="player">
-          <video src={embed.src} controls />
-        </div>
+        <Fit ratio={ratio}>
+          <video src={embed.src} controls playsInline onLoadedMetadata={(e) => measured(e.currentTarget.videoWidth, e.currentTarget.videoHeight)} />
+        </Fit>
       ) : embed.kind === 'audio' ? (
         <div className="player audio">
           <audio src={embed.src} controls />
         </div>
       ) : embed.kind === 'image' ? (
-        <div className="player">
-          <img src={embed.src} alt="" />
-        </div>
+        <Fit ratio={ratio}>
+          <img src={embed.src} alt="" onLoad={(e) => measured(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} />
+        </Fit>
       ) : (
         <div className="player file">
           <div>

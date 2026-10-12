@@ -1,5 +1,5 @@
 {
-  "shareBaseUrl": "https://MabzGamesStudio.github.io/WebPages/VibeShare",
+  "shareBaseUrl": "https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web",
   "defaultNodes": [
     "vs:provider:REPLACE-WITH-YOUR-PROVIDER-KEY@https://provider.example.org",
     "vs:algorithm:REPLACE-WITH-YOUR-ALGORITHM-KEY@https://algorithm.example.org"

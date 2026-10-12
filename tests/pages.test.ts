@@ -27,7 +27,7 @@ describe('page configurations', () => {
     assert.deepEqual(presetPage('videos').fields, ['title', 'creator', 'platform']);
     assert.deepEqual(presetPage('home').fields, ['title', 'creator'], 'the canvas shows only the title and creator');
     assert.equal(settings.loadPauseMs, 1500, 'a pause before each page of results');
-    assert.equal(settings.shareBaseUrl, 'https://MabzGamesStudio.github.io/WebPages/VibeShare');
+    assert.equal(settings.shareBaseUrl, 'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web');
   });
 
   it('keep every preset page when older settings are loaded', () => {
@@ -82,7 +82,7 @@ describe('page configurations', () => {
   it('share links open the hosted web client on the content', () => {
     assert.equal(
       shareLink(DEFAULT_SHARE_BASE_URL, 'vs1abc~yt:dQw4w9WgXcQ'),
-      'https://MabzGamesStudio.github.io/WebPages/VibeShare/#/watch/vs1abc~yt%3AdQw4w9WgXcQ'
+      'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/#/watch/vs1abc~yt%3AdQw4w9WgXcQ'
     );
     assert.equal(shareLink('https://example.org/app/index.html#/old', 'yt:x'), 'https://example.org/app/#/watch/yt%3Ax');
     assert.equal(shareLink('https://example.org/', 'vs1abc', 'vs:provider:vk1x@https://p.example'), 'https://example.org/#/watch/vs1abc?p=vs%3Aprovider%3Avk1x%40https%3A%2F%2Fp.example');

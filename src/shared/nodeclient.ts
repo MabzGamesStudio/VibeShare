@@ -1,6 +1,6 @@
 import { derivePseudonym, randomHex, signData, solveProofOfWork, verifySignature, type Identity } from './crypto.js';
 import { canonicalJson } from './encoding.js';
-import { request, RemoteError, type RequestOptions } from './remote.js';
+import { request as send, RemoteError, type RequestOptions, type Transport } from './remote.js';
 import type { NodeType } from './noderef.js';
 import {
   infoSigningPayload,
@@ -42,6 +42,8 @@ export interface NodeClientOptions {
    */
   onResult?: (result: RequestResult) => void;
   timeoutMs?: number;
+  /** How requests are sent, asked before each one (settings can change): Tor, or plain fetch when undefined. */
+  transport?: () => Transport | undefined;
 }
 
 export interface RequestResult {
@@ -75,6 +77,10 @@ export class NodeClient {
     return this.options.url;
   }
 
+  private request(url: string, options: RequestOptions = {}): Promise<Response> {
+    return send(url, { ...options, transport: this.options.transport?.() });
+  }
+
   /** Fetches the node's signed info and checks it is the node the reference names. */
   /** Sends a request and reports how it went (see onResult). */
   private async observed(send: () => Promise<Response>): Promise<Response> {
@@ -93,7 +99,7 @@ export class NodeClient {
   }
 
   async fetchInfo(): Promise<NodeInfo> {
-    const response = await this.observed(() => request(`${this.url}/v1/info`, { timeoutMs: this.options.timeoutMs ?? 10000 }));
+    const response = await this.observed(() => this.request(`${this.url}/v1/info`, { timeoutMs: this.options.timeoutMs ?? 10000 }));
     const signed = (await response.json()) as SignedInfo;
     if (!verifySignedInfo(signed)) throw new RemoteError(0, 'bad_signature', 'The node info is not signed by its key');
     if (this.options.expectedId && signed.info.id !== this.options.expectedId) {
@@ -175,7 +181,7 @@ export class NodeClient {
   }
 
   private post<T>(path: string, body: unknown): Promise<T> {
-    return request(`${this.url}${path}`, { body, timeoutMs: this.options.timeoutMs ?? 15000 }).then(
+    return this.request(`${this.url}${path}`, { body, timeoutMs: this.options.timeoutMs ?? 15000 }).then(
       (response) => response.json() as Promise<T>
     );
   }
@@ -185,7 +191,7 @@ export class NodeClient {
     const send = async () => {
       const headers = { ...options.headers };
       if (options.auth !== false) headers.authorization = `Bearer ${await this.token()}`;
-      return request(`${this.url}${path}`, { timeoutMs: this.options.timeoutMs ?? 15000, ...options, headers });
+      return this.request(`${this.url}${path}`, { timeoutMs: this.options.timeoutMs ?? 15000, ...options, headers });
     };
     return this.observed(async () => {
       try {

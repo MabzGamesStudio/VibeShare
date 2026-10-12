@@ -43,6 +43,8 @@ export interface NodeInfoBase {
   time: string;
   /** The URL the operator publishes the node under. */
   url?: string;
+  /** The node's Tor onion address (http://….onion), when it publishes one. */
+  onion?: string;
   contact?: string;
   terms?: string;
   signup: SignupInfo;
@@ -301,7 +303,11 @@ export interface Preferences {
   blockedCreators?: string[];
   /** Only creators of these kinds (empty = all). */
   creatorKinds?: CreatorKind[];
-  /** Only these languages (empty = all). */
+  /**
+   * Only these languages (codes like "en"; empty = all). Content that declares a language
+   * must declare one of them; other content is kept when its title could be in one of them,
+   * judged leniently by the letters it uses (see shared/language.ts).
+   */
   languages?: string[];
 }
 

@@ -17,6 +17,14 @@ export interface RequestOptions {
   raw?: Buffer | Uint8Array;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** How to send it (default: fetch). Clients route requests through Tor this way. */
+  transport?: Transport;
+}
+
+export interface Transport {
+  fetch: typeof fetch;
+  /** Multiplies timeouts (requests through Tor take longer). */
+  timeoutFactor?: number;
 }
 
 export async function request(url: string, options: RequestOptions = {}): Promise<Response> {
@@ -32,15 +40,17 @@ export async function request(url: string, options: RequestOptions = {}): Promis
   }
   let response: Response;
   try {
-    response = await fetch(url, {
+    const send = options.transport?.fetch ?? fetch;
+    response = await send(url, {
       method: options.method ?? (body ? 'POST' : 'GET'),
       headers,
       body,
-      signal: AbortSignal.timeout(options.timeoutMs ?? 15000),
+      signal: AbortSignal.timeout((options.timeoutMs ?? 15000) * (options.transport?.timeoutFactor ?? 1)),
     });
   } catch (error) {
-    const cause = (error as Error).name === 'TimeoutError' ? 'timed out' : (error as Error).message;
-    throw new RemoteError(0, 'unreachable', `${new URL(url).host} ${cause}`);
+    const name = (error as Error).name;
+    const cause = name === 'TimeoutError' ? ' timed out' : name === 'TorError' ? `: ${(error as Error).message}` : ` ${(error as Error).message}`;
+    throw new RemoteError(0, 'unreachable', `${new URL(url).host}${cause}`);
   }
   if (!response.ok) {
     let parsed: unknown;

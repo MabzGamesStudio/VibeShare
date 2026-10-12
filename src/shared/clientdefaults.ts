@@ -2,10 +2,13 @@
 // and the static web client. Browser-safe: no Node imports.
 import type { PageConfig, PageFilters, PagePreset, Settings } from './clientapi.js';
 import type { Preferences } from './protocol.js';
+import { baseLanguage } from './language.js';
 import { RATINGS, type Rating } from './taxonomy.js';
 
 /** Where shared links point unless the user (or the web build) configures another hosted client. */
-export const DEFAULT_SHARE_BASE_URL = 'https://MabzGamesStudio.github.io/WebPages/VibeShare';
+export const DEFAULT_SHARE_BASE_URL = 'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web';
+/** Earlier defaults, moved to the current one when settings are loaded. */
+const OLD_SHARE_BASE_URLS = ['https://mabzgamesstudio.github.io/webpages/vibeshare'];
 
 const NO_FILTERS: PageFilters = { formats: [], topics: [], onlyTopics: false, creatorKinds: [] };
 
@@ -76,11 +79,15 @@ export function defaultPages(): PageConfig[] {
   return PRESETS.map(presetPage);
 }
 
+/** Current settings format; older settings get the newer defaults once (normalizeSettings). */
+export const SETTINGS_REVISION = 2;
+
 export function defaultSettings(): Settings {
   return {
+    revision: SETTINGS_REVISION,
     pages: defaultPages(),
     shareBaseUrl: DEFAULT_SHARE_BASE_URL,
-    preferences: { maxRating: '16+', formats: [], topics: [], blockedTags: [], blockedCreators: [], creatorKinds: [], languages: [] },
+    preferences: { maxRating: '16+', formats: [], topics: [], blockedTags: [], blockedCreators: [], creatorKinds: [], languages: ['en'] },
     feedMode: 'blend',
     unknownContent: 'warn',
     defaultAuth: 'pseudonym',
@@ -91,6 +98,7 @@ export function defaultSettings(): Settings {
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
     theme: 'system',
+    tor: { mode: 'onion', proxy: '' },
   };
 }
 
@@ -102,13 +110,19 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     preferences: { ...base.preferences, ...saved?.preferences },
     profile: { ...base.profile, ...saved?.profile },
     storageService: { ...base.storageService, ...saved?.storageService },
+    tor: { ...base.tor, ...saved?.tor },
   };
   const pages = Array.isArray(saved?.pages) && saved.pages.length ? saved.pages.map((page) => normalizePage(page)) : base.pages;
   for (const preset of PRESETS) {
     if (!pages.some((page) => page.id === preset)) pages.push(presetPage(preset));
   }
   merged.pages = pages;
-  if (!merged.shareBaseUrl) merged.shareBaseUrl = base.shareBaseUrl;
+  if (!merged.shareBaseUrl || OLD_SHARE_BASE_URLS.includes(merged.shareBaseUrl.replace(/\/+$/, '').toLowerCase())) merged.shareBaseUrl = base.shareBaseUrl;
+  if (saved && (saved.revision ?? 1) < 2) {
+    // Revision 2: titles are filtered by language, English only unless the user picked languages.
+    if (!saved.preferences?.languages?.length) merged.preferences.languages = [...(base.preferences.languages ?? [])];
+  }
+  merged.revision = SETTINGS_REVISION;
   return merged;
 }
 
@@ -186,12 +200,20 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     preferences: { ...current.preferences, ...(patch.preferences ?? {}) },
     profile: { ...current.profile, ...(patch.profile ?? {}) },
     storageService: { ...current.storageService, ...(patch.storageService ?? {}) },
+    tor: { ...current.tor, ...(patch.tor ?? {}) },
     pages: patch.pages ?? current.pages,
   });
+  if (!['off', 'onion', 'all'].includes(next.tor.mode)) throw new Error('Tor mode is off, onion or all');
+  next.tor.proxy = String(next.tor.proxy ?? '').trim();
+  if (next.tor.proxy && !/^(socks5h?:\/\/)?(\[[0-9a-f:.]+\]|[\w.-]+)(:\d{1,5})?\/?$/i.test(next.tor.proxy)) {
+    throw new Error('The Tor address is host:port, e.g. 127.0.0.1:9050');
+  }
   if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
   if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
+  const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];
+  next.preferences.languages = [...new Set(languages.map((code) => baseLanguage(String(code))).filter((code) => /^[a-z]{2,3}$/.test(code)))].slice(0, 30);
   next.storageService.quotaGiB = Math.max(0, Number(next.storageService.quotaGiB) || 0);
   try {
     const url = new URL(next.shareBaseUrl);

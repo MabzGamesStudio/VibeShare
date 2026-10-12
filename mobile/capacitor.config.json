@@ -1,0 +1,10 @@
+{
+  "appId": "io.github.mabzgamesstudio.vibeshare",
+  "appName": "VibeShare",
+  "webDir": "../distribution/web",
+  "ios": {
+    "scheme": "App",
+    "contentInset": "automatic",
+    "allowsLinkPreview": false
+  }
+}

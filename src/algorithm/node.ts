@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { Account } from '../commerce/ledger.js';
-import { BaseNode, type BaseConfig, type NodeOptions } from '../commerce/node.js';
+import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import { isKeyId, randomId, verifySignature } from '../shared/crypto.js';
 import { contentIdOf, validateManifest } from '../shared/content.js';
 import { badRequest, forbidden, HttpError, notFound, readJson, requestJson, type Ctx } from '../shared/http.js';
@@ -61,6 +61,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     host: '0.0.0.0',
     port: 7702,
     trustProxy: false,
+    tor: { ...DEFAULT_NODE_TOR },
     signup: { grant: 100, powBits: 0, anonymous: true, perIpPerHour: 30 },
     payments: [{ id: 'voucher', type: 'voucher' }],
     peers: [],
@@ -137,7 +138,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
     this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {} }));
-    this.crawler = new Crawler(() => this.config.crawler, this.path('crawler.json'), (items) => this.ingest(items));
+    this.crawler = new Crawler(
+      () => this.config.crawler,
+      this.path('crawler.json'),
+      (items) => this.ingest(items),
+      (url) => this.transport(url.href)?.fetch
+    );
   }
 
   /** Takes in what the crawler found, following the operator's policy. Returns how many entries are new. */
@@ -788,7 +794,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const page = await requestJson<{
         items: { cid: string; name: string; createdAt: string; meta?: SubmissionRequest; sources?: string[]; creator?: { id: string; name?: string; kind?: CreatorKind } }[];
         next?: number;
-      }>(`${ref.url}/v1/catalog?offset=${offset}&limit=100`);
+      }>(`${ref.url}/v1/catalog?offset=${offset}&limit=100`, { transport: this.transport(ref.url) });
       for (const item of page.items) {
         const id = [item.cid, ...(item.sources ?? [])].join('~');
         const known = this.registry.get(item.cid);
@@ -836,7 +842,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   /** Fetches the manifest and checks its creator signature here, rather than trusting the provider. */
   private async verifyCreator(providerUrl: string, cid: string): Promise<string | undefined> {
     try {
-      const manifest = validateManifest(await requestJson(`${providerUrl}/v1/content/${cid}`));
+      const manifest = validateManifest(await requestJson(`${providerUrl}/v1/content/${cid}`, { transport: this.transport(providerUrl) }));
       return contentIdOf(manifest) === cid ? manifest.creator?.id : undefined;
     } catch {
       return undefined;

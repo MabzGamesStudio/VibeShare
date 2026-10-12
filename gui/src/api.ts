@@ -3,6 +3,8 @@
 // The daemon puts its access token in the page (<meta name="vs-token">); during
 // development it can be passed as ?t=… instead.
 
+import type { NodeEntry } from '../../src/shared/clientapi';
+
 /** True in the static web build (hash router, backend in the browser). */
 export const IS_STATIC = __VIBESHARE_WEB__;
 
@@ -44,6 +46,30 @@ function readToken(): string {
 }
 
 export const token = readToken();
+
+/**
+ * Calls the listener with the node list (status and credits) whenever it changes in the
+ * client backend: Server-Sent Events from the daemon, messages from the web client's
+ * service worker or in-page backend. Nothing here asks the nodes anything.
+ */
+export function onNodesChanged(listener: (nodes: NodeEntry[]) => void): () => void {
+  if (IS_STATIC) {
+    const fromPage = (event: Event) => listener((event as CustomEvent<NodeEntry[]>).detail);
+    const fromWorker = (event: MessageEvent) => {
+      if (event.data?.type === 'vs-nodes') listener(event.data.nodes as NodeEntry[]);
+    };
+    window.addEventListener('vs-nodes', fromPage);
+    navigator.serviceWorker?.addEventListener('message', fromWorker);
+    return () => {
+      window.removeEventListener('vs-nodes', fromPage);
+      navigator.serviceWorker?.removeEventListener('message', fromWorker);
+    };
+  }
+  // (EventSource cannot send headers; the daemon also takes its token as ?t=.)
+  const events = new EventSource(`/api/events?t=${encodeURIComponent(token)}`);
+  events.addEventListener('nodes', (event) => listener(JSON.parse((event as MessageEvent<string>).data) as NodeEntry[]));
+  return () => events.close();
+}
 
 export class ApiError extends Error {
   constructor(

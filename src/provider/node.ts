@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { BaseNode, type BaseConfig, type NodeOptions } from '../commerce/node.js';
+import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import type { Account } from '../commerce/ledger.js';
 import { contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import { buildManifestFromFile } from '../shared/contentfile.js';
@@ -63,6 +63,7 @@ export function providerDefaults(): ProviderConfig {
     host: '0.0.0.0',
     port: 7701,
     trustProxy: false,
+    tor: { ...DEFAULT_NODE_TOR },
     signup: { grant: 500, powBits: 0, anonymous: true, perIpPerHour: 30 },
     payments: [{ id: 'voucher', type: 'voucher' }],
     peers: [],
@@ -170,7 +171,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       case 'provider': {
         const ref = parseNodeRef(config.ref);
         if (!ref) throw new Error(`Bad node reference ${config.ref}`);
-        const client = new NodeClient({ url: ref.url, expectedId: ref.id, expectedType: 'provider', auth: 'identity', identity: this.identity });
+        const client = new NodeClient({
+          url: ref.url,
+          expectedId: ref.id,
+          expectedType: 'provider',
+          auth: 'identity',
+          identity: this.identity,
+          transport: () => this.transport(ref.url),
+        });
         return new ProviderBackend(
           config.id,
           async (key) => {

@@ -17,8 +17,9 @@ import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest } from '../shared/errors.js';
 import { log } from '../shared/log.js';
 import { parseNodeRef } from '../shared/noderef.js';
-import { SOFTWARE, type ContentItem, type CreatorInfo, type LookupResult, type Page } from '../shared/protocol.js';
-import { RemoteError } from '../shared/remote.js';
+import { matchesLanguages } from '../shared/language.js';
+import { SOFTWARE, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { RemoteError, type Transport } from '../shared/remote.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import type { ChunkStore, ClientStoreLike, UploadStore } from './model.js';
@@ -56,6 +57,8 @@ export interface ClientCoreOptions {
   beforeRemoveNode?: (id: string, release: boolean) => Promise<void>;
   /** The software name and version the GUI shows. */
   version?: string;
+  /** How requests to a node are sent (the daemon routes them through Tor); plain fetch when undefined. */
+  transport?: (target: { url: string; onion?: string }) => Transport | undefined;
 }
 
 export class ClientCore {
@@ -68,7 +71,7 @@ export class ClientCore {
   constructor(readonly options: ClientCoreOptions) {
     this.store = options.store;
     this.cache = options.cache;
-    this.nodes = new NodeManager(this.store);
+    this.nodes = new NodeManager(this.store, options.transport);
     this.fetcher = new Fetcher(this.nodes, this.cache);
     this.publisher = new Publisher(this.store, this.nodes, options.uploads);
   }
@@ -115,6 +118,9 @@ export class ClientCore {
     const cursors = decodeCursor(cursor) ?? {};
     const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
     const priceKind = kind === 'search' ? 'search' : 'feed';
+    // Nodes filter by language too; this covers nodes that do not, and content they pass on.
+    const languages = ((body.preferences ?? body.filters) as Preferences | undefined)?.languages ?? this.settings.preferences.languages;
+    const wanted = (item: ContentItem) => matchesLanguages(item, languages);
     const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
       const price = this.nodes.algorithmPrice(node, priceKind);
       // (Paid answers carry the new balance; nothing else is asked.)
@@ -131,7 +137,7 @@ export class ClientCore {
         try {
           const page = await ask(node, 24);
           return {
-            items: page.items.map((item) => this.feedItem(node, item)),
+            items: page.items.filter(wanted).map((item) => this.feedItem(node, item)),
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
           };
@@ -160,7 +166,7 @@ export class ClientCore {
     for (let i = 0; i < longest; i++) {
       for (const { node, page } of pages) {
         const item = page?.items[i];
-        if (!item) continue;
+        if (!item || !wanted(item)) continue;
         const base = item.id.split('~')[0];
         if (seen.has(base)) continue;
         seen.add(base);

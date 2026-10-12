@@ -1,5 +1,5 @@
 // VibeShare desktop: runs the client node inside the app and shows its GUI in a window.
-import { app, BrowserWindow, Menu, shell, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, Menu, session, shell, Tray, nativeImage } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,13 +11,34 @@ let quitting = false;
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
+/**
+ * With Tor on for every node, the window goes through Tor too (players and pictures from
+ * other platforms). It fails closed: when Tor is not running, those do not load at all.
+ */
+let torRule = null;
+async function applyTor(node, settings) {
+  let rule = 'direct';
+  if (settings.tor?.mode === 'all') {
+    let address = { host: '127.0.0.1', port: 9050 };
+    try {
+      address = await node.tor.proxy.address();
+    } catch {
+      // not running: keep the usual address, so nothing leaks around it
+    }
+    rule = `socks5://${address.host.includes(':') ? `[${address.host}]` : address.host}:${address.port}`;
+  }
+  if (rule === torRule) return;
+  torRule = rule;
+  await session.defaultSession.setProxy(rule === 'direct' ? { mode: 'direct' } : { proxyRules: rule, proxyBypassRules: '<local>' });
+}
+
 async function startClient() {
   const { ClientNode } = await import('./core/client/daemon.js');
   const dataDir = join(app.getPath('userData'), 'client');
   const guiDir = join(here, 'gui');
   // Prefer the usual port so bookmarks keep working; fall back to any free port.
   for (const port of [7700, 0]) {
-    const node = new ClientNode({ dataDir, port, guiDir });
+    const node = new ClientNode({ dataDir, port, guiDir, onSettings: (settings) => void applyTor(node, settings) });
     try {
       await node.start();
       return node;
