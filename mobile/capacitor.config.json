@@ -2,11 +2,9 @@
   "appId": "io.github.mabzgamesstudio.vibeshare",
   "appName": "VibeShare",
   "webDir": "../distribution/web",
-  "backgroundColor": "#0d0f14",
   "ios": {
     "scheme": "App",
     "contentInset": "automatic",
-    "backgroundColor": "#0d0f14",
     "allowsLinkPreview": false
   }
 }

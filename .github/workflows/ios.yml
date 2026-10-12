@@ -76,8 +76,8 @@ jobs:
           xcrun simctl launch "$DEVICE" "$BUNDLE_ID"
           sleep 25
           xcrun simctl io "$DEVICE" screenshot "$RUNNER_TEMP/screenshot.png"
-          echo "--- what the app logged (⚡️ lines are the web client's console)"
-          xcrun simctl spawn "$DEVICE" log show --last 2m --style compact --predicate 'process == "App"' | grep -E '⚡️|error|Error' | tail -n 60 || true
+          echo "--- errors the app logged"
+          xcrun simctl spawn "$DEVICE" log show --last 2m --style compact --predicate 'process == "App"' | grep -E ' E  |error|Error|crash' | tail -n 40 || true
           if ! xcrun simctl spawn "$DEVICE" launchctl list | grep -q "$BUNDLE_ID"; then
             echo "::error::The app is not running any more"
             exit 1
@@ -85,14 +85,6 @@ jobs:
           mkdir -p out
           cp "$RUNNER_TEMP/screenshot.png" out/simulator-screenshot.png
           (cd "$(dirname "$APP")" && zip -qry "$GITHUB_WORKSPACE/out/VibeShare-simulator.app.zip" App.app)
-
-      - name: Screenshot as text (temporary, for reviewing this branch)
-        if: startsWith(github.ref, 'refs/heads/claude/')
-        run: |
-          sips -s format jpeg -s formatOptions 55 -Z 760 out/simulator-screenshot.png --out "$RUNNER_TEMP/small.jpg" > /dev/null
-          echo "----- BEGIN SCREENSHOT"
-          base64 -b 160 -i "$RUNNER_TEMP/small.jpg"
-          echo "----- END SCREENSHOT"
 
       - name: Unsigned .ipa
         run: |
