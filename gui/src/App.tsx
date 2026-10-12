@@ -100,7 +100,7 @@ function CreditChip({ nodes, label, icon }: { nodes: NodeEntry[]; label: string;
   );
 }
 
-/** A page of the user's page configuration: "/" is the home page, "/p/<id>" the others. */
+/** A page of the user's page configuration: "/" is the video home page, "/p/<id>" the others. */
 function PageRoute({ id }: { id?: string }) {
   const params = useParams();
   const { state } = useApp();
@@ -187,7 +187,7 @@ export function App() {
             </div>
           ) : (
             <Routes>
-              <Route path="/" element={<PageRoute id="home" />} />
+              <Route path="/" element={<PageRoute id="videos" />} />
               <Route path="/p/:id" element={<PageRoute />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/subscriptions" element={<SubscriptionsPage />} />
@@ -199,14 +199,14 @@ export function App() {
               <Route path="/wallet" element={<WalletPage />} />
               <Route path="/earn" element={<EarnPage />} />
               <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<PageRoute id="home" />} />
+              <Route path="*" element={<PageRoute id="videos" />} />
             </Routes>
           )}
         </div>
         {creating && (
           <PageEditor
             isNew
-            page={{ ...presetPage('home'), id: newPageId(), preset: undefined, title: 'My page', icon: 'star' }}
+            page={{ ...presetPage('videos'), filters: { ...presetPage('videos').filters, formats: [] }, id: newPageId(), preset: undefined, title: 'My page', icon: 'star' }}
             onClose={() => setCreating(false)}
           />
         )}

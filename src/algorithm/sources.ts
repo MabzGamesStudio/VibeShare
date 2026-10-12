@@ -125,17 +125,15 @@ export function priorityOf(key: string, priorities: Record<string, number>): num
 }
 
 /**
- * Applies source priorities to a ranked list: sources at 0 are left out; the others keep
- * the ranking's order within themselves, and each priority step above or below 5 moves a
- * source's items up or down (priority 10 puts an item where one ten times further down
- * would be). With every source at the same priority the ranking is unchanged.
+ * Applies source priorities to a ranked list: sources at 0 are left out, and content of
+ * a higher-priority source always comes before content of a lower-priority one (the
+ * ranking's order is kept within a source). With every source at the same priority the
+ * ranking is unchanged.
  */
 export function prioritize<T extends { id: string; adapter?: string }>(items: T[], priorities: Record<string, number>): T[] {
-  const weighted: { item: T; key: number }[] = [];
-  items.forEach((item, index) => {
-    const priority = priorityOf(sourceKeyOf(item), priorities);
-    if (priority <= 0) return;
-    weighted.push({ item, key: (index + 1) * 2 ** ((5 - priority) / 1.5) });
-  });
-  return weighted.sort((a, b) => a.key - b.key).map(({ item }) => item);
+  return items
+    .map((item, index) => ({ item, index, priority: priorityOf(sourceKeyOf(item), priorities) }))
+    .filter(({ priority }) => priority > 0)
+    .sort((a, b) => b.priority - a.priority || a.index - b.index)
+    .map(({ item }) => item);
 }

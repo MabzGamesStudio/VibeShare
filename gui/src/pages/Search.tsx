@@ -1,6 +1,7 @@
 import { SlidersHorizontal } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { FeedResponse } from '../../../src/shared/clientapi';
 import { CREATOR_KIND_LABELS, CREATOR_KINDS, FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../../../src/shared/taxonomy';
 import { api } from '../api';
@@ -15,6 +16,7 @@ export function SearchPage() {
   const [rating, setRating] = useState<Rating | ''>('');
   const [topics, setTopics] = useState<string[]>([]);
   const [kinds, setKinds] = useState<CreatorKind[]>([]);
+  const [platform, setPlatform] = useState('');
   const [sort, setSort] = useState<'relevance' | 'new' | 'top'>('relevance');
 
   return (
@@ -59,6 +61,17 @@ export function SearchPage() {
                 ))}
               </select>
             </label>
+            <label className="field">
+              Platform
+              <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
+                <option value="">Any platform</option>
+                {SOURCE_CATALOG.map((source) => (
+                  <option key={source.key} value={source.key}>
+                    {source.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="field">
               Creator
               <Chips options={CREATOR_KINDS.filter((k) => k !== 'unknown')} selected={kinds} labels={CREATOR_KIND_LABELS} onToggle={(v) => setKinds(toggle(kinds, v))} />
@@ -74,7 +87,7 @@ export function SearchPage() {
         </div>
       )}
       <Feed
-        deps={[query, formats.join(), rating, topics.join(), kinds.join(), sort]}
+        deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
         load={(cursor) =>
           api<FeedResponse>('/api/search', {
             body: {
@@ -87,6 +100,7 @@ export function SearchPage() {
                 topics: topics.length ? topics : undefined,
                 onlyTopics: topics.length ? true : undefined,
                 creatorKinds: kinds.length ? kinds : undefined,
+                platform: platform || undefined,
               },
             },
           })

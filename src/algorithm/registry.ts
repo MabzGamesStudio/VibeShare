@@ -4,7 +4,7 @@ import { sha256hex } from '../shared/crypto.js';
 import { badRequest } from '../shared/http.js';
 import type { ContentItem, ContentMedia, ContentOrigin, CreatorInfo, LookupResult, Preferences, SearchSort, TagNote } from '../shared/protocol.js';
 import type { Discovered } from './crawler/types.js';
-import { baseId, formatSource, parseContentId } from '../shared/sources.js';
+import { baseId, formatSource, isNativeId, parseContentId, parseSource, sourceFromUrl } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import {
   CREATOR_KINDS,
@@ -19,10 +19,20 @@ import {
 import { wilson, quality } from './ranking.js';
 import { matchesLanguages } from '../shared/language.js';
 
-/** What the node knows about one content id. Ids it has no entry for are "unknown". */
+/** What the node knows about one content. Every entry has a content id, a link, or both — they are separate. */
 export interface Entry {
   /** Base id (`vs1…`, `yt:…`). */
   id: string;
+  /**
+   * The VibeShare content id (`vs1…`), when the content is published on VibeShare.
+   * Separate from the link: an entry has a content id, a link, or both.
+   */
+  contentId?: string;
+  /**
+   * Where the content lives outside VibeShare — a link (an https URL or a platform
+   * source like `yt:…`). Separate from the content id.
+   */
+  link?: string;
   /** Fallback sources appended to the id given to clients. */
   sources: string[];
   /** pending: found by the crawler, waiting for review (clients see it as unknown). */
@@ -66,11 +76,35 @@ interface RegistryData {
   creators: Record<string, CreatorRecord>;
 }
 
-export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'addedAt' | 'updatedAt'>> & { id: string };
+export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'addedAt' | 'updatedAt'>> & { id?: string };
 
 function cleanList(value: unknown, max = 32): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((item) => normalizeTag(String(item))).filter(Boolean))].slice(0, max);
+}
+
+/** The stored form of a content link: `yt:…`, `url:…`, or an https link mapped to its platform. */
+export function normalizeLink(link: string): string {
+  const text = String(link).trim();
+  const source = parseSource(text) ?? sourceFromUrl(text);
+  if (source) return formatSource(source);
+  if (/^https?:\/\//.test(text) && text.length <= 2048 && !/\s/.test(text)) return `url:${encodeURIComponent(text).replace(/~/g, '%7E')}`;
+  throw badRequest(`Not a link: ${text.slice(0, 80)}`);
+}
+
+/** The content id and the link of a pasted id/link, in the forms entries use. */
+export function identityOf(input: { id?: string; contentId?: string; link?: string }): { key: string; contentId?: string; link?: string } {
+  const parsed = input.id ? parseContentId(input.id) : null;
+  const contentId = input.contentId ?? (parsed?.native ? parsed.base : undefined);
+  if (contentId !== undefined && !isNativeId(contentId)) throw badRequest(`Not a content id: ${contentId}`);
+  // The link the content lives at: its own source for external ids, the first fallback
+  // source of a combined id, and a pasted id that is no content id taken as the link.
+  const fromId = parsed ? (!parsed.native ? parsed.base : parsed.sources[0] ? formatSource(parsed.sources[0]) : undefined) : input.id;
+  const rawLink = input.link ?? fromId;
+  const link = rawLink ? normalizeLink(rawLink) : undefined;
+  const key = parsed?.base ?? contentId ?? link;
+  if (!key) throw badRequest('Content needs a content id or a link');
+  return { key, contentId, link };
 }
 
 function words(text: string): string[] {
@@ -112,6 +146,29 @@ export class Registry {
     return this.store.data.entries[baseId(id)];
   }
 
+  /**
+   * Finds the entry a content id or link belongs to: by its id, its content id, its
+   * link, or a fallback source carried with one of them.
+   */
+  findByRef(ref: string): Entry | undefined {
+    const direct = this.get(ref);
+    if (direct) return direct;
+    const wanted = new Set<string>();
+    try {
+      const { key, contentId, link } = identityOf({ id: ref });
+      for (const value of [key, contentId, link]) if (value) wanted.add(value);
+    } catch {
+      wanted.add(ref);
+    }
+    return this.all().find(
+      (entry) =>
+        wanted.has(entry.id) ||
+        (entry.contentId !== undefined && wanted.has(entry.contentId)) ||
+        (entry.link !== undefined && wanted.has(entry.link)) ||
+        entry.sources.some((source) => wanted.has(source))
+    );
+  }
+
   all(): Entry[] {
     return Object.values(this.store.data.entries);
   }
@@ -122,21 +179,28 @@ export class Registry {
 
   /** Lists or blocks content, keeping votes and creation time of an existing entry. */
   upsert(input: EntryInput): Entry {
-    const parsed = parseContentId(input.id);
-    if (!parsed) throw badRequest(`Not a content id: ${input.id}`);
-    const existing = this.store.data.entries[parsed.base];
+    const { key, contentId, link } = identityOf(input);
+    const parsed = input.id ? parseContentId(input.id) : null;
+    const existing = this.store.data.entries[key];
     const now = new Date().toISOString();
     if (input.format !== undefined && !FORMATS.includes(input.format)) throw badRequest(`Unknown format ${input.format}`);
     if (input.rating !== undefined && !RATINGS.includes(input.rating)) throw badRequest(`Unknown rating ${input.rating}`);
-    const sources = [...new Set([...(existing?.sources ?? []), ...parsed.sources.map(formatSource), ...(input.sources ?? [])])].filter(
-      (source) => source !== parsed.base
-    );
+    const sources = [
+      ...new Set([
+        ...(existing?.sources ?? []),
+        ...(parsed?.sources.map(formatSource) ?? []),
+        ...(input.sources ?? []),
+        ...(parsed && !parsed.native && parsed.base !== key ? [parsed.base] : []),
+      ]),
+    ].filter((source) => source !== key);
     const entry: Entry = {
-      id: parsed.base,
+      id: key,
+      contentId: contentId ?? existing?.contentId,
+      link: link ?? existing?.link,
       sources,
       status: input.status ?? existing?.status ?? 'listed',
       reason: input.reason ?? existing?.reason,
-      title: (input.title ?? existing?.title ?? parsed.base).slice(0, 300),
+      title: (input.title ?? existing?.title ?? key).slice(0, 300),
       description: (input.description ?? existing?.description)?.slice(0, 5000),
       format: input.format ?? existing?.format ?? 'other',
       rating: input.rating ?? existing?.rating ?? 'all',
@@ -239,9 +303,13 @@ export class Registry {
 
   view(entry: Entry): ContentItem {
     const creator = this.creator(entry.creatorId);
+    const contentId = entry.contentId ?? (isNativeId(entry.id) ? entry.id : undefined);
+    const link = entry.link ?? (isNativeId(entry.id) ? entry.sources[0] : entry.id);
     return {
       id: [entry.id, ...entry.sources].join('~'),
       status: 'listed',
+      contentId,
+      link,
       title: entry.title,
       description: entry.description,
       format: entry.format,
@@ -389,6 +457,8 @@ export class Registry {
     }
     this.store.data.entries[parsed.base] = {
       id: parsed.base,
+      contentId: parsed.native ? parsed.base : undefined,
+      link: parsed.native ? (parsed.sources[0] ? formatSource(parsed.sources[0]) : undefined) : parsed.base,
       sources: parsed.sources.map(formatSource).filter((source) => source !== parsed.base),
       status: policy.autoList ? 'listed' : 'pending',
       title: item.title.slice(0, 300),

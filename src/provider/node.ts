@@ -16,8 +16,8 @@ import {
 import { log } from '../shared/log.js';
 import { NodeClient } from '../shared/nodeclient.js';
 import { parseNodeRef } from '../shared/noderef.js';
-import type { ProviderInfo, ProviderPricing, StorageRewards } from '../shared/protocol.js';
-import { isChunkId, isNativeId } from '../shared/sources.js';
+import type { ProviderInfo, ProviderPricing, ProviderRewards, ReportRequest, ReportResponse, StorageRewards } from '../shared/protocol.js';
+import { baseId, isChunkId, isNativeId } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { RemoteError } from '../shared/http.js';
 import { StorageService, type StorageServiceConfig } from './service.js';
@@ -40,6 +40,8 @@ export interface ProviderConfig extends BaseConfig {
     /** Per-content price per MiB, by content id (e.g. premium or free content). */
     overrides: Record<string, number>;
   };
+  /** Credits the node pays for useful information from clients. */
+  rewards: ProviderRewards;
   storage: {
     backends: BackendConfig[];
     /** How many writable backends each chunk is written to. */
@@ -75,6 +77,7 @@ export function providerDefaults(): ProviderConfig {
       upload: { mode: 'open', perMiB: 0, maxBytes: 4 * 1024 * MiB },
       overrides: {},
     },
+    rewards: { report: 1, reportDailyCap: 100 },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -112,12 +115,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   readonly store: ContentStore;
   readonly service: StorageService;
   private uploads: JsonFile<{ uploads: Record<string, PendingUpload> }>;
+  /** Content ids clients reported; the node learns what is out there from them. */
+  private reports: JsonFile<{ ids: Record<string, { at: string; account: string }> }>;
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
   private gcTimer: NodeJS.Timeout;
 
   constructor(options: NodeOptions<ProviderConfig>) {
     super('provider', providerDefaults(), options);
     this.uploads = new JsonFile(this.path('uploads.json'), () => ({ uploads: {} }));
+    this.reports = new JsonFile(this.path('reports.json'), () => ({ ids: {} }));
     this.service = new StorageService(
       this.path('storage-service.json'),
       this.ledger,
@@ -211,6 +217,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     return {
       type: 'provider',
       pricing,
+      rewards: this.config.rewards,
       services: { storage: { enabled: this.config.storageService.enabled, openJobs: this.service.openJobCount() } },
       stats: { contents: stats.contents, bytes: stats.bytes },
     };
@@ -309,6 +316,33 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const body = await readJson<{ ids?: string[] }>(ctx.req);
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
       return { has: Object.fromEntries(ids.map((id) => [id, Boolean(this.store.getContent(String(id)))])) };
+    });
+
+    // A client that played content from outside the network reports its content id here;
+    // the node keeps ids it did not have and rewards the reporter for them.
+    router.post('/v1/reports', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<ReportRequest>(ctx.req);
+      const id = String(body.id ?? '').trim();
+      if (!id || id.length > 4096) throw badRequest('id is required');
+      const known = Boolean(this.store.getContent(id)) || Boolean(this.store.getContent(baseId(id))) || Boolean(this.reports.data.ids[id]);
+      let credited = 0;
+      const rewards = this.config.rewards;
+      if (!known) {
+        this.reports.data.ids[id] = { at: new Date().toISOString(), account: account.id };
+        if (Object.keys(this.reports.data.ids).length > 50_000) {
+          const oldest = Object.entries(this.reports.data.ids).sort((a, b) => a[1].at.localeCompare(b[1].at)).slice(0, 10_000);
+          for (const [key] of oldest) delete this.reports.data.ids[key];
+        }
+        this.reports.changed();
+        if (rewards.report > 0 && this.ledger.daily(account, 'reports') < rewards.reportDailyCap) {
+          this.ledger.addDaily(account, 'reports', 1);
+          const updated = this.ledger.credit(account.id, rewards.report, 'report', id);
+          ctx.res.setHeader('x-vs-balance', String(updated.balance));
+          credited = rewards.report;
+        }
+      }
+      return { known, credited } satisfies ReportResponse;
     });
 
     router.get('/v1/quote/:cid', (ctx) => {

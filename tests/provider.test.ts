@@ -96,3 +96,18 @@ describe('provider node', async () => {
     assert.equal(provider.store.hasChunk(manifest.chunks[0].id), false);
   });
 });
+
+describe('a provider rewarding content reports', async () => {
+  const provider = await startProvider({ signup: { grant: 10 } });
+  after(() => provider.stop());
+
+  it('pays for content ids it did not have, once', async () => {
+    const client = clientFor(provider.url());
+    const first = await client.json<{ known: boolean; credited: number }>('/v1/reports', { body: { id: 'yt:somewhere-out-there' } });
+    assert.deepEqual(first, { known: false, credited: 1 });
+    assert.deepEqual(await client.json('/v1/reports', { body: { id: 'yt:somewhere-out-there' } }), { known: true, credited: 0 });
+    const account = await client.json<{ account: { balance: number } }>('/v1/account');
+    assert.equal(account.account.balance, 10 + 1);
+  });
+});
+

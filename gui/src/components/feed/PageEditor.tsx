@@ -34,7 +34,7 @@ import { Fields } from './Fields';
 import { PAGE_ICON_COMPONENTS } from './icons';
 
 export function pagePath(page: Pick<PageConfig, 'id'>): string {
-  return page.id === 'home' ? '/' : `/p/${page.id}`;
+  return page.id === 'videos' || page.id === 'home' ? '/' : `/p/${page.id}`;
 }
 
 const LAYOUT_ICONS: Record<PageLayout, typeof LayoutGrid> = {

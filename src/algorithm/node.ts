@@ -15,6 +15,8 @@ import {
   type FeedRequest,
   type Page,
   type Preferences,
+  type ReportRequest,
+  type ReportResponse,
   type SearchRequest,
   type SubmissionRequest,
   type SuggestionKind,
@@ -27,7 +29,7 @@ import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, 
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
 import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
 import type { Discovered } from './crawler/types.js';
-import { Registry, type Entry } from './registry.js';
+import { Registry, identityOf, type Entry, type EntryInput } from './registry.js';
 import { prioritize, priorityOf, SOURCE_CATALOG, sourceKeyOf } from './sources.js';
 
 export interface AlgorithmConfig extends BaseConfig {
@@ -66,7 +68,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     payments: [{ id: 'voucher', type: 'voucher' }],
     peers: [],
     pricing: { feed: 0, search: 0, lookup: 0, submission: 0 },
-    rewards: { vote: 1, voteDailyCap: 50, acceptedSuggestion: 10, requireIdentity: false, autoAcceptAgreement: 3 },
+    rewards: { vote: 1, voteDailyCap: 50, acceptedSuggestion: 10, report: 2, reportDailyCap: 100, requireIdentity: false, autoAcceptAgreement: 3 },
     ranking: {
       strategy: 'balanced',
       weights: { quality: 1, recency: 1, preference: 1.5, discovery: 0.3 },
@@ -133,6 +135,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   readonly crawler: Crawler;
   private lastPrune = 0;
+  /** Preview images being fetched right now (a few at a time). */
+  private thumbFetching = 0;
 
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
@@ -151,13 +155,45 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const config = this.config.crawler;
     let added = 0;
     for (const item of items) {
-      if (this.registry.upsertDiscovered(item, { autoList: config.autoList, defaultRating: config.defaultRating }) === 'added') added++;
+      const result = this.registry.upsertDiscovered(item, { autoList: config.autoList, defaultRating: config.defaultRating });
+      if (result === 'added') added++;
+      if (result !== 'invalid') {
+        const entry = this.registry.get(item.id);
+        if (entry) this.cacheThumbnail(entry);
+      }
     }
     if (added && Date.now() - this.lastPrune > 60_000) {
       this.lastPrune = Date.now();
       this.registry.prune(config.maxEntries);
     }
     return added;
+  }
+
+  /**
+   * Keeps the preview image of a video, stream or image here, once. Serving content to
+   * clients then never has to look the preview up on the platform again.
+   */
+  private cacheThumbnail(entry: Entry): void {
+    if (entry.thumbnail || !entry.thumbnailUrl || this.thumbFetching >= 4) return;
+    const url = entry.thumbnailUrl;
+    if (!/^https?:\/\//.test(url)) return;
+    this.thumbFetching++;
+    void (async () => {
+      try {
+        const send = this.transport(url)?.fetch ?? fetch;
+        const response = await send(url, { signal: AbortSignal.timeout(15_000) });
+        if (!response.ok) return;
+        const type = (response.headers.get('content-type') ?? '').split(';')[0];
+        if (!/^image\/(jpeg|png|webp)$/.test(type)) return;
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (!bytes.length || bytes.length > 200 * 1024) return;
+        this.registry.setThumbnail(entry.id, `data:${type};base64,${bytes.toString('base64')}`);
+      } catch (error) {
+        log.debug(`Preview of ${entry.id}: ${(error as Error).message}`);
+      } finally {
+        this.thumbFetching--;
+      }
+    })();
   }
 
   async start(): Promise<void> {
@@ -258,7 +294,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   protected registerRoutes(): void {
     const router = this.router;
 
-    router.get('/v1/taxonomy', () => ({ formats: FORMATS, ratings: RATINGS, topics: this.config.topics, suggestionKinds: SUGGESTION_KINDS }));
+    router.get('/v1/taxonomy', () => ({
+      formats: FORMATS,
+      ratings: RATINGS,
+      topics: this.config.topics,
+      suggestionKinds: SUGGESTION_KINDS,
+      platforms: SOURCE_CATALOG,
+    }));
 
     router.post('/v1/feed', async (ctx) => {
       const body = await readJson<FeedRequest>(ctx.req);
@@ -285,6 +327,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const filters = this.preferencesOf(body.filters);
       let visible = this.registry.visible(filters, this.config.policy.maxRating);
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
+      const platform = String(body.filters?.platform ?? '').slice(0, 40);
+      if (platform) visible = visible.filter((entry) => sourceKeyOf(entry) === platform);
       const results = this.bySource(this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry));
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
@@ -428,6 +472,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           .slice(0, 200),
       };
     });
+
+    // A client that played content from outside the network reports its id or link
+    // here; the node keeps what it did not have and rewards the reporter.
+    router.post('/v1/reports', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<ReportRequest>(ctx.req);
+      return this.report(ctx, account, String(body.id ?? ''));
+    });
   }
 
   private validateSuggestion(kind: SuggestionKind, raw: string): string {
@@ -444,6 +496,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         const tag = normalizeTag(value);
         if (!tag) throw badRequest('Empty tag');
         return tag;
+      }
+      case 'creator': {
+        if (!value || value.length > 120) throw badRequest('A creator name is required (at most 120 characters)');
+        return value;
+      }
+      case 'published': {
+        const time = Date.parse(value);
+        if (!Number.isFinite(time)) throw badRequest('A publish time is a date like 2024-05-01 or 2024-05-01T12:00:00Z');
+        if (time > Date.now() + 86_400_000) throw badRequest('A publish time cannot be in the future');
+        return new Date(time).toISOString();
       }
       case 'report':
         return value.slice(0, 64) || 'other';
@@ -504,6 +566,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         case 'rating':
           entry.rating = suggestion.value as Rating;
           break;
+        case 'creator': {
+          // Missing information a client provided: the creator of the content.
+          const id = `name:${slug(suggestion.value)}`;
+          this.registry.upsertCreator({ id, name: suggestion.value, kind: 'unknown' });
+          entry.creatorId = id;
+          break;
+        }
+        case 'published':
+          entry.publishedAt = suggestion.value;
+          break;
         case 'report':
           break;
       }
@@ -525,15 +597,44 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.contributions.changed();
   }
 
+  /**
+   * A client reports the content id or link it played from outside the network. What the
+   * node did not have is kept for review, and the reporter earns credits for finding it.
+   */
+  report(ctx: Ctx, account: Account, raw: string): ReportResponse {
+    const trimmed = raw.trim();
+    if (!trimmed) throw badRequest('id is required');
+    const { key, contentId, link } = identityOf({ id: trimmed });
+    const existing = this.registry.findByRef(trimmed);
+    let newInfo = false;
+    if (!existing) {
+      this.registry.upsert({ id: key, contentId, link, status: 'pending', origin: 'report' });
+      newInfo = true;
+    } else if ((contentId && !existing.contentId) || (link && !existing.link)) {
+      // The node knew the content, but not the content id (or the link) it was played from.
+      this.registry.upsert({ id: existing.id, contentId: contentId ?? existing.contentId, link: link ?? existing.link });
+      newInfo = true;
+    }
+    let credited = 0;
+    const rewards = this.config.rewards;
+    if (newInfo && rewards.report > 0 && this.canEarn(account) && this.ledger.daily(account, 'reports') < rewards.reportDailyCap) {
+      this.ledger.addDaily(account, 'reports', 1);
+      const updated = this.ledger.credit(account.id, rewards.report, 'report', key);
+      ctx.res.setHeader('x-vs-balance', String(updated.balance));
+      credited = rewards.report;
+    }
+    return { known: !newInfo, credited };
+  }
+
   submit(account: Account, body: SubmissionRequest): Submission {
-    const parsed = parseContentId(String(body.id ?? ''));
-    if (!parsed) throw badRequest('Not a content id');
+    const identity = identityOf({ id: body.id, link: body.link });
+    const full = String(body.id ?? body.link ?? identity.key);
     if (typeof body.title !== 'string' || !body.title.trim()) throw badRequest('A title is required');
-    const existing = this.registry.get(parsed.base);
+    const existing = this.registry.get(identity.key);
     if (existing?.status === 'listed') throw new HttpError(409, 'already_listed', 'This content is already listed');
     if (existing?.status === 'blocked') throw forbidden('This content is blocked on this node');
     const pending = Object.values(this.contributions.data.submissions).find(
-      (s) => s.contentId.split('~')[0] === parsed.base && s.status === 'pending'
+      (s) => baseId(s.contentId) === identity.key && s.status === 'pending'
     );
     if (pending) throw new HttpError(409, 'already_submitted', 'This content is already waiting for review');
     if (body.format !== undefined && !FORMATS.includes(body.format)) throw badRequest('Unknown format');
@@ -542,17 +643,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const proof = body.creatorProof;
     if (proof) {
       if (!isKeyId(proof.key) || Math.abs(Date.now() - Number(proof.ts)) > 15 * 60_000) throw badRequest('Bad or stale creatorProof');
-      if (!verifySignature(proof.key, claimSigningPayload(this.identity.id, parsed.base, Number(proof.ts)), String(proof.sig))) {
+      if (!verifySignature(proof.key, claimSigningPayload(this.identity.id, identity.key, Number(proof.ts)), String(proof.sig))) {
         throw badRequest('creatorProof signature does not match');
       }
       verifiedCreator = proof.key;
     }
-    if (this.config.pricing.submission > 0) this.ledger.debit(account.id, this.config.pricing.submission, 'submission', parsed.base);
+    if (this.config.pricing.submission > 0) this.ledger.debit(account.id, this.config.pricing.submission, 'submission', identity.key);
     const { thumbnail, creatorProof: _proof, ...request } = body;
-    if (thumbnail) this.registry.setThumbnail(parsed.base, thumbnail);
+    if (thumbnail) this.registry.setThumbnail(identity.key, thumbnail);
     const submission: Submission = {
       id: randomId('sub-', 8),
-      contentId: parsed.full,
+      contentId: full,
       accountId: account.id,
       request: {
         ...request,
@@ -586,6 +687,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     const entry = this.registry.upsert({
       id: submission.contentId,
+      link: request.link,
       status: 'listed',
       title: request.title,
       description: request.description,
@@ -631,6 +733,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       // Whatever the operator touches is theirs: the crawler will not change it again.
       const entry = this.registry.upsert({ ...rest, origin: rest.origin ?? 'operator' });
       if (typeof thumbnail === 'string') this.registry.setThumbnail(entry.id, thumbnail);
+      else this.cacheThumbnail(entry);
       return this.registry.get(entry.id);
     });
     router.post('/v1/admin/content/:id/block', async (ctx) => {

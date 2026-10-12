@@ -59,7 +59,7 @@ function PagesCard() {
         <h2>Pages</h2>
         <button
           className="primary small"
-          onClick={() => setEditing({ page: { ...presetPage('home'), id: newPageId(), preset: undefined, title: 'My page', icon: 'star' }, isNew: true })}
+          onClick={() => setEditing({ page: { ...presetPage('videos'), filters: { ...presetPage('videos').filters, formats: [] }, id: newPageId(), preset: undefined, title: 'My page', icon: 'star' }, isNew: true })}
         >
           <Plus size={15} /> New page
         </button>

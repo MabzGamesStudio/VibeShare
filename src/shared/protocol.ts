@@ -73,6 +73,7 @@ export interface ProviderPricing {
 export interface ProviderInfo extends NodeInfoBase {
   type: 'provider';
   pricing: ProviderPricing;
+  rewards: ProviderRewards;
   services: { storage: { enabled: boolean; openJobs: number } };
   stats: { contents: number; bytes: number };
 }
@@ -91,10 +92,19 @@ export interface AlgorithmRewards {
   voteDailyCap: number;
   /** Credits when a suggested tag/rating/topic is accepted. */
   acceptedSuggestion: number;
+  /** Credits for reporting a content id or link the node did not have. */
+  report: number;
+  reportDailyCap: number;
   /** Only key-based accounts earn rewards. */
   requireIdentity: boolean;
   /** Accept a suggestion automatically once this many accounts made it (0 = only by hand). */
   autoAcceptAgreement: number;
+}
+
+export interface ProviderRewards {
+  /** Credits for reporting a content id the node did not have. */
+  report: number;
+  reportDailyCap: number;
 }
 
 export interface AlgorithmInfo extends NodeInfoBase {
@@ -274,9 +284,13 @@ export interface ContentItem {
   /** Provider node references known to host the content. */
   providers?: string[];
   notes?: TagNote[];
+  /** The VibeShare content id (vs1…), when the content is published on VibeShare. Kept separate from the link. */
+  contentId?: string;
+  /** Where the content lives outside VibeShare (a link or a platform source like `yt:…`), when it has no content id. */
+  link?: string;
 }
 
-export type ContentOrigin = 'operator' | 'submission' | 'crawler';
+export type ContentOrigin = 'operator' | 'submission' | 'crawler' | 'report';
 
 export interface ContentMedia {
   url: string;
@@ -323,7 +337,7 @@ export type SearchSort = 'relevance' | 'new' | 'top';
 
 export interface SearchRequest {
   query: string;
-  filters?: Preferences & { creator?: string };
+  filters?: Preferences & { creator?: string; platform?: string };
   sort?: SearchSort;
   cursor?: string;
   limit?: number;
@@ -335,7 +349,7 @@ export interface Page<T> {
   total?: number;
 }
 
-export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'report'] as const;
+export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'creator', 'published', 'report'] as const;
 export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
 
 export interface SuggestionRequest {
@@ -346,9 +360,28 @@ export interface SuggestionRequest {
   timestamp?: number;
 }
 
+/**
+ * A content id or link a client came across while playing content from outside the
+ * network (a platform embed, a media URL…). Nodes reward reports of things they did
+ * not already have.
+ */
+export interface ReportRequest {
+  /** A content id (with sources) or a link to the content. */
+  id: string;
+}
+
+export interface ReportResponse {
+  /** True when the node already had the content. */
+  known: boolean;
+  /** Credits earned for the report (0 when the node already had it). */
+  credited: number;
+}
+
 export interface SubmissionRequest {
   id: string;
   title: string;
+  /** Where the content lives outside VibeShare (a link or a platform source), when there is no content id. */
+  link?: string;
   description?: string;
   format?: Format;
   rating?: Rating;

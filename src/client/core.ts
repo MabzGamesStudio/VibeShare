@@ -124,10 +124,7 @@ export class ClientCore {
     const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
       const price = this.nodes.algorithmPrice(node, priceKind);
       // (Paid answers carry the new balance; nothing else is asked.)
-      return this.nodes.client(node).json<Page<ContentItem>>(path, {
-        body: { ...body, limit, cursor: cursors[node.id] ?? undefined },
-        auth: price > 0,
-      });
+      return this.askJson<Page<ContentItem>>(node, path, { ...body, limit, cursor: cursors[node.id] ?? undefined }, price > 0);
     };
 
     if (this.settings.feedMode === 'primary') {
@@ -210,9 +207,13 @@ export class ClientCore {
       const price = this.nodes.algorithmPrice(node, 'lookup');
       if (!this.nodes.affordable(node, price)) continue;
       try {
-        const result = await this.nodes
-          .client(node)
-          .json<LookupResult>(`/v1/content/${encodeURIComponent(parsed.full)}`, { auth: price > 0, timeoutMs: 8000 });
+        const result = await this.askJson<LookupResult>(
+          node,
+          `/v1/content/${encodeURIComponent(parsed.full)}`,
+          undefined,
+          price > 0,
+          8000
+        );
         if (result.status === 'unknown') continue;
         view.status = result.status;
         view.decidedBy = { id: node.id, name: node.name };
@@ -306,6 +307,42 @@ export class ClientCore {
   async removeNode(id: string, release: boolean): Promise<void> {
     await this.options.beforeRemoveNode?.(id, release);
     this.nodes.remove(id);
+  }
+
+  /**
+   * Asks a node on the account only when it charges for the answer. When the node says
+   * "this node charges …" to an anonymous request, its cached price was stale: the
+   * question is asked again with the account and the node's info is refreshed in the
+   * background, so the next question carries the account right away.
+   */
+  private async askJson<T>(node: NodeEntry, path: string, body: unknown, auth: boolean, timeoutMs?: number): Promise<T> {
+    const client = this.nodes.client(node);
+    try {
+      return await client.json<T>(path, { body, auth, timeoutMs });
+    } catch (error) {
+      if (auth || !(error instanceof RemoteError) || error.status !== 401) throw error;
+      void this.nodes.refresh(node);
+      return await client.json<T>(path, { body, auth: true, timeoutMs });
+    }
+  }
+
+  /**
+   * Reports a content id or link the client played from outside the network to every
+   * node that rewards such reports (algorithm nodes and content providers). Nodes that
+   * already had the content keep it and pay nothing.
+   */
+  async report(id: string): Promise<{ nodes: { node: string; name: string; known?: boolean; credited?: number; error?: string }[] }> {
+    const results = await Promise.all(
+      [...this.nodes.active('algorithm'), ...this.nodes.active('provider')].map(async (entry) => {
+        try {
+          const result = await this.nodes.client(entry).json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
+          return { node: entry.id, name: entry.name, ...result };
+        } catch (error) {
+          return { node: entry.id, name: entry.name, error: errorText(error) };
+        }
+      })
+    );
+    return { nodes: results };
   }
 
   async contributions() {

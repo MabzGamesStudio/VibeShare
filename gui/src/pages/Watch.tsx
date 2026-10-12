@@ -39,6 +39,8 @@ const KIND_LABELS: Record<SuggestionKind, string> = {
   topic: 'Add a topic',
   format: 'Correct the format',
   rating: 'Correct the age rating',
+  creator: 'Add the creator',
+  published: 'Add the publish time',
   report: 'Report a problem',
 };
 
@@ -314,7 +316,14 @@ function SuggestDialog({
     setBusy(true);
     try {
       const result = await api<{ status: string; agreeing: number }>('/api/suggest', {
-        body: { nodeId, id: view.id, kind, value: kind === 'report' ? value || 'other' : value, reason, timestamp: atTime ? time : undefined },
+        body: {
+          nodeId,
+          id: view.id,
+          kind,
+          value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
+          reason,
+          timestamp: atTime ? time : undefined,
+        },
       });
       toast(
         result.status === 'accepted'
@@ -403,6 +412,16 @@ function SuggestDialog({
               <option value="other">Other</option>
             </select>
           </label>
+        ) : kind === 'creator' ? (
+          <label className="field">
+            Creator
+            <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Who made this" />
+          </label>
+        ) : kind === 'published' ? (
+          <label className="field">
+            Published
+            <input type="datetime-local" value={value} onChange={(e) => setValue(e.target.value)} />
+          </label>
         ) : (
           <label className="field">
             Tag
@@ -446,6 +465,16 @@ export function WatchPage() {
       setStats(result.item?.stats ?? { likes: 0, dislikes: 0 });
       const title = result.item?.title ?? (result.manifest?.meta?.title as string | undefined) ?? result.manifest?.name ?? result.id;
       void api('/api/history', { body: { id: result.id, title } });
+      // Content that plays from outside the network: report its id (or link) to the
+      // nodes, which reward what they did not already have.
+      if (!result.streamUrl) {
+        void api<{ nodes: { credited?: number }[] }>('/api/report', { body: { id: result.id } })
+          .then((reported) => {
+            const earned = reported.nodes.reduce((sum, node) => sum + (node.credited ?? 0), 0);
+            if (earned > 0) toast(`+${earned} credits for telling your nodes about this content`, 'success');
+          })
+          .catch(() => undefined);
+      }
       if (result.decidedBy && result.status === 'listed') {
         api<{ vote: number }>(`/api/vote/${result.decidedBy.id}?content=${encodeURIComponent(result.id)}`)
           .then((r) => setVote(r.vote))

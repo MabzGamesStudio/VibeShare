@@ -120,7 +120,7 @@ export const PAGE_ICONS = [
 ] as const;
 export type PageIcon = (typeof PAGE_ICONS)[number];
 
-export type PagePreset = 'home' | 'videos' | 'shorts' | 'images';
+export type PagePreset = 'videos' | 'shorts' | 'images';
 
 export interface PageFilters {
   /** Only these formats (empty = all). */

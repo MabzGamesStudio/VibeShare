@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { writeFileSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { generateIdentity, signData } from '../src/shared/crypto.js';
 import { claimSigningPayload, type ContentItem, type LookupResult, type Page } from '../src/shared/protocol.js';
-import { ADMIN, admin, clientFor, startAlgorithm, tempDir } from './helpers.js';
+import { ADMIN, admin, clientFor, startAlgorithm, tempDir, waitFor } from './helpers.js';
 
 const HOUR = 3600_000;
 const ago = (hours: number) => new Date(Date.now() - hours * HOUR).toISOString();
@@ -30,9 +32,14 @@ describe('algorithm node', async () => {
     const { items } = await client.json<{ items: LookupResult[] }>('/v1/lookup', { body: { ids: [vid, 'x:999', 'yt:never'] }, auth: false });
     assert.equal(items[0].status, 'listed');
     assert.equal((items[0] as ContentItem).id, `${vid}~yt:abc123`, 'fallback sources travel with the id');
+    assert.equal((items[0] as ContentItem).contentId, vid, 'the content id is kept separately');
+    assert.equal((items[0] as ContentItem).link, 'yt:abc123', 'as is the link');
     assert.equal((items[0] as ContentItem).creator?.kind, 'company');
     assert.equal(items[1].status, 'blocked');
     assert.equal(items[2].status, 'unknown');
+    const external = await client.json<LookupResult>('/v1/content/yt:music1');
+    assert.equal((external as ContentItem).contentId, undefined, 'external-only content has no content id');
+    assert.equal((external as ContentItem).link, 'yt:music1');
   });
 
   it('filters the feed by preferences', async () => {
@@ -130,6 +137,79 @@ describe('algorithm node', async () => {
     const account = await client.json<{ account: { balance: number } }>('/v1/account');
     assert.equal(account.account.balance, 93);
     await admin(url, '/v1/admin/config', { method: 'PUT', body: { pricing: { search: 0 } } });
+  });
+
+  it('rewards clients for reporting content ids and links it did not have', async () => {
+    const client = clientFor(url);
+    const report = (id: string) => client.json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
+    assert.deepEqual(await report('yt:brand-new'), { known: false, credited: 2 });
+    assert.deepEqual(await report('yt:brand-new'), { known: true, credited: 0 }, 'what it already has earns nothing');
+    assert.deepEqual(await report('https://example.org/clips/one.mp4'), { known: false, credited: 2 }, 'a plain link is kept too');
+    // The entry below has a link but no content id: the report fills the missing side in.
+    const filled = await report(`vs1${'c'.repeat(52)}~yt:music1`);
+    assert.deepEqual(filled, { known: false, credited: 2 });
+    const item = await client.json<ContentItem>('/v1/content/yt:music1');
+    assert.equal(item.contentId, `vs1${'c'.repeat(52)}`, 'the report filled in the missing content id');
+    const account = await client.json<{ account: { balance: number } }>('/v1/account');
+    assert.equal(account.account.balance, 100 + 2 + 2 + 2);
+  });
+
+  it('takes missing information like the creator or the publish time for credits', async () => {
+    const a = clientFor(url);
+    const b = clientFor(url);
+    const creator = { id: 'yt:music1', kind: 'creator', value: 'Lo-fi Studio', reason: 'Named in the track list' };
+    assert.equal((await a.json<{ status: string }>('/v1/suggestions', { body: creator })).status, 'pending');
+    const second = await b.json<{ status: string }>('/v1/suggestions', { body: { ...creator, reason: 'Also in the description' } });
+    assert.equal(second.status, 'accepted', 'once enough accounts agree the missing information is filled in');
+    const item = await a.json<ContentItem>('/v1/content/yt:music1');
+    assert.equal(item.creator?.name, 'Lo-fi Studio');
+    const accepted = await a.json<{ id: string; status: string }>('/v1/suggestions', {
+      body: { id: 'yt:music1', kind: 'published', value: '2024-05-01 12:00', reason: 'The upload date on the platform' },
+    });
+    assert.equal(accepted.status, 'pending');
+    await admin(url, `/v1/admin/suggestions/${accepted.id}/accept`, { method: 'POST' });
+    const dated = await a.json<ContentItem>('/v1/content/yt:music1');
+    assert.equal(dated.publishedAt, new Date('2024-05-01 12:00').toISOString());
+  });
+
+  it('filters searches by platform', async () => {
+    const client = clientFor(url);
+    const youtube = await client.json<Page<ContentItem>>('/v1/search', { body: { query: '', filters: { platform: 'youtube' } }, auth: false });
+    assert.deepEqual(youtube.items.map((item) => item.id), ['yt:music1']);
+    const all = await client.json<Page<ContentItem>>('/v1/search', { body: { query: '' }, auth: false });
+    assert.ok(all.items.length > youtube.items.length);
+    const taxonomy = await client.json<{ platforms: { key: string }[] }>('/v1/taxonomy');
+    assert.ok(taxonomy.platforms.some((platform) => platform.key === 'youtube'));
+  });
+});
+
+describe('preview images are kept on the algorithm node', async () => {
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('the-preview-bytes')]);
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'image/png' }).end(png);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const previewUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/preview.png`;
+  const node = await startAlgorithm();
+  after(async () => {
+    await node.stop();
+    server.close();
+  });
+
+  it('fetches a preview once and serves it itself from then on', async () => {
+    await admin(node.url(), '/v1/admin/content', {
+      method: 'PUT',
+      body: { id: 'yt:preview1', title: 'A clip', format: 'short-video', thumbnailUrl: previewUrl },
+    });
+    const entry = await waitFor(() => {
+      const found = node.registry.get('yt:preview1');
+      return found?.thumbnail ? found : undefined;
+    });
+    const item = node.registry.view(entry);
+    assert.match(item.thumbnail!, /^\/v1\/thumbnails\//);
+    const served = await fetch(node.url() + item.thumbnail!);
+    assert.equal(served.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), png);
   });
 });
 

@@ -14,6 +14,7 @@ import {
 import { base32Decode, base32Encode, canonicalJson } from '../src/shared/encoding.js';
 import { formatNodeRef, parseNodeRef, parseNodeRefs } from '../src/shared/noderef.js';
 import { baseId, embedFor, parseContentId, sourceFromUrl, withSources } from '../src/shared/sources.js';
+import { prioritize } from '../src/algorithm/sources.js';
 import { signS3Request } from '../src/provider/storage/s3sign.js';
 import { formatUnits, unitsForCredits } from '../src/commerce/payments.js';
 import { ratingAllowed } from '../src/shared/taxonomy.js';
@@ -128,6 +129,19 @@ describe('content ids and sources', () => {
     const { creator: _c, ...unsigned } = manifest;
     assert.notEqual(contentIdOf(unsigned as typeof manifest), contentIdOf(manifest));
     assert.deepEqual(chunksForRange(manifest, 1000, 2100), { first: 0, last: 2, offset: 1000 });
+  });
+});
+
+describe('source priorities', () => {
+  it('always put content of a higher-priority source first', () => {
+    const items = [{ id: 'ia:old' }, { id: 'yt:new' }, { id: 'vimeo:mid' }, { id: 'yt:second' }];
+    assert.deepEqual(
+      prioritize(items, { youtube: 10, vimeo: 5, archive: 1 }).map((item) => item.id),
+      ['yt:new', 'yt:second', 'vimeo:mid', 'ia:old'],
+      'the higher the priority of the platform, the earlier its content'
+    );
+    assert.deepEqual(prioritize(items, {}).map((item) => item.id), ['ia:old', 'yt:new', 'vimeo:mid', 'yt:second'], 'the same priority keeps the ranking');
+    assert.deepEqual(prioritize(items, { archive: 0 }).map((item) => item.id), ['yt:new', 'vimeo:mid', 'yt:second'], 'priority 0 hides a source');
   });
 });
 

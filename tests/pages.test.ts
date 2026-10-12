@@ -13,19 +13,17 @@ import {
 import { admin, startAlgorithm, startClient, tempDir } from './helpers.js';
 
 describe('page configurations', () => {
-  it('come with home, videos, shorts and images pages', () => {
+  it('come with videos, shorts and images pages, the videos page being the home page', () => {
     const settings = defaultSettings();
     assert.deepEqual(
       settings.pages.map((page) => [page.id, page.layout, page.filters.formats.join()]),
       [
-        ['home', 'canvas', ''],
         ['videos', 'grid', 'video,live'],
         ['shorts', 'shorts', 'short-video'],
         ['images', 'stream', 'image'],
       ]
     );
-    assert.deepEqual(presetPage('videos').fields, ['title', 'creator', 'platform']);
-    assert.deepEqual(presetPage('home').fields, ['title', 'creator'], 'the canvas shows only the title and creator');
+    assert.deepEqual(presetPage('videos').fields, ['title', 'creator', 'published'], 'the video home page shows title, time and creator');
     assert.equal(settings.loadPauseMs, 1500, 'a pause before each page of results');
     assert.equal(settings.shareBaseUrl, 'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web');
   });
@@ -33,26 +31,25 @@ describe('page configurations', () => {
   it('keep every preset page when older settings are loaded', () => {
     const old = { ...defaultSettings(), pages: undefined, shareBaseUrl: undefined } as unknown as Partial<Settings>;
     const settings = normalizeSettings(old);
-    assert.deepEqual(settings.pages.map((page) => page.id), ['home', 'videos', 'shorts', 'images']);
+    assert.deepEqual(settings.pages.map((page) => page.id), ['videos', 'shorts', 'images']);
     assert.equal(settings.shareBaseUrl, DEFAULT_SHARE_BASE_URL);
     const custom = normalizeSettings({ pages: [{ id: 'p-music', title: 'Music', layout: 'list', fields: ['title'] } as PageConfig] });
-    assert.deepEqual(custom.pages.map((page) => page.id), ['p-music', 'home', 'videos', 'shorts', 'images']);
+    assert.deepEqual(custom.pages.map((page) => page.id), ['p-music', 'videos', 'shorts', 'images']);
     assert.equal(custom.pages[0].source, 'feed');
     assert.deepEqual(custom.pages[0].filters.formats, []);
   });
 
-  it('move an unchanged old home page to the 2D canvas but keep customized ones', () => {
-    const old = { ...presetPage('home'), layout: 'grid' as const, fields: ['title', 'creator', 'published', 'via'] as PageConfig['fields'] };
+  it('replace the old default home page with the video home page', () => {
+    const old = { ...presetPage('videos'), id: 'home', preset: 'home', layout: 'canvas', title: 'Home' } as unknown as PageConfig;
     const settings = normalizeSettings({ pages: [old] });
-    assert.equal(settings.pages.find((page) => page.id === 'home')!.layout, 'canvas');
-    const custom = normalizeSettings({ pages: [{ ...old, fields: ['title', 'likes'] }] });
-    assert.equal(custom.pages.find((page) => page.id === 'home')!.layout, 'grid');
+    assert.deepEqual(settings.pages.map((page) => page.id), ['videos', 'shorts', 'images']);
+    assert.equal(settings.pages.find((page) => page.id === 'videos')!.layout, 'grid');
     assert.equal(applySettingsPatch(defaultSettings(), { loadPauseMs: 99_000 }).loadPauseMs, 10_000);
   });
 
   it('are validated when saved', () => {
     const current = defaultSettings();
-    const page = (patch: Partial<PageConfig>) => ({ ...presetPage('home'), id: 'p-test', preset: undefined, ...patch });
+    const page = (patch: Partial<PageConfig>) => ({ ...presetPage('videos'), id: 'p-test', preset: undefined, ...patch });
     assert.throws(() => applySettingsPatch(current, { pages: [...current.pages, page({ layout: 'carousel' as never })] }), /Unknown layout/);
     assert.throws(() => applySettingsPatch(current, { pages: [...current.pages, page({ source: 'everything' as never })] }), /Unknown content source/);
     assert.throws(() => applySettingsPatch(current, { pages: [...current.pages, page({ id: 'videos' })] }), /duplicate page id/);
@@ -133,7 +130,7 @@ describe('a client browsing pages', async () => {
 
   it('saves page configurations and refuses bad ones', async () => {
     const state = await api<{ settings: Settings }>('/api/state');
-    const music: PageConfig = { ...presetPage('home'), id: 'p-music', preset: undefined, title: 'Music', icon: 'music', layout: 'list', fields: ['title', 'likes'] };
+    const music: PageConfig = { ...presetPage('videos'), id: 'p-music', preset: undefined, title: 'Music', icon: 'music', layout: 'list', fields: ['title', 'likes'] };
     const saved = await api<Settings>('/api/settings', { method: 'PATCH', body: { pages: [...state.settings.pages, music] } });
     assert.equal(saved.pages.at(-1)!.title, 'Music');
     const reloaded = await api<{ settings: Settings }>('/api/state');
@@ -147,3 +144,28 @@ describe('a client browsing pages', async () => {
     assert.equal(shared.shareBaseUrl, 'https://example.org/vs');
   });
 });
+
+describe('a client paying for search', async () => {
+  const { dir, cleanup } = tempDir();
+  const algorithm = await startAlgorithm({ name: 'Paid Curator' });
+  const { client, api } = await startClient(dir);
+  after(async () => {
+    await client.stop();
+    await algorithm.stop();
+    cleanup();
+  });
+
+  it('pays even when the node began charging after the client learnt its prices', async () => {
+    await api('/api/nodes', { body: { text: algorithm.reference() } });
+    await admin(algorithm.url(), '/v1/admin/content', { method: 'PUT', body: { id: 'yt:priced', title: 'A video', format: 'video' } });
+    // The node was free when the client added it and starts charging afterwards.
+    await admin(algorithm.url(), '/v1/admin/config', { method: 'PUT', body: { pricing: { search: 1 } } });
+    const results = await api<FeedResponse>('/api/search', { body: { query: 'video' } });
+    assert.deepEqual(results.errors, []);
+    assert.deepEqual(results.items.map((item) => item.title), ['A video']);
+    const balance = await api<{ nodes: NodeEntry[] }>('/api/state');
+    const node = balance.nodes.find((entry) => entry.id === algorithm.identity.id);
+    assert.equal(node?.balance, 99, 'the search was paid for from the account');
+  });
+});
+

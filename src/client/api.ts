@@ -91,12 +91,18 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     return core.collect('feed', { preferences, seed: body.seed }, body.cursor);
   });
   on('POST', '/api/search', async (request) => {
-    const body = await request.json<{ query?: string; filters?: Preferences & { creator?: string }; sort?: string; cursor?: string }>();
+    const body = await request.json<{ query?: string; filters?: Preferences & { creator?: string; platform?: string }; sort?: string; cursor?: string }>();
     const given = Object.entries(body.filters ?? {}).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length));
     const filters = { ...core.settings.preferences, ...Object.fromEntries(given) };
     return core.collect('search', { query: String(body.query ?? ''), filters, sort: body.sort }, body.cursor);
   });
   on('POST', '/api/browse', async (request) => core.browse(await request.json()));
+  // Content played from outside the network: nodes reward reports of ids they did not have.
+  on('POST', '/api/report', async (request) => {
+    const body = await request.json<{ id?: string }>();
+    if (!body.id) throw badRequest('id is required');
+    return core.report(String(body.id));
+  });
   on('POST', '/api/subscriptions/feed', async (request) => {
     const body = await request.json<{ cursor?: string }>();
     return core.browse({ source: 'subscriptions', cursor: body.cursor });

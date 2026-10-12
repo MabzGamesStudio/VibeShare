@@ -12,8 +12,8 @@ export const CARD_PAGE: PageConfig = {
   ...presetPage('videos'),
   id: 'cards',
   preset: undefined,
-  filters: presetPage('home').filters,
-  fields: ['title', 'creator', 'published', 'via'],
+  filters: { ...presetPage('videos').filters, formats: [] },
+  fields: ['title', 'creator', 'published'],
 };
 
 /** A grid of content from algorithm nodes that loads more as you scroll, with per-node errors. */

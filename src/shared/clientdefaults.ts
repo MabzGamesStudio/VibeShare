@@ -14,20 +14,6 @@ const NO_FILTERS: PageFilters = { formats: [], topics: [], onlyTopics: false, cr
 
 export function presetPage(preset: PagePreset): PageConfig {
   switch (preset) {
-    case 'home':
-      return {
-        id: 'home',
-        title: 'Home',
-        icon: 'home',
-        preset,
-        layout: 'canvas',
-        source: 'feed',
-        filters: { ...NO_FILTERS },
-        thumbnail: true,
-        fields: ['title', 'creator'],
-        options: { autoplay: false, muted: true, columns: 0, size: 'medium' },
-        sidebar: true,
-      };
     case 'videos':
       return {
         id: 'videos',
@@ -38,7 +24,7 @@ export function presetPage(preset: PagePreset): PageConfig {
         source: 'feed',
         filters: { ...NO_FILTERS, formats: ['video', 'live'] },
         thumbnail: true,
-        fields: ['title', 'creator', 'platform'],
+        fields: ['title', 'creator', 'published'],
         options: { autoplay: false, muted: true, columns: 0, size: 'large' },
         sidebar: true,
       };
@@ -73,7 +59,7 @@ export function presetPage(preset: PagePreset): PageConfig {
   }
 }
 
-export const PRESETS: PagePreset[] = ['home', 'videos', 'shorts', 'images'];
+export const PRESETS: PagePreset[] = ['videos', 'shorts', 'images'];
 
 export function defaultPages(): PageConfig[] {
   return PRESETS.map(presetPage);
@@ -112,7 +98,11 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     storageService: { ...base.storageService, ...saved?.storageService },
     tor: { ...base.tor, ...saved?.tor },
   };
-  const pages = Array.isArray(saved?.pages) && saved.pages.length ? saved.pages.map((page) => normalizePage(page)) : base.pages;
+  // The old default home page (a 2D canvas) is gone: the video page is the home page now.
+  const goneHome = (page: { id: string; preset?: string }) => page.id === 'home' || page.preset === 'home';
+  const pages = (Array.isArray(saved?.pages) && saved.pages.length ? saved.pages : base.pages)
+    .filter((page) => !goneHome(page))
+    .map((page) => normalizePage(page));
   for (const preset of PRESETS) {
     if (!pages.some((page) => page.id === preset)) pages.push(presetPage(preset));
   }
@@ -126,26 +116,14 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   return merged;
 }
 
-/** The home page as it came before the 2D canvas: replaced if the user never changed it. */
-function isOldDefaultHome(page: Partial<PageConfig>): boolean {
-  return (
-    page.preset === 'home' &&
-    page.layout === 'grid' &&
-    page.source === 'feed' &&
-    JSON.stringify(page.fields) === JSON.stringify(['title', 'creator', 'published', 'via']) &&
-    !page.filters?.formats?.length &&
-    !page.filters?.topics?.length
-  );
-}
-
 export function normalizePage(page: Partial<PageConfig> & { id: string }): PageConfig {
-  if (isOldDefaultHome(page)) return { ...presetPage('home'), title: page.title || 'Home', sidebar: page.sidebar ?? true };
-  const template = page.preset ? presetPage(page.preset) : presetPage('home');
+  const preset = page.preset as string | undefined;
+  const template = preset && preset !== 'home' ? presetPage(preset as PagePreset) : presetPage('videos');
   return {
     ...template,
     ...page,
     preset: page.preset,
-    filters: { ...NO_FILTERS, ...template.filters, ...page.filters },
+    filters: { ...NO_FILTERS, ...(preset ? template.filters : {}), ...page.filters },
     options: { ...template.options, ...page.options },
     fields: Array.isArray(page.fields) ? page.fields : template.fields,
   } as PageConfig;

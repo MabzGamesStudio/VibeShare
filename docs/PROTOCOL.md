@@ -154,10 +154,11 @@ Rewards: `perRetrieval` per correct retrieval, `perChallenge` per passed challen
 | `GET /v1/thumbnails/:key` | JPEG/PNG/WebP |
 | `POST /v1/creators/latest` | `{ creators, preferences?, cursor? }` → newest content of those creators |
 | `GET /v1/creators/:id`, `GET /v1/creators?q=` | Creator profiles |
-| `GET /v1/taxonomy` | Formats, ratings, topics, suggestion kinds |
+| `GET /v1/taxonomy` | Formats, ratings, topics, suggestion kinds, platforms |
 | `POST /v1/votes` | `{ id, vote: 1 \| -1 \| 0 }` → `{ likes, dislikes, vote, credited }` |
-| `POST /v1/suggestions` | `{ id, kind: tag\|topic\|format\|rating\|report, value, reason, timestamp? }` |
-| `POST /v1/submissions` | `SubmissionRequest` — title, metadata, `thumbnail` (data: URL ≤ 200 kB), `providers`, and optionally `creatorProof { key, ts, sig }` with `sig` over `"vibeshare-claim\n" + nodeId + "\n" + baseId + "\n" + ts` |
+| `POST /v1/suggestions` | `{ id, kind: tag\|topic\|format\|rating\|creator\|published\|report, value, reason, timestamp? }` |
+| `POST /v1/submissions` | `SubmissionRequest` — a content id **or** a link, title, metadata, `thumbnail` (data: URL ≤ 200 kB), `providers`, and optionally `creatorProof { key, ts, sig }` with `sig` over `"vibeshare-claim\n" + nodeId + "\n" + baseId + "\n" + ts` |
+| `POST /v1/reports` | `{ id }` — a content id or link the client played from outside the network → `{ known, credited }`; the node keeps what it did not have and rewards the reporter |
 | `GET /v1/suggestions/mine`, `GET /v1/submissions/mine` | Status of the account's contributions |
 
 A `Preferences.languages` list (`["en"]`) keeps content whose declared language is one of them, and content without one whose title could be in one of them — judged leniently by the scripts and letters it uses ([`src/shared/language.ts`](../src/shared/language.ts)).
