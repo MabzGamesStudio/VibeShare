@@ -78,6 +78,10 @@ describe('a client using a provider and an algorithm node', async () => {
     assert.equal(feed.items[0].viaName, 'Curator');
     const search = await api<FeedResponse>('/api/search', { body: { query: 'mountain' } });
     assert.equal(search.items.length, 1);
+    // The client learns its balance and the node's status from these answers; it never polls.
+    const node = (await api<{ nodes: NodeEntry[] }>('/api/state')).nodes.find((n) => n.id === algorithm.identity.id)!;
+    assert.equal(node.balance, algorithm.ledger.get(node.accountId!)!.balance);
+    assert.equal(node.status?.online, true);
   });
 
   it('streams with Range requests, verifies chunks and pays the provider once', async () => {

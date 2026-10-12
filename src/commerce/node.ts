@@ -299,7 +299,7 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
           ctx.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html);
           return true;
         }
-        if (ctx.url.pathname === '/admin' || ctx.url.pathname.startsWith('/assets/')) {
+        if (ctx.url.pathname === '/admin' || ctx.url.pathname === '/favicon.svg' || ctx.url.pathname.startsWith('/assets/')) {
           const path = ctx.url.pathname === '/admin' ? 'admin.html' : ctx.url.pathname.slice(1);
           return serveStatic(ctx, guiDir ?? null, path);
         }

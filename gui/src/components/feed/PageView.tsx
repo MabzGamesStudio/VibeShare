@@ -9,6 +9,7 @@ import { api } from '../../api';
 import { useApp } from '../../state';
 import { AddNodes } from '../AddNodes';
 import { Chips, Empty, Spinner } from '../ui';
+import { CanvasLayout } from './Canvas';
 import { GridLayout, ListLayout, MasonryLayout } from './Cards';
 import { PageIconView } from './icons';
 import { PageEditor } from './PageEditor';
@@ -82,15 +83,16 @@ export function PageView({ page }: { page: PageConfig }) {
   const paged = usePaged(
     (cursor) =>
       api<FeedResponse>('/api/browse', { body: { source: page.source, query: page.query, filters, sort: page.filters.sort, cursor, seed } }),
-    key
+    key,
+    settings?.loadPauseMs ?? 1500
   );
-  const sentinel = useSentinel(paged.loadMore, !paged.done && page.layout !== 'shorts', paged.items.length);
+  const sentinel = useSentinel(paged.loadMore, !paged.done && page.layout !== 'shorts' && page.layout !== 'canvas', paged.items.length);
 
   if (!state || !settings) return null;
   if (!algorithms.length) return <Welcome />;
 
   const ipfsGateway = settings.ipfsGateway;
-  const quick = page.filters.formats.length === 0 && page.layout !== 'shorts';
+  const quick = page.filters.formats.length === 0 && page.layout !== 'shorts' && page.layout !== 'canvas';
   const summary = describe(page, settings.preferences, enabled.length, settings.feedMode);
 
   const empty: ReactNode =
@@ -135,6 +137,33 @@ export function PageView({ page }: { page: PageConfig }) {
     ) : null;
 
   const editor = editing && <PageEditor page={page} onClose={() => setEditing(false)} />;
+
+  if (page.layout === 'canvas') {
+    return (
+      <div className="page-shorts">
+        <CanvasLayout
+          paged={paged}
+          empty={empty}
+          header={
+            <>
+              <h1 className="row" style={{ gap: 8 }}>
+                <PageIconView icon={page.icon} size={20} /> {page.title}
+              </h1>
+              {page.source === 'feed' && (
+                <button className="ghost icon small" title="New mix" aria-label="New mix" onClick={() => setSeed(Math.random().toString(36).slice(2))}>
+                  <RefreshCw size={15} />
+                </button>
+              )}
+              <button className="small" onClick={() => setEditing(true)}>
+                <Settings2 size={14} /> Customize
+              </button>
+            </>
+          }
+        />
+        {editor}
+      </div>
+    );
+  }
 
   if (page.layout === 'shorts') {
     return (
@@ -208,7 +237,11 @@ export function PageView({ page }: { page: PageConfig }) {
         <StreamLayout items={paged.items} page={page} ipfsGateway={ipfsGateway} />
       )}
       <div ref={sentinel} className="sentinel">
-        {paged.loading && <Spinner />}
+        {paged.loading && (
+          <span className="row faint small">
+            <Spinner /> Loading more…
+          </span>
+        )}
         {paged.done && paged.items.length > 8 && <span className="faint small">That is everything for now</span>}
       </div>
       {editor}

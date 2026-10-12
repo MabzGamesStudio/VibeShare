@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
-import { FORMAT_LABELS, RATING_LABELS } from '../../../../src/shared/taxonomy';
 import { aspectOf, imageFor } from '../../media';
 import { formatDuration, watchPath } from '../../util';
-import { FormatIcon } from '../ContentCard';
 import { ShareButton } from '../Share';
 import { Fields } from './Fields';
 import { Poster } from './Player';
@@ -19,15 +17,14 @@ function previewOf(item: FeedItem): string | undefined {
 export function ItemThumb({ item, share = true }: { item: FeedItem; share?: boolean }) {
   return (
     <div className="thumb">
+      {/* Just the picture and its length: format and age rating are metadata fields a page can show. */}
       <Link to={watchPath(item.id)} className="thumb-link" aria-label={item.title}>
         <Poster item={item} src={previewOf(item)} />
-        <span className="thumb-format badge">
-          <FormatIcon format={item.format} size={12} /> {FORMAT_LABELS[item.format]}
-        </span>
-        <span className="thumb-overlay">
-          {item.rating !== 'all' && <span className="thumb-label">{RATING_LABELS[item.rating]}</span>}
-          {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
-        </span>
+        {item.durationSeconds ? (
+          <span className="thumb-overlay">
+            <span className="thumb-label">{formatDuration(item.durationSeconds)}</span>
+          </span>
+        ) : null}
       </Link>
       {share && (
         <span className="thumb-actions">
@@ -38,7 +35,8 @@ export function ItemThumb({ item, share = true }: { item: FeedItem; share?: bool
   );
 }
 
-const MIN_WIDTH = { small: 200, medium: 260, large: 360 };
+// Big previews: fewer items per screen, and fewer fetched at once.
+const MIN_WIDTH = { small: 240, medium: 340, large: 440 };
 
 export function GridLayout({ items, page }: { items: FeedItem[]; page: PageConfig }) {
   const { columns, size } = page.options;
@@ -72,7 +70,7 @@ export function ListLayout({ items, page }: { items: FeedItem[]; page: PageConfi
   );
 }
 
-const MASONRY_WIDTH = { small: 180, medium: 250, large: 340 };
+const MASONRY_WIDTH = { small: 220, medium: 300, large: 400 };
 const GAP = 14;
 
 /** Columns of different heights; new items go to the shortest column, so nothing moves. */
@@ -112,11 +110,6 @@ export function MasonryLayout({ items, page }: { items: FeedItem[]; page: PageCo
                   <div className="masonry-media" style={aspect ? { aspectRatio: String(aspect) } : undefined}>
                     <Link to={watchPath(item.id)} aria-label={item.title}>
                       <Poster item={item} src={src} />
-                      {item.format !== 'image' && (
-                        <span className="thumb-format badge">
-                          <FormatIcon format={item.format} size={12} /> {FORMAT_LABELS[item.format]}
-                        </span>
-                      )}
                     </Link>
                     <span className="thumb-actions">
                       <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />

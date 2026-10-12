@@ -1,7 +1,7 @@
 import type { AccountResponse, AuthMode, NodeEntry } from '../shared/clientapi.js';
 import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
-import { NodeClient } from '../shared/nodeclient.js';
+import { NodeClient, type RequestResult } from '../shared/nodeclient.js';
 import { formatNodeRef, parseNodeRefs, type NodeType } from '../shared/noderef.js';
 import type { ProviderInfo, AlgorithmInfo } from '../shared/protocol.js';
 import type { ClientStoreLike } from './model.js';
@@ -64,10 +64,34 @@ export class NodeManager {
         accounts.data.accounts[key] = account;
         accounts.changed();
       },
+      onResult: (result) => this.observe(node.id, result),
     });
     if (node.info) client.info = node.info;
     this.clients.set(node.id, { auth: node.auth, client });
     return client;
+  }
+
+  /**
+   * What a request to a node showed: online or not, and the balance when the node sent
+   * it. Status and credits stay current without the client polling anyone.
+   */
+  private observe(id: string, result: RequestResult): void {
+    const node = this.get(id);
+    if (!node) return;
+    const checkedAt = new Date().toISOString();
+    let material = false;
+    if (result.reachable) {
+      material = node.status.online !== true;
+      node.status = { online: true, latencyMs: result.latencyMs ?? node.status.latencyMs, checkedAt };
+    } else {
+      material = node.status.online !== false;
+      node.status = { online: false, checkedAt, error: result.error };
+    }
+    if (result.balance !== undefined && result.balance !== node.balance) {
+      node.balance = result.balance;
+      material = true;
+    }
+    if (material) this.store.changed();
   }
 
   /** Forgets cached sessions (after the identity changed). */

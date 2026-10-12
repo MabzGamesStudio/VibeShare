@@ -38,6 +38,10 @@ export interface ClientOptions {
   /** Access token of the local API (random by default). */
   token?: string;
   serviceIntervalMs?: number;
+  /**
+   * Check every node this often. Off by default: node status and balances come from the
+   * requests the user makes anyway, so an idle client costs nodes and credits nothing.
+   */
   refreshIntervalMs?: number;
 }
 
@@ -257,9 +261,10 @@ export class ClientNode {
     this.server.requestTimeout = 0;
     this.port = await listen(this.server, this.options.port ?? 7700, this.host);
     log.info(`Client node on ${this.url()}`);
-    void this.nodes.refreshAll();
-    this.refreshTimer = setInterval(() => void this.nodes.refreshAll(), this.options.refreshIntervalMs ?? 120_000);
-    this.refreshTimer.unref();
+    if (this.options.refreshIntervalMs) {
+      this.refreshTimer = setInterval(() => void this.nodes.refreshAll(), this.options.refreshIntervalMs);
+      this.refreshTimer.unref();
+    }
     if (this.settings.storageService.enabled) this.worker.start();
   }
 

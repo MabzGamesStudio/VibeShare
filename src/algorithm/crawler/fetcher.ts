@@ -12,10 +12,29 @@ export class RobotsDisallowed extends Error {
 export class FetchFailed extends Error {
   constructor(
     message: string,
-    readonly status = 0
+    readonly status = 0,
+    /** Seconds the server asked to wait (Retry-After), on 429 answers. */
+    readonly retryAfter?: number
   ) {
     super(message);
   }
+}
+
+/** The operator blocked this site (or it is outside the sites they allow). */
+export class SiteBlocked extends Error {
+  constructor(readonly host: string) {
+    super(`${host} is blocked on this node`);
+  }
+}
+
+export interface ApiRequest {
+  method?: string;
+  headers?: Record<string, string>;
+  /** Sent as application/x-www-form-urlencoded. */
+  form?: Record<string, string>;
+  /** Sent as JSON. */
+  json?: unknown;
+  maxBytes?: number;
 }
 
 export interface FetcherOptions {
@@ -28,6 +47,10 @@ export interface FetcherOptions {
   allowPrivate: () => boolean;
   /** Ceiling for robots.txt Crawl-delay, so one site cannot stall the crawler forever. */
   maxDelayMs?: number;
+  /** Sites the operator blocked: nothing is fetched from them. */
+  blocked?: (host: string) => boolean;
+  /** Spacing of official API calls to one host (their own rate limits apply too). */
+  apiDelayMs?: () => number;
 }
 
 export interface Fetched {
@@ -97,6 +120,7 @@ export class PoliteFetcher {
   }
 
   private async checkAddress(url: URL): Promise<void> {
+    if (this.options.blocked?.(url.hostname.toLowerCase())) throw new SiteBlocked(url.hostname);
     if (this.options.allowPrivate()) return;
     const host = url.hostname.replace(/^\[|\]$/g, '');
     if (isIP(host)) {
@@ -262,6 +286,68 @@ export class PoliteFetcher {
       return response;
     }
     throw new FetchFailed('Too many redirects');
+  }
+
+  /**
+   * A call to a platform's official API with the operator's credentials. These follow
+   * the API's terms and rate limits (the crawler counts them against a daily budget),
+   * not robots.txt, which is about crawling pages; addresses are checked and calls to
+   * one host are spaced all the same.
+   */
+  async api(url: string, request: ApiRequest = {}): Promise<Fetched> {
+    const target = new URL(url);
+    if (target.protocol !== 'https:' && target.protocol !== 'http:') throw new FetchFailed(`Unsupported URL ${target}`);
+    await this.checkAddress(target);
+    const stats = this.stats(target.host);
+    await this.slot(target.origin, this.options.apiDelayMs?.() ?? 250);
+    stats.requests++;
+    const headers: Record<string, string> = { 'user-agent': this.options.userAgent, accept: 'application/json', ...request.headers };
+    let body: string | undefined;
+    if (request.form) {
+      body = new URLSearchParams(request.form).toString();
+      headers['content-type'] = 'application/x-www-form-urlencoded';
+    } else if (request.json !== undefined) {
+      body = JSON.stringify(request.json);
+      headers['content-type'] = 'application/json';
+    }
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        method: request.method ?? (body !== undefined ? 'POST' : 'GET'),
+        headers,
+        body,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(this.options.timeoutMs()),
+      });
+    } catch (error) {
+      stats.errors++;
+      stats.lastError = (error as Error).message;
+      throw new FetchFailed(`${target.host}: ${(error as Error).message}`);
+    }
+    const max = request.maxBytes ?? 5_000_000;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of (response.body ?? []) as AsyncIterable<Uint8Array>) {
+      size += chunk.length;
+      if (size > max) throw new FetchFailed(`Response larger than ${max} bytes`);
+      chunks.push(Buffer.from(chunk));
+    }
+    const data = Buffer.concat(chunks);
+    if (!response.ok) {
+      stats.errors++;
+      stats.lastError = `HTTP ${response.status}`;
+      const retry = Number(response.headers.get('retry-after'));
+      const detail = data.toString('utf8').replace(/\s+/g, ' ').slice(0, 160);
+      throw new FetchFailed(`${target.host} answered ${response.status}${detail ? `: ${detail}` : ''}`, response.status, Number.isFinite(retry) ? retry : undefined);
+    }
+    return {
+      url: response.url || target.toString(),
+      status: response.status,
+      contentType: response.headers.get('content-type') ?? '',
+      body: data,
+      text: () => data.toString('utf8'),
+      json: <T>() => JSON.parse(data.toString('utf8')) as T,
+    };
   }
 
   robotsCount(): number {

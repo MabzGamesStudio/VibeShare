@@ -14,9 +14,10 @@ export interface Paged {
 
 /**
  * Items of a page, fetched a page at a time. `key` identifies what is being listed:
- * when it changes, everything starts over.
+ * when it changes, everything starts over. Every page after the first waits `pauseMs`
+ * first: friction, so racing through a list does not spend credits on unseen content.
  */
-export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: string): Paged {
+export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: string, pauseMs = 0): Paged {
   const [items, setItems] = useState<FeedItem[]>([]);
   const itemsRef = useRef<FeedItem[]>([]);
   const [errors, setErrors] = useState<FeedResponse['errors']>([]);
@@ -32,6 +33,8 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
   const empty = useRef(0);
   const loader = useRef(load);
   loader.current = load;
+  const pause = useRef(pauseMs);
+  pause.current = pauseMs;
 
   const fetchPage = useCallback(async (first: boolean) => {
     if (busy.current && !first) return;
@@ -83,7 +86,16 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
   }, [key, fetchPage]);
 
   const loadMore = useCallback(() => {
-    if (!finished.current && !busy.current) void fetchPage(false);
+    if (finished.current || busy.current) return;
+    if (pause.current <= 0) return void fetchPage(false);
+    busy.current = true;
+    setLoading(true);
+    const mine = generation.current;
+    setTimeout(() => {
+      if (mine !== generation.current) return;
+      busy.current = false;
+      void fetchPage(false);
+    }, pause.current);
   }, [fetchPage]);
   const reload = useCallback(() => {
     empty.current = 0;
@@ -106,8 +118,9 @@ export function useSentinel(onVisible: () => void, enabled: boolean, version: un
   useEffect(() => {
     const element = ref.current;
     if (!element || !enabled) return;
+    // Only once the end is (nearly) on screen: nothing is fetched ahead of the reader.
     const observer = new IntersectionObserver((entries) => entries.some((entry) => entry.isIntersecting) && callback.current(), {
-      rootMargin: '800px 0px',
+      rootMargin: '100px 0px',
     });
     observer.observe(element);
     return () => observer.disconnect();

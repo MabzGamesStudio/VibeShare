@@ -1,6 +1,6 @@
 import type { ContentMedia } from '../../shared/protocol.js';
 import { TOPICS, type CreatorKind, type Format, type Rating } from '../../shared/taxonomy.js';
-import type { PoliteFetcher } from './fetcher.js';
+import type { ApiRequest, Fetched, PoliteFetcher } from './fetcher.js';
 
 /** A piece of content found on another platform. */
 export interface Discovered {
@@ -27,6 +27,42 @@ export interface Discovered {
 
 export interface CrawlContext {
   fetcher: PoliteFetcher;
+  /**
+   * A call to the adapter's official API with the operator's credentials, counted against
+   * its daily budget (`units`: what the call costs, 1 by default). Throws BudgetUsed when
+   * today's budget for this kind of work (crawling or client searches) is spent.
+   */
+  api(url: string, request?: ApiRequest & { units?: number }): Promise<Fetched>;
+  /** An OAuth app token (client credentials), fetched once and kept until it expires. */
+  token(get: () => Promise<{ token: string; expiresIn?: number }>): Promise<string>;
+}
+
+/** An official API that needs the operator's own key: where to get one, what it needs. */
+export interface ApiInfo {
+  /** Where the operator registers an app / gets a key. */
+  signupUrl: string;
+  credentials: { key: string; label: string; secret?: boolean }[];
+  /** Limits and terms worth knowing. */
+  note: string;
+  /** Requests (or quota units) per day used by default. */
+  defaultDailyLimit: number;
+  /** The adapter also works without credentials (keys only add more). */
+  optional?: boolean;
+}
+
+/** Budget settings every API adapter has, next to its credentials. */
+export interface ApiBudget {
+  /** Requests (or quota units) to use per day, across crawling and client searches. */
+  dailyLimit: number;
+  /** Share of the daily budget kept for client searches (0–1); crawling uses the rest. */
+  searchShare: number;
+}
+
+/** Thrown by `ctx.api` when the day's budget is spent. */
+export class BudgetUsed extends Error {
+  constructor(readonly adapter: string) {
+    super(`${adapter}: today's API budget is used up`);
+  }
 }
 
 export interface AdapterResult {
@@ -45,6 +81,8 @@ export interface Adapter<C = Record<string, unknown>> {
   /** What this adapter finds, shown to operators. */
   description: string;
   defaults: C & { enabled: boolean };
+  /** Present for adapters that use an official API with the operator's key. */
+  api?: ApiInfo;
   targets?(config: C, queries: string[]): string[];
   discover?(ctx: CrawlContext, config: C, target: string): Promise<AdapterResult>;
   search?(ctx: CrawlContext, config: C, query: string): Promise<Discovered[]>;

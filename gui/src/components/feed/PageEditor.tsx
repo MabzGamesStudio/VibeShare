@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, GalleryVertical, LayoutDashboard, LayoutGrid, List, RotateCcw, Smartphone, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, GalleryVertical, LayoutDashboard, LayoutGrid, List, Move, RotateCcw, Smartphone, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -38,6 +38,7 @@ export function pagePath(page: Pick<PageConfig, 'id'>): string {
 }
 
 const LAYOUT_ICONS: Record<PageLayout, typeof LayoutGrid> = {
+  canvas: Move,
   grid: LayoutGrid,
   list: List,
   shorts: Smartphone,
@@ -112,8 +113,8 @@ function FieldPicker({ fields, onChange }: { fields: MetadataField[]; onChange: 
 }
 
 function Preview({ page }: { page: PageConfig }) {
-  const variant = page.layout === 'shorts' ? 'overlay' : page.layout === 'list' || page.layout === 'masonry' ? 'compact' : 'card';
-  const thumb = page.thumbnail || page.layout === 'shorts' || page.layout === 'stream' || page.layout === 'masonry';
+  const variant = page.layout === 'shorts' ? 'overlay' : page.layout === 'list' || page.layout === 'masonry' || page.layout === 'canvas' ? 'compact' : 'card';
+  const thumb = page.thumbnail || page.layout === 'shorts' || page.layout === 'stream' || page.layout === 'masonry' || page.layout === 'canvas';
   return (
     <div className={`page-preview preview-${page.layout}`}>
       {thumb && (

@@ -18,13 +18,15 @@ describe('page configurations', () => {
     assert.deepEqual(
       settings.pages.map((page) => [page.id, page.layout, page.filters.formats.join()]),
       [
-        ['home', 'grid', ''],
+        ['home', 'canvas', ''],
         ['videos', 'grid', 'video,live'],
         ['shorts', 'shorts', 'short-video'],
         ['images', 'stream', 'image'],
       ]
     );
     assert.deepEqual(presetPage('videos').fields, ['title', 'creator', 'platform']);
+    assert.deepEqual(presetPage('home').fields, ['title', 'creator'], 'the canvas shows only the title and creator');
+    assert.equal(settings.loadPauseMs, 1500, 'a pause before each page of results');
     assert.equal(settings.shareBaseUrl, 'https://MabzGamesStudio.github.io/WebPages/VibeShare');
   });
 
@@ -37,6 +39,15 @@ describe('page configurations', () => {
     assert.deepEqual(custom.pages.map((page) => page.id), ['p-music', 'home', 'videos', 'shorts', 'images']);
     assert.equal(custom.pages[0].source, 'feed');
     assert.deepEqual(custom.pages[0].filters.formats, []);
+  });
+
+  it('move an unchanged old home page to the 2D canvas but keep customized ones', () => {
+    const old = { ...presetPage('home'), layout: 'grid' as const, fields: ['title', 'creator', 'published', 'via'] as PageConfig['fields'] };
+    const settings = normalizeSettings({ pages: [old] });
+    assert.equal(settings.pages.find((page) => page.id === 'home')!.layout, 'canvas');
+    const custom = normalizeSettings({ pages: [{ ...old, fields: ['title', 'likes'] }] });
+    assert.equal(custom.pages.find((page) => page.id === 'home')!.layout, 'grid');
+    assert.equal(applySettingsPatch(defaultSettings(), { loadPauseMs: 99_000 }).loadPauseMs, 10_000);
   });
 
   it('are validated when saved', () => {

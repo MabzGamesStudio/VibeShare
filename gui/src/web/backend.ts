@@ -134,9 +134,8 @@ export async function createBackend(options: BackendOptions): Promise<Backend> {
     await core.addDefaultNodes((options.config.defaultNodes ?? []).filter((ref) => typeof ref === 'string'));
     store.changed();
     await store.saved();
-  } else {
-    void core.nodes.refreshAll();
   }
+  // No checking of nodes on start or on a timer: status and balances come from real use.
 
   const routes: Compiled[] = clientRoutes(core).map((route) => ({ route, parts: route.path.split('/').filter(Boolean) }));
 

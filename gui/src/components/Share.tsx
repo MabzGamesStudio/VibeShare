@@ -1,9 +1,9 @@
 import { Check, Copy, Download, ExternalLink, Link2, Mail, QrCode, Share2 } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { shareLink } from '../../../src/shared/clientdefaults';
 import { parseContentId } from '../../../src/shared/sources';
-import { COLOR_QR, PLAIN_QR, QR_PALETTES, downloadBlob, qrSvg, svgToPng, type QrStyle } from '../qr';
+import { downloadBlob, qrSvg, svgToPng } from '../qr';
 import { useApp } from '../state';
 import { copyText } from '../util';
 import { Modal, Switch } from './ui';
@@ -51,16 +51,16 @@ export function ShareButton({ target, className = 'ghost icon', label }: { targe
   );
 }
 
-type Mode = 'link' | 'qr' | 'color';
+type Mode = 'link' | 'qr';
 
 function fileName(title: string | undefined, extension: string): string {
   const base = (title ?? 'vibeshare').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'vibeshare';
   return `${base}-qr.${extension}`;
 }
 
-function QrPanel({ url, title, style }: { url: string; title?: string; style: QrStyle }) {
+function QrPanel({ url, title }: { url: string; title?: string }) {
   const { toast } = useApp();
-  const svg = useMemo(() => qrSvg(url, style, 1024), [url, style]);
+  const svg = useMemo(() => qrSvg(url, 1024), [url]);
   const preview = useMemo(() => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`, [svg]);
   const canCopyImage = typeof ClipboardItem !== 'undefined' && Boolean(navigator.clipboard?.write);
   return (
@@ -93,66 +93,11 @@ function QrPanel({ url, title, style }: { url: string; title?: string; style: Qr
   );
 }
 
-function ColorOptions({ style, onChange }: { style: QrStyle; onChange: (style: QrStyle) => void }) {
-  return (
-    <div className="form-stack qr-options">
-      <div className="row">
-        {QR_PALETTES.map((palette) => {
-          const on = palette.colors.join() === style.colors.join() && palette.eyes === style.eyes;
-          return (
-            <button
-              key={palette.name}
-              type="button"
-              className={`swatch ${on ? 'on' : ''}`}
-              title={palette.name}
-              aria-label={palette.name}
-              style={{ background: palette.colors.length > 1 ? `linear-gradient(135deg, ${palette.colors.join(', ')})` : palette.colors[0] }}
-              onClick={() => onChange({ ...style, colors: palette.colors, eyes: palette.eyes })}
-            />
-          );
-        })}
-        <label className="swatch-custom" title="Your own colors">
-          <input
-            type="color"
-            value={style.colors[0]}
-            onChange={(e) => onChange({ ...style, colors: [e.target.value, style.colors[1] ?? e.target.value], eyes: e.target.value })}
-          />
-          <input type="color" value={style.colors[1] ?? style.colors[0]} onChange={(e) => onChange({ ...style, colors: [style.colors[0], e.target.value] })} />
-        </label>
-      </div>
-      <div className="row">
-        <select value={style.shape} onChange={(e) => onChange({ ...style, shape: e.target.value as QrStyle['shape'] })} style={{ width: 'auto' }}>
-          <option value="dots">Dots</option>
-          <option value="rounded">Rounded squares</option>
-          <option value="square">Squares</option>
-        </select>
-        <Switch checked={style.logo} onChange={(logo) => onChange({ ...style, logo })} label="Logo" />
-      </div>
-    </div>
-  );
-}
-
 function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => void }) {
   const { state, providers } = useApp();
   const [mode, setMode] = useState<Mode>('link');
   const [copied, setCopied] = useState(false);
   const [withProvider, setWithProvider] = useState(false);
-  const [colorStyle, setColorStyle] = useState<QrStyle>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('vs-qr-style') ?? 'null') as QrStyle | null;
-      return saved && Array.isArray(saved.colors) ? { ...COLOR_QR, ...saved } : COLOR_QR;
-    } catch {
-      return COLOR_QR;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem('vs-qr-style', JSON.stringify(colorStyle));
-    } catch {
-      // storage unavailable
-    }
-  }, [colorStyle]);
-
   const base = state?.settings.shareBaseUrl ?? '';
   const native = Boolean(parseContentId(target.id)?.native);
   const provider = providers.find((node) => node.enabled);
@@ -186,9 +131,6 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
         </button>
         <button role="tab" aria-selected={mode === 'qr'} className={mode === 'qr' ? 'on' : ''} onClick={() => setMode('qr')}>
           <QrCode size={15} /> QR code
-        </button>
-        <button role="tab" aria-selected={mode === 'color'} className={mode === 'color' ? 'on' : ''} onClick={() => setMode('color')}>
-          <QrCode size={15} className="rainbow" /> Color QR
         </button>
       </div>
 
@@ -229,13 +171,7 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
           </a>
         </div>
       )}
-      {mode === 'qr' && <QrPanel url={url} title={target.title} style={PLAIN_QR} />}
-      {mode === 'color' && (
-        <>
-          <QrPanel url={url} title={target.title} style={colorStyle} />
-          <ColorOptions style={colorStyle} onChange={setColorStyle} />
-        </>
-      )}
+      {mode === 'qr' && <QrPanel url={url} title={target.title} />}
 
       <div className="share-footer form-stack">
         {native && provider && (

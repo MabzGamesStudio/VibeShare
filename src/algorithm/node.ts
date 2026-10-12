@@ -28,6 +28,7 @@ import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
 import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
 import type { Discovered } from './crawler/types.js';
 import { Registry, type Entry } from './registry.js';
+import { prioritize, priorityOf, SOURCE_CATALOG, sourceKeyOf } from './sources.js';
 
 export interface AlgorithmConfig extends BaseConfig {
   pricing: AlgorithmPricing;
@@ -46,6 +47,11 @@ export interface AlgorithmConfig extends BaseConfig {
   pageSize: number;
   /** Finding content on other platforms (YouTube, PeerTube, Mastodon, Flickr…) by itself. */
   crawler: CrawlerConfig;
+  /**
+   * How strongly each source of content is favoured in feeds and searches, 0–10 (0 =
+   * never shown). Sources not listed are at 5, except VibeShare's own content at 10.
+   */
+  sources: { priorities: Record<string, number> };
 }
 
 export function algorithmDefaults(): AlgorithmConfig {
@@ -70,6 +76,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     topics: [...TOPICS],
     pageSize: 24,
     crawler: crawlerDefaults(),
+    sources: { priorities: { vibeshare: 10 } },
   };
 }
 
@@ -183,13 +190,45 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     if (!RATINGS.includes(config.policy.maxRating) || !RATINGS.includes(config.policy.defaultMaxRating)) {
       throw badRequest('Unknown rating in policy');
     }
+    for (const [key, value] of Object.entries(config.sources?.priorities ?? {})) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 10) throw badRequest(`Priority of ${key} must be 0–10`);
+    }
+    const crawler = config.crawler;
+    if (!Array.isArray(crawler.blockedSources) || crawler.blockedSources.some((key) => typeof key !== 'string')) {
+      throw badRequest('crawler.blockedSources is a list of source names');
+    }
+    for (const list of [crawler.sites?.allow, crawler.sites?.block]) {
+      if (!Array.isArray(list) || list.some((site) => typeof site !== 'string')) throw badRequest('crawler.sites.allow and .block are lists of sites');
+    }
+    for (const [id, adapter] of Object.entries(crawler.adapters) as [string, { dailyLimit?: unknown; searchShare?: unknown }][]) {
+      if (adapter.dailyLimit !== undefined && !(Number(adapter.dailyLimit) >= 0)) throw badRequest(`${id}: daily limit must be 0 or more`);
+      if (adapter.searchShare !== undefined && !(Number(adapter.searchShare) >= 0 && Number(adapter.searchShare) <= 1)) {
+        throw badRequest(`${id}: the share kept for searches is between 0 and 1`);
+      }
+    }
+  }
+
+  /**
+   * What feeds and searches may serve: crawler finds of blocked sources are left out, and
+   * source priorities reorder the rest (priority 0 hides a source).
+   */
+  private bySource(entries: Entry[]): Entry[] {
+    const blocked = new Set(this.config.crawler.blockedSources);
+    const servable = blocked.size ? entries.filter((entry) => !(entry.origin === 'crawler' && blocked.has(sourceKeyOf(entry)))) : entries;
+    return prioritize(servable, this.config.sources.priorities);
   }
 
   private charge(ctx: Ctx, price: number, reason: string): Account | undefined {
     const account = this.auth.account(ctx);
-    if (price <= 0) return account;
+    if (price <= 0) {
+      // Clients learn their balance from the answer instead of asking for it.
+      if (account) ctx.res.setHeader('x-vs-balance', String(account.balance));
+      return account;
+    }
     if (!account) throw new HttpError(401, 'unauthorized', `This node charges ${price} credits for ${reason}`);
-    this.ledger.debit(account.id, price, reason);
+    const updated = this.ledger.debit(account.id, price, reason);
+    ctx.res.setHeader('x-vs-charged', String(price));
+    ctx.res.setHeader('x-vs-balance', String(updated.balance));
     return account;
   }
 
@@ -226,7 +265,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         now: Date.now(),
         config: this.config.ranking,
       });
-      const page = pageOf(ranked, body.cursor, this.limitOf(body.limit));
+      const page = pageOf(this.bySource(ranked), body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
     });
 
@@ -240,9 +279,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const filters = this.preferencesOf(body.filters);
       let visible = this.registry.visible(filters, this.config.policy.maxRating);
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
-      const results = this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance');
+      const results = this.bySource(this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry));
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
-      return { ...page, items: page.items.map(({ entry }) => this.registry.view(entry)) } satisfies Page<ContentItem>;
+      return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
     });
 
     router.post('/v1/lookup', async (ctx) => {
@@ -339,7 +378,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const rewards = this.config.rewards;
       if (first && vote !== 0 && rewards.vote > 0 && this.canEarn(account) && this.ledger.daily(account, 'votes') < rewards.voteDailyCap) {
         this.ledger.addDaily(account, 'votes', 1);
-        this.ledger.credit(account.id, rewards.vote, 'vote', entry.id);
+        const updated = this.ledger.credit(account.id, rewards.vote, 'vote', entry.id);
+        ctx.res.setHeader('x-vs-balance', String(updated.balance));
         credited = rewards.vote;
       }
       return { likes: entry.likes, dislikes: entry.dislikes, vote, credited };
@@ -668,6 +708,29 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     router.get('/v1/admin/crawler', (ctx) => {
       admin(ctx);
       return this.crawler.status();
+    });
+    // Every source, with its priority, whether the crawler may use it and how much it gave.
+    router.get('/v1/admin/sources', (ctx) => {
+      admin(ctx);
+      const counts = new Map<string, { listed: number; pending: number }>();
+      for (const entry of this.registry.all()) {
+        const key = sourceKeyOf(entry);
+        const count = counts.get(key) ?? { listed: 0, pending: 0 };
+        if (entry.status === 'listed') count.listed++;
+        if (entry.status === 'pending') count.pending++;
+        counts.set(key, count);
+      }
+      const crawlable = new Set(this.crawler.status().adapters.map((adapter) => adapter.id));
+      return {
+        sources: SOURCE_CATALOG.map((source) => ({
+          ...source,
+          priority: priorityOf(source.key, this.config.sources.priorities),
+          crawled: crawlable.has(source.key),
+          blocked: this.config.crawler.blockedSources.includes(source.key),
+          ...(counts.get(source.key) ?? { listed: 0, pending: 0 }),
+        })),
+        sites: this.config.crawler.sites,
+      };
     });
     router.post('/v1/admin/crawler/run', async (ctx) => {
       admin(ctx);

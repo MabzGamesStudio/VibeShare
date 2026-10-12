@@ -158,6 +158,8 @@ Rewards: `perRetrieval` per correct retrieval, `perChallenge` per passed challen
 | `POST /v1/submissions` | `SubmissionRequest` — title, metadata, `thumbnail` (data: URL ≤ 200 kB), `providers`, and optionally `creatorProof { key, ts, sig }` with `sig` over `"vibeshare-claim\n" + nodeId + "\n" + baseId + "\n" + ts` |
 | `GET /v1/suggestions/mine`, `GET /v1/submissions/mine` | Status of the account's contributions |
 
+Answers to requests made with a session token carry `x-vs-balance` (the account's balance on this node after the request) and, when the request was charged, `x-vs-charged`. Clients keep their balance and the node's status from these headers instead of polling.
+
 `LookupResult` is a full `ContentItem` (status `listed`), `{ id, status: "blocked", reason }`, or `{ id, status: "unknown" }` for every id the operator never set.
 
 `ContentItem`: `id` (with fallbacks), `title`, `description`, `format`, `rating`, `topics`, `tags`, `language`, `durationSeconds`, `creator`, `thumbnail` (a `/v1/thumbnails/<key>` path, or an https URL for content found on other platforms), `media { url, type: image|video|audio, width, height }` (a file the platform serves directly), `pageUrl` (the content's page on its platform), `origin` (`operator`, `submission` or `crawler`), `publishedAt`, `stats { likes, dislikes, views?, platformLikes? }` (VibeShare votes on this node; views and likes on the original platform when known), `providers` and `notes` (accepted suggestions as evidence).
@@ -168,7 +170,7 @@ A search may also query other platforms (see the operator guide's discovery craw
 
 ## 6. Admin API
 
-Both node types expose `/v1/admin/*` to the operator with `x-admin-token: <token>` (or `Authorization: Bearer <token>`): status, configuration (`GET`/`PUT /v1/admin/config`, `?replace=1` for the whole document), accounts and credit adjustments, vouchers, invoices; provider content, prices, storage backends, storage jobs and assignments; algorithm content, blocklists, creators, suggestions, submissions and catalog imports. The `/admin` page of each node is a GUI for all of it.
+Both node types expose `/v1/admin/*` to the operator with `x-admin-token: <token>` (or `Authorization: Bearer <token>`): status, configuration (`GET`/`PUT /v1/admin/config`, `?replace=1` for the whole document), accounts and credit adjustments, vouchers, invoices; provider content, prices, storage backends, storage jobs and assignments; algorithm content, blocklists, creators, suggestions, submissions and catalog imports, the crawler (`GET /v1/admin/crawler` with each platform API's usage) and sources (`GET /v1/admin/sources`: every source with its priority, whether it is blocked and its listed/pending counts). The `/admin` page of each node is a GUI for all of it.
 
 ## 7. Client daemon (local API)
 

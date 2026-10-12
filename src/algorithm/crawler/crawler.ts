@@ -4,10 +4,30 @@ import { TOPICS, type Rating } from '../../shared/taxonomy.js';
 import { flickr, openverse, wikimedia, type FlickrConfig, type OpenverseConfig, type WikimediaConfig } from './adapters/images.js';
 import { bluesky, lemmy, mastodon, type BlueskyConfig, type LemmyConfig, type MastodonConfig } from './adapters/social.js';
 import { archive, dailymotion, peertube, youtube, type ArchiveConfig, type DailymotionConfig, type PeerTubeConfig, type YouTubeConfig } from './adapters/video.js';
+import {
+  API_ADAPTERS,
+  deviantart,
+  europeana,
+  freesound,
+  giphy,
+  imgur,
+  instagram,
+  jamendo,
+  pexels,
+  reddit,
+  spotify,
+  tenor,
+  tumblr,
+  twitch,
+  unsplash,
+  vimeo,
+  x,
+} from './adapters/apis.js';
 import { crawlPage, webDefaults, type WebConfig } from './adapters/web.js';
-import { PoliteFetcher, RobotsDisallowed } from './fetcher.js';
+import { FetchFailed, PoliteFetcher, RobotsDisallowed, SiteBlocked } from './fetcher.js';
 import { identifyLink } from './oembed.js';
-import type { Adapter, CrawlContext, Discovered } from './types.js';
+import { BudgetUsed, type Adapter, type CrawlContext, type Discovered } from './types.js';
+import { sourceKeyOf, sourceOfHost } from '../sources.js';
 
 export interface CrawlerConfig {
   /** Discover content continuously in the background. */
@@ -38,6 +58,12 @@ export interface CrawlerConfig {
   searchCacheMinutes: number;
   /** Crawl private network addresses (only for tests and intranets). */
   allowPrivateAddresses: boolean;
+  /** Spacing of official API calls to one host (their own rate limits apply too). */
+  apiDelayMs: number;
+  /** Sources (platforms) the crawler must not use; their earlier finds are not served either. */
+  blockedSources: string[];
+  /** Websites (domains, subdomains included): never fetch `block`; with `allow` set, crawl only those sites' pages. */
+  sites: { allow: string[]; block: string[] };
   adapters: {
     youtube: YouTubeConfig;
     peertube: PeerTubeConfig;
@@ -50,12 +76,43 @@ export interface CrawlerConfig {
     bluesky: BlueskyConfig;
     lemmy: LemmyConfig;
     web: WebConfig;
+    vimeo: typeof vimeo.defaults;
+    twitch: typeof twitch.defaults;
+    unsplash: typeof unsplash.defaults;
+    pexels: typeof pexels.defaults;
+    giphy: typeof giphy.defaults;
+    tenor: typeof tenor.defaults;
+    imgur: typeof imgur.defaults;
+    deviantart: typeof deviantart.defaults;
+    europeana: typeof europeana.defaults;
+    reddit: typeof reddit.defaults;
+    tumblr: typeof tumblr.defaults;
+    x: typeof x.defaults;
+    instagram: typeof instagram.defaults;
+    spotify: typeof spotify.defaults;
+    jamendo: typeof jamendo.defaults;
+    freesound: typeof freesound.defaults;
   };
 }
 
 type AdapterId = keyof CrawlerConfig['adapters'];
 
-const PLATFORM_ADAPTERS = [youtube, peertube, dailymotion, archive, wikimedia, openverse, flickr, mastodon, bluesky, lemmy] as unknown as Adapter[];
+const PLATFORM_ADAPTERS = [youtube, peertube, dailymotion, archive, wikimedia, openverse, flickr, mastodon, bluesky, lemmy, ...API_ADAPTERS] as unknown as Adapter[];
+
+type Purpose = 'crawl' | 'search';
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** A domain list entry matches the host itself and its subdomains. */
+function onList(host: string, list: string[]): boolean {
+  const clean = host.toLowerCase().replace(/^www\./, '');
+  return list.some((entry) => {
+    const domain = entry.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+    return domain && (clean === domain || clean.endsWith(`.${domain}`));
+  });
+}
 
 export function crawlerDefaults(): CrawlerConfig {
   return {
@@ -74,6 +131,9 @@ export function crawlerDefaults(): CrawlerConfig {
     searchTimeoutMs: 3000,
     searchCacheMinutes: 30,
     allowPrivateAddresses: false,
+    apiDelayMs: 250,
+    blockedSources: [],
+    sites: { allow: [], block: [] },
     adapters: {
       youtube: youtube.defaults as YouTubeConfig,
       peertube: peertube.defaults as PeerTubeConfig,
@@ -86,6 +146,22 @@ export function crawlerDefaults(): CrawlerConfig {
       bluesky: bluesky.defaults as BlueskyConfig,
       lemmy: lemmy.defaults as LemmyConfig,
       web: webDefaults,
+      vimeo: vimeo.defaults,
+      twitch: twitch.defaults,
+      unsplash: unsplash.defaults,
+      pexels: pexels.defaults,
+      giphy: giphy.defaults,
+      tenor: tenor.defaults,
+      imgur: imgur.defaults,
+      deviantart: deviantart.defaults,
+      europeana: europeana.defaults,
+      reddit: reddit.defaults,
+      tumblr: tumblr.defaults,
+      x: x.defaults,
+      instagram: instagram.defaults,
+      spotify: spotify.defaults,
+      jamendo: jamendo.defaults,
+      freesound: freesound.defaults,
     },
   };
 }
@@ -100,7 +176,17 @@ export interface AdapterStats {
   lastError?: string;
 }
 
+/** Official API calls of one adapter today, by kind of work. */
+interface ApiUsage {
+  day: string;
+  crawl: number;
+  search: number;
+  /** After a 429 (too many requests): no calls until then. */
+  pausedUntil?: number;
+}
+
 interface CrawlerState {
+  usage: Record<string, ApiUsage>;
   cursors: Record<string, number>;
   frontier: { url: string; depth: number; seed: string }[];
   identify: { url: string; title?: string }[];
@@ -131,6 +217,7 @@ export class Crawler {
   private searchCache = new Map<string, number>();
   private searching = new Map<string, Promise<number>>();
   private readonly ctx: CrawlContext;
+  private tokens = new Map<string, { token: string; expires: number; credentials: string }>();
 
   constructor(
     private readonly config: () => CrawlerConfig,
@@ -142,13 +229,16 @@ export class Crawler {
       defaultDelayMs: () => this.config().hostDelayMs,
       timeoutMs: () => this.config().timeoutMs,
       allowPrivate: () => this.config().allowPrivateAddresses,
+      apiDelayMs: () => this.config().apiDelayMs,
+      blocked: (host) => this.hostBlocked(host),
     });
-    this.ctx = { fetcher: this.fetcher };
+    this.ctx = this.contextFor(null, 'crawl');
     this.store = new JsonFile<CrawlerState>(
       statePath,
-      () => ({ cursors: {}, frontier: [], identify: [], seen: [], searches: {}, stats: {} }),
+      () => ({ usage: {}, cursors: {}, frontier: [], identify: [], seen: [], searches: {}, stats: {} }),
       5000
     );
+    this.store.data.usage ??= {};
     this.seen = new Set(this.store.data.seen);
   }
 
@@ -203,9 +293,99 @@ export class Crawler {
     return [...new Set([...base, ...learnt])];
   }
 
+  // ------------------------------------------------------------------ sources and sites
+
+  private sourceBlocked(key: string): boolean {
+    return this.config().blockedSources.includes(key);
+  }
+
+  /** Sites the operator blocked, and the hosts of blocked platforms. */
+  private hostBlocked(host: string): boolean {
+    const config = this.config();
+    if (onList(host, config.sites.block)) return true;
+    const source = sourceOfHost(host);
+    return Boolean(source && this.sourceBlocked(source));
+  }
+
+  /** Pages the web crawler may visit: with an allow list, only those sites. */
+  private pageAllowed(url: string): boolean {
+    let host = '';
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return false;
+    }
+    const allow = this.config().sites.allow;
+    return !this.hostBlocked(host) && (!allow.length || onList(host, allow));
+  }
+
+  // ------------------------------------------------------------------ official APIs
+
+  /** Whether an API adapter has every credential it needs. */
+  configured(adapter: Adapter): boolean {
+    if (!adapter.api) return true;
+    const config = this.adapterConfig(adapter.id);
+    return adapter.api.credentials.every((field) => typeof config[field.key] === 'string' && (config[field.key] as string).trim() !== '');
+  }
+
+  private usage(id: string): ApiUsage {
+    const usage = this.state.usage[id];
+    if (!usage || usage.day !== today()) return (this.state.usage[id] = { day: today(), crawl: 0, search: 0, pausedUntil: usage?.pausedUntil });
+    return usage;
+  }
+
+  /**
+   * Whether `units` more API work fits today's budget: crawling stays within its share,
+   * client searches may use what is left of the whole day's budget.
+   */
+  budgetLeft(id: string, purpose: Purpose, units = 1): boolean {
+    const config = this.adapterConfig(id);
+    const limit = Math.max(0, Number(config.dailyLimit ?? 0));
+    const share = Math.min(1, Math.max(0, Number(config.searchShare ?? 0.5)));
+    const usage = this.usage(id);
+    if ((usage.pausedUntil ?? 0) > Date.now()) return false;
+    const used = usage.crawl + usage.search;
+    if (purpose === 'search') return used + units <= limit;
+    return usage.crawl + units <= limit * (1 - share) && used + units <= limit;
+  }
+
+  /** The tools an adapter works with; API calls count against its budget for `purpose`. */
+  private contextFor(adapter: Adapter | null, purpose: Purpose): CrawlContext {
+    const id = adapter?.id ?? 'none';
+    return {
+      fetcher: this.fetcher,
+      api: async (url, request = {}) => {
+        const units = Math.max(1, request.units ?? 1);
+        if (!this.budgetLeft(id, purpose, units)) throw new BudgetUsed(id);
+        this.usage(id)[purpose] += units;
+        this.store.changed();
+        try {
+          return await this.fetcher.api(url, request);
+        } catch (error) {
+          if (error instanceof FetchFailed && error.status === 429) {
+            // Too many requests: wait as long as asked (an hour when it does not say).
+            this.usage(id).pausedUntil = Date.now() + (error.retryAfter ?? 3600) * 1000;
+          }
+          throw error;
+        }
+      },
+      token: async (get) => {
+        const credentials = JSON.stringify(adapter?.api?.credentials.map((field) => this.adapterConfig(id)[field.key]) ?? []);
+        const cached = this.tokens.get(id);
+        if (cached && cached.credentials === credentials && cached.expires > Date.now()) return cached.token;
+        const fresh = await get();
+        this.tokens.set(id, { token: fresh.token, credentials, expires: Date.now() + Math.max(60, (fresh.expiresIn ?? 3600) - 60) * 1000 });
+        return fresh.token;
+      },
+    };
+  }
+
+  /** Adapters that may work now: switched on, source not blocked, credentials present. */
   private enabledAdapters(): Adapter[] {
     const adapters = this.config().adapters as unknown as Record<string, { enabled?: boolean }>;
-    return PLATFORM_ADAPTERS.filter((adapter) => adapters[adapter.id]?.enabled !== false);
+    return PLATFORM_ADAPTERS.filter(
+      (adapter) => adapters[adapter.id]?.enabled !== false && !this.sourceBlocked(adapter.id) && (adapter.api?.optional || this.configured(adapter))
+    );
   }
 
   private adapterConfig(id: string): Record<string, unknown> {
@@ -214,9 +394,12 @@ export class Crawler {
 
   /** The kinds of work available right now, in rotation order. */
   private lanes(): string[] {
-    const lanes = this.enabledAdapters().map((adapter) => adapter.id);
+    // API adapters whose crawling budget is spent for today wait until tomorrow.
+    const lanes = this.enabledAdapters()
+      .filter((adapter) => !adapter.api || adapter.api.optional || this.budgetLeft(adapter.id, 'crawl'))
+      .map((adapter) => adapter.id);
     const web = this.config().adapters.web;
-    if (web.enabled && (this.state.frontier.length || web.seeds.some((seed) => !this.seen.has(seed)))) lanes.push('web');
+    if (web.enabled && !this.sourceBlocked('web') && (this.state.frontier.length || web.seeds.some((seed) => !this.seen.has(seed)))) lanes.push('web');
     if (this.state.identify.length) lanes.push('identify');
     return lanes;
   }
@@ -229,6 +412,8 @@ export class Crawler {
   }
 
   private queueLinks(identify: { url: string; title?: string }[], pages: { url: string; depth: number; seed: string }[]): void {
+    identify = identify.filter((link) => this.pageAllowed(link.url));
+    pages = pages.filter((page) => this.pageAllowed(page.url));
     for (const link of identify) {
       if (this.state.identify.length >= MAX_IDENTIFY) break;
       if (this.remember(`identify:${link.url}`)) this.state.identify.push(link);
@@ -241,6 +426,8 @@ export class Crawler {
   }
 
   private take(items: Discovered[], adapter: string): number {
+    // What lives on a blocked source is dropped, whoever found it (a Reddit post of a YouTube video…).
+    items = items.filter((item) => !this.sourceBlocked(sourceKeyOf(item)));
     const stats = this.stats(adapter);
     stats.found += items.length;
     const added = items.length ? this.ingest(items) : 0;
@@ -263,7 +450,7 @@ export class Crawler {
     try {
       if (lane === 'web') {
         const web = this.config().adapters.web;
-        const fresh = web.seeds.find((seed) => !this.seen.has(seed));
+        const fresh = web.seeds.find((seed) => !this.seen.has(seed) && this.pageAllowed(seed));
         const next = target
           ? { url: target, depth: 0, seed: target }
           : fresh
@@ -290,15 +477,17 @@ export class Crawler {
         const targets = adapter.targets(config, this.queries());
         if (!targets.length) return { adapter: lane, found: 0, added: 0 };
         unit = target ?? targets[(this.state.cursors[lane] = ((this.state.cursors[lane] ?? -1) + 1) % targets.length)];
-        const result = await adapter.discover(this.ctx, config, unit);
+        const result = await adapter.discover(this.contextFor(adapter, 'crawl'), config, unit);
         found = result.items.length;
         added = this.take(result.items, lane);
         if (result.links?.length) this.queueLinks(result.links.map((link) => ({ url: link.url })), []);
       }
     } catch (error) {
-      if (error instanceof RobotsDisallowed) stats.blocked++;
+      // A spent budget is not a failure: that adapter rests until tomorrow.
+      if (error instanceof BudgetUsed) return { adapter: lane, target: unit, found: 0, added: 0 };
+      if (error instanceof RobotsDisallowed || error instanceof SiteBlocked) stats.blocked++;
       else stats.errors++;
-      stats.lastError = `${unit ?? ''}: ${(error as Error).message}`.slice(0, 300);
+      stats.lastError = `${unit ?? ''}: ${this.explain(error)}`.slice(0, 300);
       throw error;
     } finally {
       this.store.changed();
@@ -332,16 +521,18 @@ export class Crawler {
         const text = key.replace(/^[#@]/, '');
         const results = await Promise.all(
           this.enabledAdapters()
-            .filter((adapter) => adapter.search)
+            // Official APIs are searched while today's budget has room.
+            .filter((adapter) => adapter.search && (!adapter.api || adapter.api.optional || this.budgetLeft(adapter.id, 'search')))
             .map(async (adapter) => {
               const stats = this.stats(adapter.id);
               try {
-                const items = await adapter.search!(this.ctx, this.adapterConfig(adapter.id), text);
+                const items = await adapter.search!(this.contextFor(adapter, 'search'), this.adapterConfig(adapter.id), text);
                 return this.take(items, adapter.id);
               } catch (error) {
-                if (error instanceof RobotsDisallowed) stats.blocked++;
+                if (error instanceof BudgetUsed) return 0;
+                if (error instanceof RobotsDisallowed || error instanceof SiteBlocked) stats.blocked++;
                 else stats.errors++;
-                stats.lastError = `search "${text}": ${(error as Error).message}`.slice(0, 300);
+                stats.lastError = `search "${text}": ${this.explain(error)}`.slice(0, 300);
                 return 0;
               }
             })
@@ -358,6 +549,14 @@ export class Crawler {
     return Promise.race([all, timeout]);
   }
 
+  /** An error, with a hint when an API refused the credentials. */
+  private explain(error: unknown): string {
+    const message = (error as Error).message;
+    if (error instanceof FetchFailed && (error.status === 401 || error.status === 403)) return `${message} (check the API key)`;
+    if (error instanceof FetchFailed && error.status === 429) return `${message} (rate limited; paused)`;
+    return message;
+  }
+
   addSeed(url: string): void {
     const web = this.config().adapters.web;
     if (!web.seeds.includes(url)) web.seeds.push(url);
@@ -366,20 +565,37 @@ export class Crawler {
   status() {
     const config = this.config();
     const adapters = config.adapters as unknown as Record<string, { enabled?: boolean }>;
-    const describe = (adapter: Adapter) => ({
-      id: adapter.id,
-      label: adapter.label,
-      description: adapter.description,
-      enabled: adapters[adapter.id]?.enabled !== false,
-      targets: adapter.targets ? adapter.targets(this.adapterConfig(adapter.id), this.queries()).length : 0,
-      search: Boolean(adapter.search),
-      stats: this.stats(adapter.id),
-    });
+    const describe = (adapter: Adapter) => {
+      const settings = this.adapterConfig(adapter.id);
+      const usage = this.usage(adapter.id);
+      return {
+        id: adapter.id,
+        label: adapter.label,
+        description: adapter.description,
+        enabled: adapters[adapter.id]?.enabled !== false,
+        blocked: this.sourceBlocked(adapter.id),
+        targets: adapter.targets ? adapter.targets(settings, this.queries()).length : 0,
+        search: Boolean(adapter.search),
+        stats: this.stats(adapter.id),
+        api: adapter.api
+          ? {
+              ...adapter.api,
+              configured: this.configured(adapter),
+              dailyLimit: Number(settings.dailyLimit ?? adapter.api.defaultDailyLimit),
+              searchShare: Number(settings.searchShare ?? 0.5),
+              usedToday: { crawl: usage.crawl, search: usage.search },
+              pausedUntil: usage.pausedUntil && usage.pausedUntil > Date.now() ? new Date(usage.pausedUntil).toISOString() : undefined,
+            }
+          : undefined,
+      };
+    };
     return {
       enabled: config.enabled,
       userAgent: config.userAgent,
       autoList: config.autoList,
       searchPlatforms: config.searchPlatforms,
+      blockedSources: config.blockedSources,
+      sites: config.sites,
       adapters: [
         ...PLATFORM_ADAPTERS.map(describe),
         {
@@ -387,18 +603,22 @@ export class Crawler {
           label: 'Web pages',
           description: 'Seed sites: video and photo pages, and links to platforms found on them.',
           enabled: config.adapters.web.enabled,
+          blocked: this.sourceBlocked('web'),
           targets: config.adapters.web.seeds.length,
           search: false,
           stats: this.stats('web'),
+          api: undefined,
         },
         {
           id: 'identify',
           label: 'Platform links',
           description: 'Links to YouTube, Vimeo, TikTok… found while crawling, identified through oEmbed.',
           enabled: true,
+          blocked: false,
           targets: this.state.identify.length,
           search: false,
           stats: this.stats('identify'),
+          api: undefined,
         },
       ],
       queues: { frontier: this.state.frontier.length, identify: this.state.identify.length, seen: this.seen.size },

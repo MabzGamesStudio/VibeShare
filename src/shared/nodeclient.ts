@@ -35,7 +35,27 @@ export interface NodeClientOptions {
   account?: StoredAccount;
   /** Called when the client gets a new anonymous token, to persist it. */
   onAccount?: (account: StoredAccount) => void;
+  /**
+   * Called after every request: whether the node answered, how fast, and the account
+   * balance when the node sent one (x-vs-balance). Clients learn node status and credits
+   * from the requests they make anyway, instead of polling.
+   */
+  onResult?: (result: RequestResult) => void;
   timeoutMs?: number;
+}
+
+export interface RequestResult {
+  /** The node answered (any HTTP status); false when it could not be reached. */
+  reachable: boolean;
+  latencyMs?: number;
+  error?: string;
+  balance?: number;
+}
+
+function balanceOf(response: Response): number | undefined {
+  const header = response.headers.get('x-vs-balance');
+  const value = header === null ? NaN : Number(header);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 export function verifySignedInfo(signed: SignedInfo): boolean {
@@ -56,8 +76,24 @@ export class NodeClient {
   }
 
   /** Fetches the node's signed info and checks it is the node the reference names. */
+  /** Sends a request and reports how it went (see onResult). */
+  private async observed(send: () => Promise<Response>): Promise<Response> {
+    const started = Date.now();
+    try {
+      const response = await send();
+      this.options.onResult?.({ reachable: true, latencyMs: Date.now() - started, balance: balanceOf(response) });
+      return response;
+    } catch (error) {
+      const unreachable = !(error instanceof RemoteError) || error.status === 0;
+      this.options.onResult?.(
+        unreachable ? { reachable: false, error: (error as Error).message } : { reachable: true, latencyMs: Date.now() - started }
+      );
+      throw error;
+    }
+  }
+
   async fetchInfo(): Promise<NodeInfo> {
-    const response = await request(`${this.url}/v1/info`, { timeoutMs: this.options.timeoutMs ?? 10000 });
+    const response = await this.observed(() => request(`${this.url}/v1/info`, { timeoutMs: this.options.timeoutMs ?? 10000 }));
     const signed = (await response.json()) as SignedInfo;
     if (!verifySignedInfo(signed)) throw new RemoteError(0, 'bad_signature', 'The node info is not signed by its key');
     if (this.options.expectedId && signed.info.id !== this.options.expectedId) {
@@ -151,15 +187,17 @@ export class NodeClient {
       if (options.auth !== false) headers.authorization = `Bearer ${await this.token()}`;
       return request(`${this.url}${path}`, { timeoutMs: this.options.timeoutMs ?? 15000, ...options, headers });
     };
-    try {
-      return await send();
-    } catch (error) {
-      if (error instanceof RemoteError && error.status === 401 && options.auth !== false) {
-        this.forgetSession();
-        return send();
+    return this.observed(async () => {
+      try {
+        return await send();
+      } catch (error) {
+        if (error instanceof RemoteError && error.status === 401 && options.auth !== false) {
+          this.forgetSession();
+          return send();
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   async json<T>(path: string, options: RequestOptions & { auth?: boolean } = {}): Promise<T> {

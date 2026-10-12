@@ -67,7 +67,7 @@ export async function startAlgorithm(overrides: DeepPartial<AlgorithmConfig> = {
 import { ClientNode } from '../src/client/daemon.js';
 
 export async function startClient(dataDir: string) {
-  const client = new ClientNode({ dataDir, port: 0, serviceIntervalMs: 3600_000, refreshIntervalMs: 3600_000 });
+  const client = new ClientNode({ dataDir, port: 0, serviceIntervalMs: 3600_000 });
   await client.start();
   const api = async <T>(path: string, init: { method?: string; body?: unknown; raw?: Buffer; headers?: Record<string, string> } = {}) => {
     const response = await fetch(client.url() + path, {

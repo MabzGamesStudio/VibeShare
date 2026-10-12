@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
+import { useLocation } from 'react-router-dom';
 import { api, errorMessage } from './api';
 
 interface Toast {
@@ -55,10 +56,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [toast]
   );
 
+  // No polling: the state is re-read from the client (never from nodes) when the user
+  // moves to another page or comes back to the window.
+  const location = useLocation();
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), 20000);
-    return () => clearInterval(timer);
+  }, [refresh, location.pathname]);
+  useEffect(() => {
+    const onFocus = () => void refresh();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
   }, [refresh]);
 
   useEffect(() => {
