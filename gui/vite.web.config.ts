@@ -3,22 +3,23 @@
 // (GitHub Pages…). Run: npm run build:web (in the repository root).
 import { copyFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export const WEB_OUT = resolve(__dirname, '../distribution/web');
 
 /** Swaps the Node implementation of the shared crypto module for the browser one. */
 export function webModules(): Plugin {
-  const nodeCrypto = resolve(__dirname, '../src/shared/crypto.ts');
-  const webCrypto = resolve(__dirname, 'src/web/crypto.ts');
+  // (Vite ids use forward slashes on every OS.)
+  const nodeCrypto = normalizePath(resolve(__dirname, '../src/shared/crypto.ts'));
+  const webCrypto = normalizePath(resolve(__dirname, 'src/web/crypto.ts'));
   return {
     name: 'vibeshare-web-modules',
     enforce: 'pre',
     async resolveId(source, importer, options) {
       if (!importer || !/(^|\/)crypto(\.js|\.ts)?$/.test(source)) return null;
       const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      return resolved?.id === nodeCrypto ? webCrypto : null;
+      return resolved && normalizePath(resolved.id) === nodeCrypto ? webCrypto : null;
     },
   };
 }
