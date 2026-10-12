@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -11,7 +15,15 @@
     "isolatedModules": true,
     "allowImportingTsExtensions": false,
     "noFallthroughCasesInSwitch": true,
-    "types": ["vite/client"]
+    "types": [
+      "vite/client",
+      "node"
+    ]
   },
-  "include": ["src", "vite.config.ts", "../src/shared/taxonomy.ts", "../src/shared/sources.ts", "../src/shared/protocol.ts", "../src/shared/clientapi.ts", "../src/shared/noderef.ts"]
+  "include": [
+    "src",
+    "vite.config.ts",
+    "vite.web.config.ts",
+    "vite.sw.config.ts"
+  ]
 }

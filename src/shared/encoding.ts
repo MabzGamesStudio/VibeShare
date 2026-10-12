@@ -36,12 +36,13 @@ export function base32Decode(text: string): Buffer {
   return Buffer.from(out);
 }
 
+// (Written with plain base64 so that browser Buffer polyfills, which lack base64url, work too.)
 export function base64url(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64url');
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 export function fromBase64url(text: string): Buffer {
-  return Buffer.from(text, 'base64url');
+  return Buffer.from(text.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
 /** JSON with sorted object keys and no whitespace, so equal values always hash and sign the same. */

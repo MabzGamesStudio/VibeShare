@@ -1,9 +1,8 @@
-import type { ServerResponse } from 'node:http';
 import { chunkIdOf, chunksForRange, contentIdOf, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import type { NodeEntry } from '../shared/clientapi.js';
-import { RemoteError } from '../shared/http.js';
+import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
-import type { ChunkCache } from './cache.js';
+import type { ChunkStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
 
 export class FetchError extends Error {
@@ -20,6 +19,14 @@ interface ManifestHit {
   provider: NodeEntry;
 }
 
+/** An answer to a (Range) request for content bytes, for any HTTP server or service worker. */
+export interface ContentResponse {
+  status: 200 | 206 | 416;
+  headers: Record<string, string>;
+  /** The bytes, verified chunk by chunk; stop iterating to stop fetching. */
+  body: AsyncGenerator<Uint8Array> | null;
+}
+
 /**
  * Gets content bytes from the user's provider nodes. Providers are tried in the
  * user's priority order; any provider that is offline, does not have the content,
@@ -32,7 +39,7 @@ export class Fetcher {
 
   constructor(
     private readonly nodes: NodeManager,
-    private readonly cache: ChunkCache
+    private readonly cache: ChunkStore
   ) {}
 
   private candidates(preferred?: string): NodeEntry[] {
@@ -102,10 +109,12 @@ export class Fetcher {
   }
 
   /**
-   * Streams bytes [start, end] to an HTTP response (Range requests from <video>/<audio>),
-   * fetching a couple of chunks ahead so playback does not stall at chunk boundaries.
+   * Answers a request for bytes [start, end] of content (Range requests from <video>,
+   * <audio>, <img> and downloads), fetching a couple of chunks ahead so playback does
+   * not stall at chunk boundaries. The first chunk is fetched before answering, so
+   * errors still become a proper status code.
    */
-  async stream(cid: string, res: ServerResponse, range: string | undefined, download: boolean): Promise<void> {
+  async open(cid: string, range: string | null | undefined, download: boolean): Promise<ContentResponse> {
     const { manifest } = await this.manifest(cid);
     const size = manifest.size;
     let start = 0;
@@ -120,17 +129,14 @@ export class Fetcher {
         start = Number(match[1] || 0);
         if (match[2] !== '') end = Math.min(size - 1, Number(match[2]));
       }
-      if (start > end || start >= size) {
-        res.writeHead(416, { 'content-range': `bytes */${size}` }).end();
-        return;
-      }
+      if (start > end || start >= size) return { status: 416, headers: { 'content-range': `bytes */${size}` }, body: null };
     }
-    const headers: Record<string, string | number> = {
+    const headers: Record<string, string> = {
       'content-type': manifest.mime,
       'accept-ranges': 'bytes',
-      'content-length': size === 0 ? 0 : end - start + 1,
+      'content-length': String(size === 0 ? 0 : end - start + 1),
       'cache-control': 'private, max-age=3600',
-      // Content comes from strangers and is served from the daemon's origin: if an HTML or
+      // Content comes from strangers and is served from the client's origin: if an HTML or
       // SVG file is ever opened directly, it runs sandboxed, without scripts or access to the API.
       'x-content-type-options': 'nosniff',
     };
@@ -140,21 +146,25 @@ export class Fetcher {
     }
     if (partial) headers['content-range'] = `bytes ${start}-${end}/${size}`;
     if (download) headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(manifest.name)}`;
-    if (size === 0) {
-      res.writeHead(200, headers).end();
-      return;
-    }
+    if (size === 0) return { status: 200, headers, body: null };
     const { first, last, offset } = chunksForRange(manifest, start, end);
-    // Fetch the first chunk before answering, so errors still become a proper status code.
-    let current = await this.chunk(cid, first);
-    res.writeHead(partial ? 206 : 200, headers);
-    let closed = false;
-    res.on('close', () => {
-      closed = true;
-    });
-    const readAhead = download ? 4 : 2;
+    const firstChunk = await this.chunk(cid, first);
+    return { status: partial ? 206 : 200, headers, body: this.pieces(cid, manifest, firstChunk, first, last, offset, end, download ? 4 : 2) };
+  }
+
+  private async *pieces(
+    cid: string,
+    manifest: Manifest,
+    firstChunk: Buffer,
+    first: number,
+    last: number,
+    offset: number,
+    end: number,
+    readAhead: number
+  ): AsyncGenerator<Uint8Array> {
     const ahead = new Map<number, Promise<Buffer>>();
-    for (let index = first; index <= last && !closed; index++) {
+    let current = firstChunk;
+    for (let index = first; index <= last; index++) {
       for (let next = index + 1; next <= Math.min(last, index + readAhead); next++) {
         if (!ahead.has(next)) {
           const promise = this.chunk(cid, next);
@@ -166,20 +176,8 @@ export class Fetcher {
       ahead.delete(index);
       const from = index === first ? offset : 0;
       const to = index === last ? end - index * manifest.chunkSize + 1 : current.length;
-      const piece = current.subarray(from, to);
-      if (!res.write(piece)) {
-        await new Promise<void>((resolve) => {
-          const done = () => {
-            res.off('drain', done);
-            res.off('close', done);
-            resolve();
-          };
-          res.on('drain', done);
-          res.on('close', done);
-        });
-      }
+      yield current.subarray(from, to);
     }
-    res.end();
   }
 
   forget(cid: string): void {

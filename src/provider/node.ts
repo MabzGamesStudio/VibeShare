@@ -1,7 +1,8 @@
 import { isAbsolute } from 'node:path';
 import { BaseNode, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import type { Account } from '../commerce/ledger.js';
-import { buildManifestFromFile, contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { buildManifestFromFile } from '../shared/contentfile.js';
 import {
   badRequest,
   forbidden,

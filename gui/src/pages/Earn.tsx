@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ServiceStatus } from '../../../src/shared/clientapi';
 import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
-import { api } from '../api';
+import { api, IS_STATIC } from '../api';
 import { Chips, Loading, Switch, toggle } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, timeAgo, watchPath } from '../util';
@@ -16,6 +16,23 @@ interface Contributions {
     suggestions: { id: string; contentId: string; kind: string; value: string; status: string; agreeing: number; createdAt: string }[];
     submissions: { id: string; contentId: string; status: string; request: { title: string }; createdAt: string; note?: string }[];
   }[];
+}
+
+/** The web client cannot keep data for providers: it only runs while a page is open. */
+function StorageUnavailable() {
+  return (
+    <div className="card form-stack">
+      <div className="row">
+        <HardDrive size={22} />
+        <h2>Store data for providers</h2>
+      </div>
+      <p className="small muted">
+        Providers pay credits for keeping copies of their content on your disk. That needs a client that keeps running, so it is not part of
+        the web client: install the desktop app (or run <code>vibeshare client</code>) and restore your identity backup from Settings there to
+        earn with the same accounts.
+      </p>
+    </div>
+  );
 }
 
 function StorageService() {
@@ -243,7 +260,7 @@ export function EarnPage() {
           <p>Nodes pay credits for services. Earned credits land on your account on that node.</p>
         </div>
       </div>
-      <StorageService />
+      {IS_STATIC ? <StorageUnavailable /> : <StorageService />}
       <div style={{ height: 16 }} />
       <ContributionsCard />
     </div>

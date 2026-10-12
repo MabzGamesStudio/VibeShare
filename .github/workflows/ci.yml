@@ -28,6 +28,28 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  web-client:
+    name: Web client is built
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gui/package-lock.json
+      - run: npm ci && npm --prefix gui ci
+      - run: npm run build:web
+      - name: distribution/web matches the sources
+        run: |
+          if [ -n "$(git status --porcelain distribution/web)" ]; then
+            git status --short distribution/web
+            echo "::error::distribution/web is out of date: run npm run build:web and commit the result."
+            exit 1
+          fi
+
   binary-smoke-test:
     name: Standalone binary
     runs-on: ubuntu-latest

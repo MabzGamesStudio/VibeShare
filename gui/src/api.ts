@@ -4,7 +4,7 @@
 // development it can be passed as ?t=… instead.
 
 /** True in the static web build (hash router, backend in the browser). */
-export const IS_STATIC = import.meta.env.VITE_STATIC === '1';
+export const IS_STATIC = __VIBESHARE_WEB__;
 
 type LocalHandler = (request: Request) => Promise<Response>;
 let localHandler: LocalHandler | null = null;
@@ -103,6 +103,23 @@ export function uploadFile(file: File, onProgress: (fraction: number) => void): 
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   return (error as Error)?.message ?? String(error);
+}
+
+type StreamResolver = (src: string) => Promise<string>;
+let streamResolver: StreamResolver | null = null;
+
+/** When the web client's backend runs in the page, media elements get blob URLs instead. */
+export function setStreamResolver(resolver: StreamResolver | null): void {
+  streamResolver = resolver;
+}
+
+/** Whether a media URL must be turned into a blob URL first (see setStreamResolver). */
+export function needsResolving(src: string): boolean {
+  return streamResolver !== null && /^stream\//.test(src);
+}
+
+export function resolveStream(src: string): Promise<string> {
+  return streamResolver ? streamResolver(src) : Promise.resolve(src);
 }
 
 /** URL that streams (or downloads) native content through the client backend. */

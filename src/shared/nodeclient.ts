@@ -1,7 +1,6 @@
-import { randomBytes } from 'node:crypto';
-import { derivePseudonym, signData, solveProofOfWork, verifySignature, type Identity } from './crypto.js';
+import { derivePseudonym, randomHex, signData, solveProofOfWork, verifySignature, type Identity } from './crypto.js';
 import { canonicalJson } from './encoding.js';
-import { request, RemoteError, type RequestOptions } from './http.js';
+import { request, RemoteError, type RequestOptions } from './remote.js';
 import type { NodeType } from './noderef.js';
 import {
   infoSigningPayload,
@@ -93,7 +92,7 @@ export class NodeClient {
     if (this.options.auth === 'anonymous') {
       const stored = this.options.account?.anonymousToken;
       if (stored) return stored;
-      const nonce = randomBytes(12).toString('hex');
+      const nonce = randomHex(12);
       const pow = solveProofOfWork(powInput(info.id, `anon:${nonce}`, ts), info.signup.powBits);
       const response = await this.post<SessionResponse>('/v1/auth/anonymous', { ts, nonce, pow });
       const account = { anonymousToken: response.token, accountId: response.accountId };

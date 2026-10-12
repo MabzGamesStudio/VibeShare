@@ -27,6 +27,7 @@ import {
 } from '../../../src/shared/taxonomy';
 import { api, errorMessage } from '../api';
 import { FormatIcon } from '../components/ContentCard';
+import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
 import { ShareButton } from '../components/Share';
 import { Avatar, CopyButton, Loading, Modal, Spinner } from '../components/ui';
@@ -41,9 +42,11 @@ const KIND_LABELS: Record<SuggestionKind, string> = {
   report: 'Report a problem',
 };
 
-function TextViewer({ url, markdown }: { url: string; markdown: boolean }) {
+function TextViewer({ url: src, markdown }: { url: string; markdown: boolean }) {
   const [text, setText] = useState<string | null>(null);
+  const url = useMediaSrc(src);
   useEffect(() => {
+    if (!url) return;
     fetch(url)
       .then((response) => response.text())
       .then(setText)
@@ -69,7 +72,8 @@ function NativePlayer({
   mediaRef: React.RefObject<HTMLMediaElement | null>;
 }) {
   const mime = view.manifest!.mime;
-  const src = view.streamUrl!;
+  const src = useMediaSrc(view.streamUrl!);
+  const download = useMediaSrc(view.downloadUrl);
   if (mime.startsWith('video/')) {
     return (
       <div className="player">
@@ -95,7 +99,7 @@ function NativePlayer({
       </div>
     );
   }
-  if (mime.startsWith('text/') || mime === 'application/json') return <TextViewer url={src} markdown={mime === 'text/markdown'} />;
+  if (mime.startsWith('text/') || mime === 'application/json') return <TextViewer url={view.streamUrl!} markdown={mime === 'text/markdown'} />;
   if (mime === 'application/pdf') {
     return (
       <div className="player" style={{ aspectRatio: '4 / 5' }}>
@@ -111,11 +115,20 @@ function NativePlayer({
         <p className="muted" style={{ marginBottom: 16 }}>
           {mime} · {formatBytes(view.manifest!.size)}
         </p>
-        <a className="button primary" href={view.downloadUrl}>
+        <a className="button primary" href={download} download={view.manifest!.name}>
           <Download size={16} /> Download
         </a>
       </div>
     </div>
+  );
+}
+
+function DownloadButton({ url, name }: { url: string; name?: string }) {
+  const href = useMediaSrc(url);
+  return (
+    <a className="button" href={href} download={name}>
+      <Download size={16} /> Download
+    </a>
   );
 }
 
@@ -534,11 +547,7 @@ export function WatchPage() {
                 <Flag size={16} /> Suggest
               </button>
             )}
-            {view.downloadUrl && (
-              <a className="button" href={view.downloadUrl}>
-                <Download size={16} /> Download
-              </a>
-            )}
+            {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
             <ShareButton target={{ id: view.id, title }} className="" label="Share" />
             <CopyButton text={view.id} label="Copy id" small={false} />
           </div>

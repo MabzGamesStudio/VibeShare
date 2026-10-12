@@ -2,14 +2,14 @@ import { ExternalLink, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FeedItem } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
-import { controlEmbed, playableFor, type Playable } from '../../media';
+import { controlEmbed, playableFor, useMediaSrc, type Playable } from '../../media';
 import { gradientFor } from '../../util';
 import { FormatIcon } from '../ContentCard';
 
 /** A still preview: the thumbnail, or a gradient with the format's icon. */
 export function Poster({ item, src, fit = 'cover' }: { item: FeedItem; src?: string; fit?: 'cover' | 'contain' }) {
   const [failed, setFailed] = useState(false);
-  const image = src ?? item.thumbnailUrl;
+  const image = useMediaSrc(src ?? item.thumbnailUrl);
   if (!image || failed) {
     return (
       <div className="poster poster-empty" style={{ background: gradientFor(item.id) }}>
@@ -51,6 +51,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
   for (let i = 0; i < failed && playable; i++) playable = playable.fallback;
   const media = useRef<HTMLVideoElement | null>(null);
   const frame = useRef<HTMLIFrameElement | null>(null);
+  const mediaSrc = useMediaSrc(playable && playable.kind !== 'iframe' && playable.kind !== 'none' ? playable.src : undefined);
 
   useEffect(() => setFailed(0), [item.id]);
 
@@ -60,7 +61,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
     element.muted = muted;
     if (active && !paused) element.play().catch(() => undefined);
     else element.pause();
-  }, [active, paused, muted, playable?.src]);
+  }, [active, paused, muted, mediaSrc]);
 
   useEffect(() => {
     if (playable?.kind !== 'iframe' || !active) return;
@@ -90,7 +91,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
   if (playable.kind === 'image') {
     return (
       <div className="media-view">
-        <img className={`media-${fit}`} src={playable.src} alt={item.title} onError={() => setFailed((n) => n + 1)} />
+        {mediaSrc && <img className={`media-${fit}`} src={mediaSrc} alt={item.title} onError={() => setFailed((n) => n + 1)} />}
       </div>
     );
   }
@@ -129,7 +130,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
         ref={media}
         key={playable.src}
         className={`media-${fit} ${playable.kind === 'audio' ? 'media-audio' : ''}`}
-        src={playable.src}
+        src={mediaSrc}
         poster={playable.kind === 'video' ? (posterSrc ?? item.thumbnailUrl) : undefined}
         muted={muted}
         loop={loop}

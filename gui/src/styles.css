@@ -2388,3 +2388,13 @@ button.swatch.on {
     display: none;
   }
 }
+
+/* ---------------------------------------------------------------- web client start-up */
+
+.boot {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 15px;
+}

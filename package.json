@@ -15,6 +15,7 @@
     "build": "npm run build:node && npm run build:gui",
     "build:node": "tsc -p tsconfig.json",
     "build:gui": "npm --prefix gui run build",
+    "build:web": "npm --prefix gui run build:web",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tests/tsconfig.json --noEmit && npm --prefix gui run typecheck",
     "test": "tsx --test tests/*.test.ts",
     "start": "npm run build && node dist/cli.js client --open",

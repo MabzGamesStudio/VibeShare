@@ -1,10 +1,10 @@
 import type { AccountResponse, AuthMode, NodeEntry } from '../shared/clientapi.js';
-import { RemoteError } from '../shared/http.js';
+import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
 import { NodeClient } from '../shared/nodeclient.js';
 import { formatNodeRef, parseNodeRefs, type NodeType } from '../shared/noderef.js';
 import type { ProviderInfo, AlgorithmInfo } from '../shared/protocol.js';
-import type { ClientStore } from './state.js';
+import type { ClientStoreLike } from './model.js';
 
 export function errorText(error: unknown): string {
   if (error instanceof RemoteError) return error.message;
@@ -19,7 +19,7 @@ export function errorText(error: unknown): string {
 export class NodeManager {
   private clients = new Map<string, { auth: AuthMode; client: NodeClient }>();
 
-  constructor(private readonly store: ClientStore) {}
+  constructor(private readonly store: ClientStoreLike) {}
 
   private get nodes(): NodeEntry[] {
     return this.store.data.data.nodes;

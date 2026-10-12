@@ -14,7 +14,7 @@ import {
   type CreatorKind,
   type Rating,
 } from '../../../src/shared/taxonomy';
-import { api, errorMessage } from '../api';
+import { api, errorMessage, IS_STATIC } from '../api';
 import { PageIconView } from '../components/feed/icons';
 import { PageEditor } from '../components/feed/PageEditor';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
@@ -180,6 +180,8 @@ function IdentityCard() {
       <p className="small muted">
         Your public key identifies you as a creator and, depending on each node's account mode, holds your credits. Everything is derived
         from one secret backup.
+        {IS_STATIC &&
+          ' The web client keeps it in this browser, for this site only: clearing the site data deletes it, so keep the backup somewhere safe.'}
       </p>
       <div>
         <div className="hint">Public key</div>

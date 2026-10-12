@@ -1,51 +1,24 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { base32Decode, base32Encode } from '../shared/encoding.js';
 import { generateIdentity, identityFromSeed, type Identity } from '../shared/crypto.js';
-import type { HistoryItem, LibraryItem, NodeEntry, Settings, Subscription } from '../shared/clientapi.js';
-import { defaultSettings, normalizeSettings } from '../shared/clientdefaults.js';
+import { normalizeSettings } from '../shared/clientdefaults.js';
+import { emptyClientData, formatSeed, parseSeed, type ClientData, type ClientStoreLike } from './model.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
 import { JsonFile } from '../shared/store.js';
 
-export interface ClientData {
-  nodes: NodeEntry[];
-  settings: Settings;
-  subscriptions: Subscription[];
-  library: LibraryItem[];
-  history: HistoryItem[];
-}
-
+export type { ClientData } from './model.js';
 export { defaultSettings } from '../shared/clientdefaults.js';
-
-const SEED_PREFIX = 'vibeshare-seed-';
-
-export function formatSeed(seed: Buffer): string {
-  return SEED_PREFIX + base32Encode(seed);
-}
-
-export function parseSeed(text: string): Buffer {
-  const clean = text.trim().toLowerCase().replace(/\s+/g, '');
-  if (!clean.startsWith(SEED_PREFIX)) throw new Error('A backup starts with vibeshare-seed-');
-  const seed = base32Decode(clean.slice(SEED_PREFIX.length));
-  if (seed.length !== 32) throw new Error('The backup is incomplete');
-  return seed;
-}
+export { formatSeed, parseSeed } from './model.js';
 
 /** Everything the client keeps on disk: identity, nodes, settings, accounts, library. */
-export class ClientStore {
+export class ClientStore implements ClientStoreLike {
   readonly data: JsonFile<ClientData>;
   readonly accounts: JsonFile<{ accounts: Record<string, StoredAccount> }>;
   identity: Identity;
 
   constructor(private readonly dir: string | null) {
     this.identity = this.loadIdentity();
-    this.data = new JsonFile<ClientData>(this.path('client.json'), () => ({
-      nodes: [],
-      settings: defaultSettings(),
-      subscriptions: [],
-      library: [],
-      history: [],
-    }));
+    this.data = new JsonFile<ClientData>(this.path('client.json'), emptyClientData);
     this.data.data.settings = normalizeSettings(this.data.data.settings);
     this.accounts = new JsonFile(this.path('accounts.json'), () => ({ accounts: {} }));
   }

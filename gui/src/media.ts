@@ -1,8 +1,9 @@
 // What to show or play for a content item: native content streams through the client
 // backend; discovered content plays from the platform's own media file, or its embed.
+import { useEffect, useState } from 'react';
 import type { FeedItem } from '../../src/shared/clientapi';
 import { embedFor, parseContentId } from '../../src/shared/sources';
-import { streamUrl } from './api';
+import { needsResolving, resolveStream, streamUrl } from './api';
 
 export interface Playable {
   kind: 'video' | 'audio' | 'image' | 'iframe' | 'none';
@@ -80,4 +81,28 @@ export function controlEmbed(frame: HTMLIFrameElement | null, src: string, comma
     return true;
   }
   return false;
+}
+
+/**
+ * The URL to give a media element. Stream URLs work as they are, except in the web
+ * client without a service worker, where they become blob URLs (undefined until ready).
+ */
+export function useMediaSrc(src: string | undefined): string | undefined {
+  const direct = !src || !needsResolving(src);
+  const [resolved, setResolved] = useState<string | undefined>(direct ? src : undefined);
+  useEffect(() => {
+    if (!src || !needsResolving(src)) {
+      setResolved(src);
+      return;
+    }
+    let cancelled = false;
+    setResolved(undefined);
+    resolveStream(src)
+      .then((url) => !cancelled && setResolved(url))
+      .catch(() => !cancelled && setResolved(undefined));
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  return direct ? src : resolved;
 }

@@ -4,7 +4,7 @@ A decentralized network for sharing and streaming files — video, music, podcas
 
 | Node | What it does |
 |---|---|
-| **Client** | The app people use: a GUI to watch, listen, read, search, subscribe and publish. It keeps the user's keys, credits, settings and their list of nodes. |
+| **Client** | The app people use: a GUI to watch, listen, read, search, subscribe and publish — as a desktop app, from the command line, or as a static website. It keeps the user's keys, credits, settings and their list of nodes. |
 | **Content provider** | Stores content and streams it to clients chunk by chunk, for credits it issues itself. It keeps data on its own disk and/or S3-compatible buckets, WebDAV, IPFS, mirrors, other providers — and on client nodes it pays to store data. |
 | **Search algorithm** | Decides what clients see. It lists (whitelist) or blocks (blacklist) content ids, describes them (format, age rating, topics, tags, creator), ranks them however its operator likes and answers searches. Ids it never set are reported as *unknown*. |
 
@@ -38,6 +38,7 @@ VibeShare runs on **macOS, Linux and Windows**. Releases are built by GitHub Act
 | **Desktop app** (client) | `VibeShare-…-mac-arm64.dmg` / `-x64.dmg` | `.AppImage`, `.deb`, `.tar.gz` | `VibeShare-…-win-x64.exe` installer or `.zip` |
 | **Command line** (every node type, GUI included) | `vibeshare-…-macos-arm64` / `-x64` | `vibeshare-…-linux-x64` / `-arm64` | `vibeshare-…-windows-x64.exe` |
 | **Docker** (provider, algorithm) | `ghcr.io/mabzgamesstudio/vibeshare` | same | same |
+| **Web client** (no install) | [MabzGamesStudio.github.io/WebPages/VibeShare](https://MabzGamesStudio.github.io/WebPages/VibeShare) — any browser | same | same |
 
 Install the command-line build in one line:
 
@@ -75,21 +76,26 @@ Desktop app from source: `npm run build && cd desktop && npm install && npm star
 
 ## Try the demo
 
-`vibeshare demo --open` starts a whole network on your machine (client on :7700, provider on :7701, algorithm node on :7702) with generated sample content: music streamed in 1 MiB chunks, artwork, articles, an open movie that only exists on YouTube/the Internet Archive, a native content id whose providers are gone (so the client falls back to the copy named in the id), and a blocked scam post. It prints the operators' admin tokens and two voucher codes to try topping up credits. Data lives in your app-data folder under `demo`; pass `--data <dir>` to put it elsewhere.
+`vibeshare demo --open` starts a whole network on your machine (client on :7700, provider on :7701, algorithm node on :7702) with generated sample content: vertical shorts for the Shorts page, a video, artwork of every shape for the Images page, music streamed in 1 MiB chunks, articles, an open movie that only exists on YouTube/the Internet Archive, a native content id whose providers are gone (so the client falls back to the copy named in the id), and a blocked scam post. When the machine is online, the algorithm node's crawler adds content from other platforms as well. It prints the operators' admin tokens and two voucher codes to try topping up credits. Data lives in your app-data folder under `demo`; pass `--data <dir>` to put it elsewhere.
 
 ## The client
 
 ![Home](docs/images/home.png)
 
-- **Home** asks your algorithm nodes for content matching your preferences (formats, highest age rating, favourite topics, creator kinds, hidden tags and creators, languages). With several algorithm nodes the feed blends them by priority, or uses only the first that answers.
-- **Explore** searches with filters. Queries understand `#tag`, `@creator`, `format:music` and `topic:science`. Pasting a content id or a link opens it directly.
+- **Pages.** The left panel lists your pages. Four come preset — **Home**, **Videos**, **Shorts** and **Images** — and *New page* adds your own. Each page picks its content (recommendations from your algorithm nodes, a saved search, or the newest from your subscriptions; formats, topics, creator kinds, a lower age rating), its layout and what it shows with each item, in your order. *Customize* on any page (or *Settings → Pages*) edits it with a live preview; pages can be reordered, hidden from the panel, duplicated, reset or deleted.
+  - **Videos**: a grid of thumbnails with title, creator and platform (VibeShare for content published here) — swap the platform for the like count, add views or duration, drop the thumbnail…
+  - **Shorts**: one vertical video at a time, filling the screen. Swipe (or scroll, or use ↑/↓) to the next or previous one; the short in view plays and the others stop. Tap to pause, one tap for sound, like, share or open the details.
+  - **Images**: an endless one-column feed of images (videos in it play as they scroll into view).
+  - Layouts: grid, list, vertical swipe, one-column feed, masonry wall. Every list loads more as you scroll.
+- **Explore** searches with filters. Queries understand `#tag`, `@creator`, `format:music` and `topic:science`. Pasting a content id or a link opens it directly. Algorithm nodes also look your query up on other platforms, so creators and titles from elsewhere show up too.
 - **Subscriptions** shows the newest content of the creators you follow, from every algorithm node.
-- **Watch** streams native content from your providers (seeking only fetches the chunks it needs; every chunk is checked against its hash). When no provider has it, the content is embedded from the external source carried in its id. Blocked content and content no algorithm node has reviewed are gated according to your settings. Like/dislike and *Suggest* (tags, topics, format, age rating or a report — with a reason and the timestamp that shows it) earn credits on algorithm nodes that reward them.
-- **Publish** uploads a file to the providers you pick and submits it to algorithm nodes for review. Files are signed with your key so people can subscribe to you as a creator. You can also list content that lives elsewhere (YouTube, Vimeo, SoundCloud, Spotify, TikTok, X, Twitch, archive.org, PeerTube, IPFS or any link).
+- **Watch** streams native content from your providers (seeking only fetches the chunks it needs; every chunk is checked against its hash). When no provider has it, the content plays from the platform it came from — its media file, or the platform's player. Blocked content and content no algorithm node has reviewed are gated according to your settings. Like/dislike and *Suggest* (tags, topics, format, age rating or a report — with a reason and the timestamp that shows it) earn credits on algorithm nodes that reward them.
+- **Share** on any item, the watch page or a short opens a popup: copy the link, send it to another app, or show a **QR code** or a **color QR code** (palettes or your own colors, dots or rounded modules, a logo; download as PNG or SVG). Links open the [web client](#the-web-client) on that content — `https://MabzGamesStudio.github.io/WebPages/VibeShare/#/watch/<id>` by default; *Settings → Sharing* points them at another hosted copy.
+- **Publish** uploads a file to the providers you pick and submits it to algorithm nodes for review. Files are signed with your key so people can subscribe to you as a creator. You can also list content that lives elsewhere (YouTube, Vimeo, Dailymotion, SoundCloud, Spotify, TikTok, Instagram, X, Bluesky, Mastodon, Twitch, archive.org, PeerTube, IPFS or any link).
 - **Nodes** is where you add nodes by pasting references (one per line, or plain URLs), reorder them (drag or arrows), switch them on and off, set a price limit, pick the account mode, and share your whole list with someone else.
 - **Credits** shows your balance on each node — credits never move between nodes — with each node's payment methods (vouchers, crypto, Lightning, card checkout, manual) and history.
 - **Earn** turns on the storage service (offer disk space to providers for credits) and shows your contributions to algorithm nodes.
-- **Settings**: preferences, account mode for new nodes, creator profile, cache size, IPFS gateway, theme, and your identity backup.
+- **Settings**: pages, preferences, account mode for new nodes, creator profile, cache size, IPFS gateway, theme, the share address, and your identity backup.
 
 ### Accounts on nodes
 
@@ -102,6 +108,10 @@ Each node keeps its own credits, so the client opens an account on every node it
 | **Anonymous token** | A random token, nothing else | Credits are lost with the device |
 
 Your identity backup (*Settings → Identity*) is a single `vibeshare-seed-…` string.
+
+## The web client
+
+[`distribution/`](distribution) builds the client into a static website (hash routes, so any static host works) that shared links open. It is the whole client — pages, shorts, search, publishing, credits — with its backend running in the browser: a service worker keeps the visitor's keys and nodes in the browser, calls the nodes directly, checks every chunk and streams with seeking. `distribution/config.json` names the nodes a first-time visitor starts with and where shared links point; `npm run build:web` writes the site to `distribution/web/`, ready to copy into a GitHub Pages repository (or let the *Web client* workflow publish it). Nodes it talks to need HTTPS. Details: [distribution/README.md](distribution/README.md).
 
 ## Running a content provider
 
@@ -127,6 +137,8 @@ vibeshare algorithm --data /var/lib/vibeshare/algorithm --public-url https://fee
 
 From its dashboard the operator reviews submissions, lists or blocks content ids, edits metadata and creators, accepts suggestions (or lets them be accepted once N accounts agree), imports a provider's catalog for review, sets prices for feeds/searches/lookups, sets rewards for votes and accepted suggestions, chooses a ranking strategy (`balanced`, `hot`, `new`, `top`, `random`) or plugs in **its own ranking module** ([example](examples/ranking/ranker.mjs)), and caps the age rating it serves.
 
+**Discovery.** A crawler keeps finding content on other platforms in the background: YouTube channels, PeerTube instances and SepiaSearch, Dailymotion, the Internet Archive, Wikimedia Commons, Openverse, Flickr, Mastodon hashtags, Bluesky and Lemmy, plus any websites the operator seeds (pages' OpenGraph/JSON-LD media and links to platforms, identified through oEmbed). It follows every site's `robots.txt` (for each URL and redirect, with Crawl-delay), spaces its requests to each host and never fetches private addresses. Each find gets a format from the platform and the media's shape — portrait video is a short — an age rating from the platform's flags and topics from its words. Client searches are also sent to the platforms (with a short wait, cached), and the queries become new discovery topics. Finds are listed right away or wait in *Review* as pending; the operator's own decisions are never overridden. The *Crawler* tab turns adapters on and off, runs them, adds seed sites and shows what each host's robots.txt blocked ([docs/OPERATORS.md](docs/OPERATORS.md#discovery-crawler)).
+
 ## How it works
 
 - **Content ids.** Native content is split into chunks (1 MiB by default). A JSON manifest lists the chunks' hashes; the content id is `vs1` + the base32 SHA-256 of the manifest. Nothing has to be trusted: clients check every manifest and chunk against its hash. Manifests can be signed by the creator's key.
@@ -144,10 +156,11 @@ src/shared/     protocol types, content ids, manifests, crypto, node references,
 src/commerce/   per-node ledger, accounts (anonymous / key + proof of work), payment methods, base node
 src/provider/   content provider node: store, storage backends, storage service, routes
 src/algorithm/  search algorithm node: registry, ranking, search, contributions, routes
-src/client/     client daemon: node manager, fetcher/streaming, publisher, storage worker, local API
+src/client/     client core (node manager, verified streaming, publisher, local API) and the daemon around it
 src/demo/       demo network with generated sample media
 src/cli.ts      the `vibeshare` command
-gui/            React GUI (client app at /, node dashboard at /admin)
+gui/            React GUI (client app at /, node dashboard at /admin); gui/src/web: the web client's backend
+distribution/   the static web client: config.json and the built site (web/)
 desktop/        Electron desktop app for the client
 scripts/        standalone binary builds, installers, icon
 examples/       operator configs, custom ranking module, systemd units
@@ -164,6 +177,7 @@ tests/          unit, integration and end-to-end tests
 | `npm run client` / `provider` / `algorithm` | One node from source |
 | `npm --prefix gui run dev` | Vite dev server on :5173, proxying `/api` and `/stream` to a client on :7700 (open it with `?t=<token>`; the token is in the client page's `vs-token` meta tag) |
 | `npm run build` | Compiles to `dist/` and `gui/dist/` |
+| `npm run build:web` | Builds the static web client into `distribution/web/` |
 | `npm run binaries` | Standalone executables for every OS in `release/` (needs [Bun](https://bun.sh)) |
 | `docker compose up -d` | A provider and an algorithm node in containers |
 
@@ -176,6 +190,8 @@ This is a first version. Things to know:
 - Crypto payments are verified against the operator's own RPC/explorer endpoints; invoices are identified by a unique amount, so pay the exact amount shown.
 - The JSON-file storage of nodes suits small and medium nodes; very large catalogs would want a database.
 - Desktop apps and binaries are unsigned until signing certificates are configured in the release workflow.
+- The crawler's platform adapters follow each platform's public API or feed format; they are tested against recorded responses, and platforms change their APIs from time to time. YouTube search needs a Data API key (channel feeds do not).
+- The web client cannot run the storage service (it only runs while a page is open).
 
 ## License
 

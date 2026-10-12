@@ -1,0 +1,80 @@
+name: Web client
+
+# Builds the static web client (distribution/web) and keeps it as a downloadable
+# artifact. Run it by hand ("Run workflow") to also publish it to a GitHub Pages
+# repository: add a WEBPAGES_TOKEN secret first, a fine-grained token that can write
+# to that repository's contents.
+on:
+  push:
+    branches: [main]
+    paths: ['gui/**', 'src/**', 'distribution/**']
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Pages repository to publish to
+        default: MabzGamesStudio/WebPages
+      directory:
+        description: Folder in that repository
+        default: VibeShare
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            gui/package-lock.json
+      - run: npm ci && npm --prefix gui ci
+      - run: npm run build:web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibeshare-web
+          path: distribution/web
+          include-hidden-files: true
+
+  publish:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the token
+        env:
+          TOKEN: ${{ secrets.WEBPAGES_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Add a WEBPAGES_TOKEN repository secret that can write to ${{ inputs.repository }}."
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: vibeshare-web
+          path: site
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ secrets.WEBPAGES_TOKEN }}
+          path: pages
+      - name: Publish
+        env:
+          DIRECTORY: ${{ inputs.directory }}
+        run: |
+          mkdir -p "pages/$DIRECTORY"
+          rsync -a --delete site/ "pages/$DIRECTORY/"
+          cd pages
+          git add -A "$DIRECTORY"
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "VibeShare web client ${GITHUB_SHA::7}"
+          git push

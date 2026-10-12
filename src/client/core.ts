@@ -1,0 +1,394 @@
+// The client's logic: nodes, feeds, content, credits, publishing and the user's data.
+// The desktop/command-line daemon and the web client (in a service worker) both run
+// it; they only differ in where data is kept and how requests arrive. Browser-safe.
+import type {
+  ClientState,
+  ContentView,
+  CreatorView,
+  FeedItem,
+  FeedResponse,
+  NodeEntry,
+  PageFilters,
+  PageSource,
+  Settings,
+} from '../shared/clientapi.js';
+import { applySettingsPatch, pagePreferences } from '../shared/clientdefaults.js';
+import { base64url, fromBase64url } from '../shared/encoding.js';
+import { badRequest } from '../shared/errors.js';
+import { log } from '../shared/log.js';
+import { parseNodeRef } from '../shared/noderef.js';
+import { SOFTWARE, type ContentItem, type CreatorInfo, type LookupResult, type Page } from '../shared/protocol.js';
+import { RemoteError } from '../shared/remote.js';
+import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
+import { FetchError, Fetcher } from './fetcher.js';
+import type { ChunkStore, ClientStoreLike, UploadStore } from './model.js';
+import { errorText, NodeManager } from './nodes.js';
+import { Publisher } from './publisher.js';
+
+export type FeedKind = 'feed' | 'search' | 'latest';
+
+export function encodeCursor(value: Record<string, string | null>): string {
+  return base64url(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+export function decodeCursor(text: string | undefined): Record<string, string | null> | null {
+  if (!text) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(fromBase64url(text))) as Record<string, string | null>;
+  } catch {
+    return null;
+  }
+}
+
+export interface ClientCoreOptions {
+  store: ClientStoreLike;
+  cache: ChunkStore;
+  uploads: UploadStore;
+  /** URL the GUI loads a thumbnail kept on an algorithm node from. */
+  thumbnailUrl: (node: NodeEntry, key: string) => string;
+  /** URL the GUI streams (or downloads) native content from. */
+  streamUrl: (base: string, download: boolean) => string;
+  /** Host name of the page that embeds players (Twitch needs it). */
+  embedHost: () => string;
+  /** Called after settings change (the daemon starts and stops its storage service). */
+  onSettings?: (previous: Settings, next: Settings) => void;
+  /** Called before a node is removed (the daemon can release data it stores for it). */
+  beforeRemoveNode?: (id: string, release: boolean) => Promise<void>;
+  /** The software name and version the GUI shows. */
+  version?: string;
+}
+
+export class ClientCore {
+  readonly store: ClientStoreLike;
+  readonly nodes: NodeManager;
+  readonly fetcher: Fetcher;
+  readonly publisher: Publisher;
+  readonly cache: ChunkStore;
+
+  constructor(readonly options: ClientCoreOptions) {
+    this.store = options.store;
+    this.cache = options.cache;
+    this.nodes = new NodeManager(this.store);
+    this.fetcher = new Fetcher(this.nodes, this.cache);
+    this.publisher = new Publisher(this.store, this.nodes, options.uploads);
+  }
+
+  get settings(): Settings {
+    return this.store.data.data.settings;
+  }
+
+  state(): ClientState {
+    return {
+      version: this.options.version ?? SOFTWARE,
+      identity: { id: this.store.identity.id },
+      nodes: this.nodes.list(),
+      settings: this.settings,
+      subscriptions: this.store.data.data.subscriptions,
+    };
+  }
+
+  feedItem(node: NodeEntry, item: ContentItem): FeedItem {
+    // Thumbnails the algorithm node stores come through the client; those of discovered content are on the platform.
+    const remote = item.thumbnail && /^https?:\/\//.test(item.thumbnail) ? item.thumbnail : undefined;
+    const key = !remote ? item.thumbnail?.split('/').pop() : undefined;
+    return {
+      ...item,
+      via: node.id,
+      viaName: node.name,
+      thumbnailUrl: remote ?? (key ? this.options.thumbnailUrl(node, key) : undefined),
+    };
+  }
+
+  private algorithmsFor(kind: FeedKind): NodeEntry[] {
+    const priceKind = kind === 'search' ? 'search' : 'feed';
+    return this.nodes.active('algorithm').filter((node) => this.nodes.affordable(node, this.nodes.algorithmPrice(node, priceKind)));
+  }
+
+  /**
+   * Asks the algorithm nodes for a page. "blend" mixes every enabled node by priority
+   * (round robin, without duplicates); "primary" uses the first node that answers.
+   */
+  async collect(kind: FeedKind, body: Record<string, unknown>, cursor?: string): Promise<FeedResponse> {
+    const nodes = this.algorithmsFor(kind);
+    const errors: FeedResponse['errors'] = [];
+    if (!nodes.length) return { items: [], errors: [{ node: '', name: 'Client', error: 'No algorithm node is enabled' }] };
+    const cursors = decodeCursor(cursor) ?? {};
+    const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
+    const priceKind = kind === 'search' ? 'search' : 'feed';
+    const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
+      const price = this.nodes.algorithmPrice(node, priceKind);
+      const page = await this.nodes.client(node).json<Page<ContentItem>>(path, {
+        body: { ...body, limit, cursor: cursors[node.id] ?? undefined },
+        auth: price > 0,
+      });
+      if (price > 0) void this.nodes.refreshBalance(node);
+      return page;
+    };
+
+    if (this.settings.feedMode === 'primary') {
+      const started = Object.keys(cursors);
+      const candidates = started.length ? nodes.filter((node) => started.includes(node.id)) : nodes;
+      for (const node of candidates) {
+        try {
+          const page = await ask(node, 24);
+          return {
+            items: page.items.map((item) => this.feedItem(node, item)),
+            cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
+            errors,
+          };
+        } catch (error) {
+          errors.push({ node: node.id, name: node.name, error: errorText(error) });
+        }
+      }
+      return { items: [], errors };
+    }
+
+    const live = nodes.filter((node) => !(node.id in cursors) || cursors[node.id] !== null);
+    const per = Math.max(8, Math.ceil(24 / Math.max(1, live.length)));
+    const pages = await Promise.all(
+      live.map(async (node) => {
+        try {
+          return { node, page: await ask(node, per) };
+        } catch (error) {
+          errors.push({ node: node.id, name: node.name, error: errorText(error) });
+          return { node, page: null };
+        }
+      })
+    );
+    const seen = new Set<string>();
+    const items: FeedItem[] = [];
+    const longest = Math.max(0, ...pages.map(({ page }) => page?.items.length ?? 0));
+    for (let i = 0; i < longest; i++) {
+      for (const { node, page } of pages) {
+        const item = page?.items[i];
+        if (!item) continue;
+        const base = item.id.split('~')[0];
+        if (seen.has(base)) continue;
+        seen.add(base);
+        items.push(this.feedItem(node, item));
+      }
+    }
+    const next: Record<string, string | null> = { ...cursors };
+    for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
+    const more = Object.values(next).some((value) => value !== null);
+    return { items, cursor: more ? encodeCursor(next) : undefined, errors };
+  }
+
+  /** One endpoint for every page: its source, query and filters, within the user's preferences. */
+  browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
+    const preferences = pagePreferences(this.settings.preferences, body.filters);
+    if (body.source === 'search') {
+      const sort = body.sort ?? body.filters?.sort;
+      return this.collect('search', { query: String(body.query ?? ''), filters: preferences, sort }, body.cursor);
+    }
+    if (body.source === 'subscriptions') {
+      const creators = this.store.data.data.subscriptions.map((s) => s.id);
+      if (!creators.length) return Promise.resolve({ items: [], errors: [] });
+      return this.collect('latest', { creators, preferences }, body.cursor);
+    }
+    return this.collect('feed', { preferences, seed: body.seed }, body.cursor);
+  }
+
+  async content(id: string): Promise<ContentView> {
+    const parsed = parseContentId(id);
+    if (!parsed) throw badRequest('Not a content id');
+    const view: ContentView = {
+      id: parsed.full,
+      base: parsed.base,
+      native: parsed.native,
+      status: 'unknown',
+      embeds: [],
+      suggestedProviders: [],
+      providerErrors: [],
+    };
+    for (const node of this.nodes.active('algorithm')) {
+      const price = this.nodes.algorithmPrice(node, 'lookup');
+      if (!this.nodes.affordable(node, price)) continue;
+      try {
+        const result = await this.nodes
+          .client(node)
+          .json<LookupResult>(`/v1/content/${encodeURIComponent(parsed.full)}`, { auth: price > 0, timeoutMs: 8000 });
+        if (result.status === 'unknown') continue;
+        view.status = result.status;
+        view.decidedBy = { id: node.id, name: node.name };
+        if (result.status === 'listed') view.item = this.feedItem(node, result);
+        else view.reason = result.reason;
+        break;
+      } catch (error) {
+        log.debug(`Lookup on ${node.name}: ${errorText(error)}`);
+      }
+    }
+    const extra = view.item ? (parseContentId(view.item.id)?.sources ?? []) : [];
+    view.id = withSources(parsed.full, extra);
+    const sources = parseContentId(view.id)?.sources ?? [];
+    const known = new Set(this.nodes.list('provider').map((node) => node.id));
+    view.suggestedProviders = (view.item?.providers ?? []).filter((ref) => {
+      const parsedRef = parseNodeRef(ref);
+      return parsedRef && !(parsedRef.id && known.has(parsedRef.id));
+    });
+    if (parsed.native) {
+      try {
+        const hit = await this.fetcher.manifest(parsed.base);
+        const manifest = hit.manifest;
+        view.manifest = {
+          name: manifest.name,
+          mime: manifest.mime,
+          size: manifest.size,
+          chunks: manifest.chunks.length,
+          chunkSize: manifest.chunkSize,
+          createdAt: manifest.createdAt,
+          creator: manifest.creator ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind } : undefined,
+          meta: manifest.meta as Record<string, unknown> | undefined,
+        };
+        view.provider = {
+          id: hit.provider.id,
+          name: hit.provider.name,
+          perMiB: this.nodes.providerPrice(hit.provider),
+          estimate: this.fetcher.estimate(manifest, hit.provider),
+        };
+        view.streamUrl = this.options.streamUrl(parsed.base, false);
+        view.downloadUrl = this.options.streamUrl(parsed.base, true);
+        if (!view.item && manifest.sources) {
+          view.id = withSources(view.id, manifest.sources.map(parseSource).filter((source) => source !== null));
+        }
+      } catch (error) {
+        if (error instanceof FetchError) view.providerErrors = error.attempts;
+        else view.providerErrors = [{ node: '', name: 'Client', error: errorText(error) }];
+      }
+    }
+    const all = parseContentId(view.id)?.sources ?? sources;
+    view.embeds = all.map((source) => ({
+      ...embedFor(source, { ipfsGateway: this.settings.ipfsGateway, parentHost: this.options.embedHost() }),
+      source,
+    }));
+    // Media the platform serves directly (an image, an mp4) beats an embedded player.
+    const media = view.item?.media;
+    if (media && all[0] && /^https?:\/\//.test(media.url)) {
+      view.embeds.unshift({ kind: media.type, src: media.url, page: view.item?.pageUrl ?? view.embeds[0]?.page ?? media.url, label: platformOf(view.id).name, source: all[0] });
+    }
+    return view;
+  }
+
+  async creator(id: string): Promise<CreatorView> {
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes
+          .client(node)
+          .json<{ creator: CreatorInfo; items: ContentItem[] }>(`/v1/creators/${encodeURIComponent(id)}`, { auth: false });
+        return { creator: result.creator, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
+      } catch (error) {
+        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Creator on ${node.name}: ${errorText(error)}`);
+      }
+    }
+    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
+    return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subscription?.kind ?? 'unknown' }, items: [] };
+  }
+
+  updateSettings(patch: Partial<Settings>): Settings {
+    const current = this.settings;
+    let next: Settings;
+    try {
+      next = applySettingsPatch(current, patch);
+    } catch (error) {
+      throw badRequest((error as Error).message);
+    }
+    this.store.data.data.settings = next;
+    this.store.changed();
+    this.options.onSettings?.(current, next);
+    return next;
+  }
+
+  async removeNode(id: string, release: boolean): Promise<void> {
+    await this.options.beforeRemoveNode?.(id, release);
+    this.nodes.remove(id);
+  }
+
+  async contributions() {
+    const results = await Promise.all(
+      this.nodes.list('algorithm').map(async (entry) => {
+        try {
+          const client = this.nodes.client(entry);
+          const [suggestions, submissions] = await Promise.all([
+            client.json<{ suggestions: unknown[] }>('/v1/suggestions/mine'),
+            client.json<{ submissions: unknown[] }>('/v1/submissions/mine'),
+          ]);
+          return { node: entry.id, name: entry.name, ...suggestions, ...submissions };
+        } catch (error) {
+          return { node: entry.id, name: entry.name, suggestions: [], submissions: [], error: errorText(error) };
+        }
+      })
+    );
+    return { nodes: results };
+  }
+
+  subscribe(body: { id?: string; name?: string; kind?: string }) {
+    if (!body.id) throw badRequest('id is required');
+    const list = this.store.data.data.subscriptions;
+    if (!list.some((s) => s.id === body.id)) {
+      list.push({
+        id: body.id,
+        name: String(body.name ?? body.id).slice(0, 120),
+        kind: body.kind as Settings['profile']['kind'],
+        addedAt: new Date().toISOString(),
+      });
+      this.store.changed();
+    }
+    return { subscriptions: list };
+  }
+
+  unsubscribe(id: string) {
+    this.store.data.data.subscriptions = this.store.data.data.subscriptions.filter((s) => s.id !== id);
+    this.store.changed();
+    return { subscriptions: this.store.data.data.subscriptions };
+  }
+
+  remember(body: { id?: string; title?: string }) {
+    if (!body.id) throw badRequest('id is required');
+    const history = this.store.data.data.history.filter((h) => h.id !== body.id);
+    history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
+    this.store.data.data.history = history.slice(0, 200);
+    this.store.changed();
+    return { ok: true };
+  }
+
+  forgetHistory() {
+    this.store.data.data.history = [];
+    this.store.changed();
+    return { ok: true };
+  }
+
+  /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */
+  restoreIdentity(seed: Buffer): { id: string } {
+    this.store.replaceIdentity(seed);
+    this.nodes.resetSessions();
+    void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
+    return { id: this.store.identity.id };
+  }
+
+  /**
+   * Adds the nodes a hosted client comes with, the first time it runs. Nodes that do
+   * not answer yet are added anyway (when their reference names their key) and checked
+   * again later.
+   */
+  async addDefaultNodes(refs: string[]): Promise<void> {
+    const text = refs.join('\n');
+    if (!text.trim()) return;
+    const result = await this.nodes.add(text);
+    for (const failed of result.errors) {
+      const ref = parseNodeRef(failed.ref);
+      if (!ref?.id || !ref.type || this.nodes.get(ref.id)) continue;
+      this.store.data.data.nodes.push({
+        id: ref.id,
+        type: ref.type,
+        url: ref.url,
+        name: new URL(ref.url).host,
+        enabled: true,
+        auth: this.settings.defaultAuth,
+        addedAt: new Date().toISOString(),
+        status: { online: false, checkedAt: new Date().toISOString(), error: failed.error },
+        ref: failed.ref,
+      });
+      this.store.changed();
+    }
+  }
+}

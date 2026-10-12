@@ -1,5 +1,4 @@
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+// Manifests, chunks and content ids. Browser-safe (files on disk: contentfile.ts).
 import { sha256, signData, verifySignature, type Identity, isKeyId } from './crypto.js';
 import { base32Encode, canonicalJson } from './encoding.js';
 import { CHUNK_PREFIX, NATIVE_PREFIX, isChunkId, parseSource } from './sources.js';
@@ -209,16 +208,6 @@ export async function buildManifest(
   if (options.meta && Object.keys(options.meta).length) manifest.meta = options.meta;
   if (options.sources?.length) manifest.sources = options.sources;
   return manifest;
-}
-
-export async function buildManifestFromFile(
-  path: string,
-  options: BuildOptions,
-  onChunk?: (id: string, data: Buffer, index: number) => Promise<void> | void
-): Promise<Manifest> {
-  await stat(path);
-  const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
-  return buildManifest(createReadStream(path, { highWaterMark: chunkSize }), options, onChunk);
 }
 
 export async function buildManifestFromBuffer(
