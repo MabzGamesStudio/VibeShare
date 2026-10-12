@@ -31,6 +31,10 @@ Options
   --host <address>     Address to listen on (client: 127.0.0.1; nodes: 0.0.0.0)
   --public-url <url>   URL clients reach the node at (used in its reference)
   --name <text>        Node name
+  --onion              Also publish the node as a Tor onion service (needs Tor with a
+                       ControlPort; see tor.* in the config)
+  --tor <mode>         client: send requests to nodes through Tor — onion (only .onion
+                       nodes, the default), all, or off
   --open               Open the GUI in your browser (client, demo)
   --log <level>        debug, info, warn, error or silent
   -h, --help           Show this help
@@ -40,7 +44,8 @@ Examples
   vibeshare demo --open
   vibeshare provider --public-url https://cdn.example.org --port 7701
   vibeshare algorithm --data ./curator
-  vibeshare client --open
+  vibeshare provider --onion           (reachable over Tor, no public address needed)
+  vibeshare client --open --tor all
 `;
 
 type Flags = Record<string, string | boolean>;
@@ -113,6 +118,7 @@ function nodeOverrides(flags: Flags): DeepPartial<BaseConfig> {
   if (str(flags, 'host')) overrides.host = str(flags, 'host');
   if (str(flags, 'public-url')) overrides.publicUrl = str(flags, 'public-url');
   if (str(flags, 'name')) overrides.name = str(flags, 'name');
+  if (flags.onion) overrides.tor = { onionService: true };
   return overrides;
 }
 
@@ -132,7 +138,7 @@ async function runNode(kind: 'provider' | 'algorithm', flags: Flags): Promise<vo
   Reference (share it with clients):
     ${node.reference()}
 
-  Web page:   ${node.url()}/
+  Web page:   ${node.url()}/${node.onionUrl() ? `\n  Onion:      ${node.onionUrl()}/  (Tor)` : ''}
   Dashboard:  ${node.url()}/admin   (admin token: ${node.adminToken}${existsSync(tokenFile) ? `, stored in ${tokenFile}` : ''})
   Config:     ${configPath ?? join(dataDir, 'config.json')}
 `);
@@ -150,6 +156,15 @@ async function runClient(flags: Flags): Promise<void> {
     host: str(flags, 'host') ?? '127.0.0.1',
     guiDir: findGuiDir(),
   });
+  const tor = str(flags, 'tor');
+  if (tor) {
+    // Saved like a change in Settings, so it stays until changed there.
+    try {
+      client.core.updateSettings({ tor: { ...client.settings.tor, mode: tor as 'off' | 'onion' | 'all' } });
+    } catch (error) {
+      fail((error as Error).message);
+    }
+  }
   await client.start();
   const url = ['127.0.0.1', 'localhost', '::1'].includes(str(flags, 'host') ?? '127.0.0.1') ? client.url() : client.guiUrl();
   console.log(`

@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { serveStatic, hasGui } from '../shared/assets.js';
-import type { Settings } from '../shared/clientapi.js';
+import type { NodeEntry, Settings } from '../shared/clientapi.js';
 import { randomToken, safeEqual } from '../shared/crypto.js';
 import { MiB } from '../shared/content.js';
 import {
@@ -17,6 +17,8 @@ import {
   type Ctx,
 } from '../shared/http.js';
 import { log } from '../shared/log.js';
+import type { Transport } from '../shared/remote.js';
+import { isOnionUrl, torFetch, TorRouter } from '../shared/tor.js';
 import { parseContentId } from '../shared/sources.js';
 import { ensureDir } from '../shared/store.js';
 import { clientRoutes } from './api.js';
@@ -43,6 +45,8 @@ export interface ClientOptions {
    * requests the user makes anyway, so an idle client costs nodes and credits nothing.
    */
   refreshIntervalMs?: number;
+  /** Called with the settings at start and after every change (the desktop app follows the Tor setting). */
+  onSettings?: (settings: Settings) => void;
 }
 
 const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -67,6 +71,8 @@ export class ClientNode {
   private server: Server | null = null;
   private refreshTimer: NodeJS.Timeout | null = null;
   private thumbs = new Map<string, { type: string; data: Buffer }>();
+  /** Routes requests to nodes through Tor as the settings say. */
+  readonly tor: TorRouter;
   port = 0;
 
   constructor(private readonly options: ClientOptions) {
@@ -75,6 +81,7 @@ export class ClientNode {
     this.store = new ClientStore(dir);
     this.cache = new ChunkCache(dir ? join(dir, 'cache') : null, () => this.settings.cacheMiB * MiB);
     this.uploads = new FileUploads(dir);
+    this.tor = new TorRouter(() => this.settings.tor);
     this.core = new ClientCore({
       store: this.store,
       cache: this.cache,
@@ -86,6 +93,7 @@ export class ClientNode {
       beforeRemoveNode: async (id, release) => {
         if (release) await this.worker.releaseAll(id);
       },
+      transport: (target) => this.transportFor(target),
     });
     this.nodes = this.core.nodes;
     this.fetcher = this.core.fetcher;
@@ -142,7 +150,41 @@ export class ClientNode {
     }
   }
 
+  /**
+   * Tor for .onion nodes (unless Tor is off), and for every node in "all" mode — then
+   * through the node's own onion address when it publishes one, so traffic never leaves Tor.
+   */
+  private transportFor(target: { url: string; onion?: string }): Transport | undefined {
+    const { mode } = this.settings.tor;
+    const onion = mode === 'all' && target.onion && isOnionUrl(target.onion) && !isOnionUrl(target.url) ? target.onion.replace(/\/+$/, '') : null;
+    const url = onion ?? target.url;
+    if (!isOnionUrl(url) && !this.tor.routes(url)) return undefined;
+    if (!onion) return { fetch: this.tor.fetch, timeoutFactor: 4 };
+    const base = target.url.replace(/\/+$/, '');
+    const viaOnion = ((input: string | URL | Request, init?: RequestInit) => {
+      const href = input instanceof Request ? input.url : String(input);
+      return this.tor.fetch(href.startsWith(base) ? onion + href.slice(base.length) : href, init);
+    }) as typeof fetch;
+    return { fetch: viaOnion, timeoutFactor: 4 };
+  }
+
+  /** Whether Tor can be reached, and whether traffic really leaves through it. */
+  async checkTor(): Promise<{ ok: boolean; proxy?: string; isTor?: boolean; ip?: string; error?: string }> {
+    let proxy: string | undefined;
+    try {
+      const address = await this.tor.proxy.address();
+      proxy = `${address.host}:${address.port}`;
+      const check = torFetch({ proxy: address, isolation: () => 'vibeshare:check' });
+      const response = await check('https://check.torproject.org/api/ip', { signal: AbortSignal.timeout(45_000) });
+      const answer = (await response.json()) as { IsTor?: boolean; IP?: string };
+      return { ok: Boolean(answer.IsTor), proxy, isTor: Boolean(answer.IsTor), ip: answer.IP };
+    } catch (error) {
+      return { ok: false, proxy, error: (error as Error).message };
+    }
+  }
+
   private settingsChanged(previous: Settings, next: Settings): void {
+    this.options.onSettings?.(next);
     const wasEnabled = previous.storageService.enabled;
     if (next.storageService.enabled && !wasEnabled) this.worker.start();
     if (!next.storageService.enabled && wasEnabled) this.worker.stop();
@@ -182,6 +224,20 @@ export class ClientNode {
       });
       ctx.res.end(thumb.data);
     });
+    // Live updates for the GUI: node status and credits as they change (Server-Sent Events).
+    // Local only: nothing is asked of the nodes for it.
+    r.get('/api/events', (ctx) => {
+      ctx.res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+      const send = (nodes: NodeEntry[]) => ctx.res.write(`event: nodes\ndata: ${JSON.stringify(nodes)}\n\n`);
+      send(this.nodes.list());
+      const stop = this.nodes.subscribe(send);
+      const keepAlive = setInterval(() => ctx.res.write(': keep-alive\n\n'), 25_000);
+      ctx.req.on('close', () => {
+        stop();
+        clearInterval(keepAlive);
+      });
+    });
+    r.post('/api/tor/check', () => this.checkTor());
     r.get('/api/services', () => this.worker.status());
     r.post('/api/services/sync', async () => {
       await this.worker.sync();
@@ -266,6 +322,7 @@ export class ClientNode {
       this.refreshTimer.unref();
     }
     if (this.settings.storageService.enabled) this.worker.start();
+    this.options.onSettings?.(this.settings);
   }
 
   async stop(): Promise<void> {

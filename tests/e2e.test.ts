@@ -158,11 +158,36 @@ describe('a client using a provider and an algorithm node', async () => {
     assert.equal(provider.ledger.get(accountId)!.balance, before + 8);
   });
 
-  it('votes on content through the algorithm node', async () => {
+  it('votes on content through the algorithm node, and the GUI hears of the new balance at once', async () => {
+    // The GUI's live feed of node changes (Server-Sent Events from the daemon).
+    const events = await fetch(client.url() + '/api/events', { headers: { 'x-vs-token': client.token } });
+    assert.equal(events.headers.get('content-type'), 'text/event-stream');
+    const reader = events.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    const nextNodes = async () => {
+      for (;;) {
+        const end = buffer.indexOf('\n\n');
+        if (end >= 0) {
+          const block = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const data = block.split('\n').find((line) => line.startsWith('data: '));
+          if (block.startsWith('event: nodes') && data) return JSON.parse(data.slice(6)) as NodeEntry[];
+          continue;
+        }
+        const { value, done } = await reader.read();
+        if (done) throw new Error('events ended');
+        buffer += value;
+      }
+    };
+    const balanceOn = (nodes: NodeEntry[]) => nodes.find((n) => n.id === algorithm.identity.id)!.balance;
+    const initial = balanceOn(await nextNodes());
+
     const result = await api<{ likes: number; credited: number }>('/api/vote', {
       body: { nodeId: algorithm.identity.id, id, vote: 1 },
     });
     assert.deepEqual([result.likes, result.credited], [1, 1]);
+    assert.equal(balanceOn(await nextNodes()), (initial ?? 0) + 1, 'the reward shows up without anyone asking');
+    await reader.cancel();
   });
 
   it('rejects requests without the local token or with a foreign Host', async () => {

@@ -1,0 +1,19 @@
+{
+  "name": "vibeshare-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VibeShare for iOS: the web client in a native app (Capacitor).",
+  "license": "Apache-2.0",
+  "scripts": {
+    "web": "npm --prefix .. run build:web",
+    "sync": "npm run web && cap sync ios",
+    "open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.5.2",
+    "@capacitor/ios": "8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  }
+}

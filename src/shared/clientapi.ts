@@ -165,6 +165,8 @@ export interface PageConfig {
 }
 
 export interface Settings {
+  /** Version of the settings format, for one-time changes of defaults (see normalizeSettings). */
+  revision?: number;
   /** The pages of the client, in the order of the left panel. "home" is the start page. */
   pages: PageConfig[];
   /** Where shared links point: a hosted copy of the web client. */
@@ -187,6 +189,18 @@ export interface Settings {
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;
   theme: 'system' | 'dark' | 'light';
+  /** Tor, for the desktop app and `vibeshare client` (in a browser, use Tor Browser). */
+  tor: TorSettings;
+}
+
+export interface TorSettings {
+  /**
+   * off: never (onion nodes cannot be reached); onion: only nodes at .onion addresses go
+   * through Tor; all: every request to nodes goes through Tor (onion addresses preferred).
+   */
+  mode: 'off' | 'onion' | 'all';
+  /** Tor's SOCKS address, e.g. 127.0.0.1:9050; empty = find it (9050, then Tor Browser's 9150). */
+  proxy: string;
 }
 
 export interface Subscription {

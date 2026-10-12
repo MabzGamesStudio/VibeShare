@@ -20,7 +20,10 @@ interface MessageEvent extends ExtendableEvent {
 interface Worker {
   registration: { scope: string };
   skipWaiting(): Promise<void>;
-  clients: { claim(): Promise<void> };
+  clients: {
+    claim(): Promise<void>;
+    matchAll(options?: { includeUncontrolled?: boolean }): Promise<{ postMessage(message: unknown): void }[]>;
+  };
   addEventListener(type: 'install' | 'activate', listener: (event: ExtendableEvent) => void): void;
   addEventListener(type: 'fetch', listener: (event: FetchEvent) => void): void;
   addEventListener(type: 'message', listener: (event: MessageEvent) => void): void;
@@ -33,7 +36,14 @@ function getBackend(): Promise<Backend> {
   backend ??= (async () => {
     const scope = new URL(worker.registration.scope);
     const config = await loadConfig(scope.href);
-    return createBackend({ kv: await openIndexedDb(), config, appUrl: scope.href, hostName: scope.hostname });
+    const created = await createBackend({ kv: await openIndexedDb(), config, appUrl: scope.href, hostName: scope.hostname });
+    // Every open tab shows node status and credits as they change.
+    created.core.nodes.subscribe((nodes) => {
+      void worker.clients.matchAll({ includeUncontrolled: true }).then((clients) => {
+        for (const client of clients) client.postMessage({ type: 'vs-nodes', nodes });
+      });
+    });
+    return created;
   })().catch((error) => {
     backend = null;
     throw error;

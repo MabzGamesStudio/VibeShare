@@ -15,7 +15,7 @@ on:
         default: MabzGamesStudio/WebPages
       directory:
         description: Folder in that repository
-        default: VibeShare
+        default: pages/vibeShare/web
 
 permissions:
   contents: read

@@ -13,6 +13,7 @@ export async function startInPage(): Promise<void> {
   const backend = await createBackend({ kv, config, appUrl: base.href, hostName: location.hostname });
   const pathOf = (url: string) => `/${new URL(url).pathname.slice(base.pathname.length)}`;
   setLocalHandler((request) => backend.handle(request, pathOf(request.url)));
+  backend.core.nodes.subscribe((nodes) => window.dispatchEvent(new CustomEvent('vs-nodes', { detail: nodes })));
   // Media elements cannot use the handler: whole files are fetched into blob URLs.
   const blobs = new Map<string, Promise<string>>();
   setStreamResolver((src) => {

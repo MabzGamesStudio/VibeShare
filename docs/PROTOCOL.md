@@ -78,7 +78,9 @@ The content id is `vs1` + base32(SHA-256(canonicalJson(manifest))) — the signa
 
 `GET /v1/info` → `{ "info": NodeInfo, "sig": "…" }` with `sig` = signature by `info.id` over `"vibeshare-info\n" + canonicalJson(info)`.
 
-Common fields: `v`, `type`, `id`, `name`, `description`, `software`, `time`, `url`, `contact`, `terms`, `signup { grant, powBits, anonymous }`, `payments [PaymentMethodInfo]`, `peers [node references]`.
+Common fields: `v`, `type`, `id`, `name`, `description`, `software`, `time`, `url`, `onion` (the node's Tor onion address, `http://….onion`, when it publishes one), `contact`, `terms`, `signup { grant, powBits, anonymous }`, `payments [PaymentMethodInfo]`, `peers [node references]`.
+
+Node references can name an onion address (`vs:provider:vk1…@http://….onion`); clients reach it through Tor's SOCKS port with remote name resolution. Since the node is identified by its key, a client may send requests for a node to its `onion` address instead of `url` (it checks the signed info either way).
 
 Providers add `pricing { manifest, perMiB, freeMiBPerDay, creatorShare, upload { mode, perMiB, maxBytes } }`, `services.storage { enabled, openJobs }` and `stats`. Algorithm nodes add `pricing { feed, search, lookup, submission }`, `rewards { vote, voteDailyCap, acceptedSuggestion, requireIdentity, autoAcceptAgreement }`, `ranking { strategy, description }`, `taxonomy.topics` and `stats`.
 
@@ -158,6 +160,8 @@ Rewards: `perRetrieval` per correct retrieval, `perChallenge` per passed challen
 | `POST /v1/submissions` | `SubmissionRequest` — title, metadata, `thumbnail` (data: URL ≤ 200 kB), `providers`, and optionally `creatorProof { key, ts, sig }` with `sig` over `"vibeshare-claim\n" + nodeId + "\n" + baseId + "\n" + ts` |
 | `GET /v1/suggestions/mine`, `GET /v1/submissions/mine` | Status of the account's contributions |
 
+A `Preferences.languages` list (`["en"]`) keeps content whose declared language is one of them, and content without one whose title could be in one of them — judged leniently by the scripts and letters it uses ([`src/shared/language.ts`](../src/shared/language.ts)).
+
 Answers to requests made with a session token carry `x-vs-balance` (the account's balance on this node after the request) and, when the request was charged, `x-vs-charged`. Clients keep their balance and the node's status from these headers instead of polling.
 
 `LookupResult` is a full `ContentItem` (status `listed`), `{ id, status: "blocked", reason }`, or `{ id, status: "unknown" }` for every id the operator never set.
@@ -174,6 +178,6 @@ Both node types expose `/v1/admin/*` to the operator with `x-admin-token: <token
 
 ## 7. Client daemon (local API)
 
-The client node serves its GUI and a local API on `127.0.0.1:7700`. The API requires the per-run token found in the page (`<meta name="vs-token">`, header `x-vs-token`) and refuses foreign `Host` headers (DNS rebinding). Streams are served at `/stream/<content id>` with `Range` support; untrusted content is served with a sandboxing Content-Security-Policy. The routes are defined once in [`src/client/api.ts`](../src/client/api.ts) on top of the client core ([`src/client/core.ts`](../src/client/core.ts)); the daemon ([`src/client/daemon.ts`](../src/client/daemon.ts)) adds uploads to disk, proxied thumbnails and the storage service.
+The client node serves its GUI and a local API on `127.0.0.1:7700`. The API requires the per-run token found in the page (`<meta name="vs-token">`, header `x-vs-token`) and refuses foreign `Host` headers (DNS rebinding). Streams are served at `/stream/<content id>` with `Range` support; untrusted content is served with a sandboxing Content-Security-Policy. The routes are defined once in [`src/client/api.ts`](../src/client/api.ts) on top of the client core ([`src/client/core.ts`](../src/client/core.ts)); the daemon ([`src/client/daemon.ts`](../src/client/daemon.ts)) adds uploads to disk, proxied thumbnails, the storage service, Tor routing (`POST /api/tor/check`) and `GET /api/events`: Server-Sent Events (`event: nodes`, the node list) whenever a node's status or balance changes, so the GUI shows credits live without asking any node.
 
-The web client ([distribution/](../distribution)) answers the same routes in the browser: a service worker serves `api/…` and `stream/…` relative to where the site is hosted, keeps its data in IndexedDB and loads thumbnails straight from the algorithm nodes. Shared links have the form `<web client>/#/watch/<content id>`, optionally with `?p=<provider reference>` naming a provider that hosts the content.
+The web client ([distribution/](../distribution)) answers the same routes in the browser: a service worker serves `api/…` and `stream/…` relative to where the site is hosted, keeps its data in IndexedDB and loads thumbnails straight from the algorithm nodes; node changes reach open tabs as `{ type: "vs-nodes", nodes }` messages from the worker. Shared links have the form `<web client>/#/watch/<content id>`, optionally with `?p=<provider reference>` naming a provider that hosts the content.

@@ -1,5 +1,5 @@
 import type { AccountResponse, AuthMode, NodeEntry } from '../shared/clientapi.js';
-import { RemoteError } from '../shared/remote.js';
+import { RemoteError, type Transport } from '../shared/remote.js';
 import { log } from '../shared/log.js';
 import { NodeClient, type RequestResult } from '../shared/nodeclient.js';
 import { formatNodeRef, parseNodeRefs, type NodeType } from '../shared/noderef.js';
@@ -19,7 +19,34 @@ export function errorText(error: unknown): string {
 export class NodeManager {
   private clients = new Map<string, { auth: AuthMode; client: NodeClient }>();
 
-  constructor(private readonly store: ClientStoreLike) {}
+  private listeners = new Set<(nodes: NodeEntry[]) => void>();
+  private announcing: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly store: ClientStoreLike,
+    /** How requests to a node are sent (the daemon routes them through Tor); plain fetch when undefined. */
+    private readonly transport?: (target: { url: string; onion?: string }) => Transport | undefined
+  ) {}
+
+  /**
+   * Calls the listener with the node list whenever a node, its status or a balance changes
+   * (the GUI shows credits live this way). Returns the function that stops it.
+   */
+  subscribe(listener: (nodes: NodeEntry[]) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Saves the node list and tells the listeners (a burst of changes is told once). */
+  private changed(): void {
+    this.store.changed();
+    if (this.announcing || !this.listeners.size) return;
+    this.announcing = setTimeout(() => {
+      this.announcing = null;
+      const nodes = this.list();
+      for (const listener of this.listeners) listener(nodes);
+    }, 50);
+  }
 
   private get nodes(): NodeEntry[] {
     return this.store.data.data.nodes;
@@ -65,6 +92,7 @@ export class NodeManager {
         accounts.changed();
       },
       onResult: (result) => this.observe(node.id, result),
+      transport: () => this.transport?.({ url: node.url, onion: node.info?.onion }),
     });
     if (node.info) client.info = node.info;
     this.clients.set(node.id, { auth: node.auth, client });
@@ -91,7 +119,7 @@ export class NodeManager {
       node.balance = result.balance;
       material = true;
     }
-    if (material) this.store.changed();
+    if (material) this.changed();
   }
 
   /** Forgets cached sessions (after the identity changed). */
@@ -114,6 +142,7 @@ export class NodeManager {
             expectedType: ref.type,
             auth: 'anonymous',
             identity: this.store.identity,
+            transport: () => this.transport?.({ url: ref.url }),
           });
           const started = Date.now();
           const info = await probe.fetchInfo();
@@ -150,7 +179,7 @@ export class NodeManager {
       this.nodes.push(entry);
       added.push(entry);
     }
-    this.store.changed();
+    this.changed();
     await Promise.all(added.map((node) => this.refreshBalance(node)));
     return { added, errors };
   }
@@ -160,7 +189,7 @@ export class NodeManager {
     if (index < 0) return;
     this.nodes.splice(index, 1);
     this.clients.delete(id);
-    this.store.changed();
+    this.changed();
   }
 
   update(id: string, patch: Partial<Pick<NodeEntry, 'enabled' | 'auth' | 'maxPrice' | 'name'>>): NodeEntry {
@@ -176,7 +205,7 @@ export class NodeManager {
       const value = patch.maxPrice;
       node.maxPrice = value === null || value === undefined || Number.isNaN(Number(value)) ? undefined : Math.max(0, Number(value));
     }
-    this.store.changed();
+    this.changed();
     return node;
   }
 
@@ -189,7 +218,7 @@ export class NodeManager {
     ];
     const others = this.nodes.filter((node) => node.type !== type);
     this.store.data.data.nodes = type === 'provider' ? [...ordered, ...others] : [...others, ...ordered];
-    this.store.changed();
+    this.changed();
   }
 
   async refresh(node: NodeEntry): Promise<NodeEntry> {
@@ -204,7 +233,7 @@ export class NodeManager {
     } catch (error) {
       node.status = { online: false, checkedAt: new Date().toISOString(), error: errorText(error) };
     }
-    this.store.changed();
+    this.changed();
     return node;
   }
 
@@ -217,7 +246,7 @@ export class NodeManager {
       const response = await this.client(node).json<AccountResponse>('/v1/account');
       node.balance = response.account.balance;
       node.accountId = response.account.id;
-      this.store.changed();
+      this.changed();
     } catch (error) {
       log.debug(`Balance of ${node.name}: ${errorText(error)}`);
     }
@@ -227,7 +256,7 @@ export class NodeManager {
     const node = this.get(nodeId);
     if (node && balance !== undefined && node.balance !== balance) {
       node.balance = balance;
-      this.store.changed();
+      this.changed();
     }
   }
 

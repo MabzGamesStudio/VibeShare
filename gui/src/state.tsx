@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
 import { useLocation } from 'react-router-dom';
-import { api, errorMessage } from './api';
+import { api, errorMessage, onNodesChanged } from './api';
 
 interface Toast {
   id: number;
@@ -62,6 +62,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh();
   }, [refresh, location.pathname]);
+  // Credits and node status arrive live from the client as answers from nodes change them.
+  useEffect(() => onNodesChanged((nodes) => setState((current) => (current ? { ...current, nodes } : current))), []);
   useEffect(() => {
     const onFocus = () => void refresh();
     window.addEventListener('focus', onFocus);

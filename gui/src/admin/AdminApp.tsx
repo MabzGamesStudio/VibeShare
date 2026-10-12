@@ -74,6 +74,12 @@ function Overview({ status }: { status: Status }) {
           Share it: clients paste it into Nodes → Add nodes. Set <code>publicUrl</code> in Settings if clients reach this node under another address.
         </p>
         <CodeBox text={status.reference} />
+        {info.onion && (
+          <p className="small" style={{ marginTop: 12 }}>
+            Tor onion address: <code>{info.onion}</code>
+            {status.reference.includes('.onion') ? '' : ' — clients with Tor on for every node use it automatically.'}
+          </p>
+        )}
       </div>
       <div className="stat-grid">
         <div className="stat">
@@ -398,6 +404,22 @@ const COMMON_FIELDS: FieldDef[] = [
   { path: 'signup.powBits', label: 'Proof of work for new accounts (bits)', type: 'number', hint: '0 = none; 16–20 slows down account farming' },
   { path: 'signup.anonymous', label: 'Allow anonymous accounts', type: 'bool' },
   { path: 'peers', label: 'Recommended nodes', type: 'list', hint: 'Node references, comma separated' },
+  {
+    path: 'tor.onionService',
+    label: 'Publish as a Tor onion service',
+    type: 'bool',
+    hint: 'Needs Tor running with a ControlPort. Reachable without a public address or open port.',
+  },
+  { path: 'tor.controlPort', label: 'Tor control port', type: 'text', hint: 'ControlPort in torrc, e.g. 127.0.0.1:9051' },
+  { path: 'tor.controlPassword', label: 'Tor control password', type: 'text', hint: 'For HashedControlPassword; empty = cookie authentication' },
+  {
+    path: 'tor.outbound',
+    label: 'Outgoing requests through Tor',
+    type: 'select',
+    options: ['onion', 'all', 'off'],
+    hint: 'onion: only to .onion nodes; all: every request to other nodes and the crawler',
+  },
+  { path: 'tor.proxy', label: 'Tor SOCKS address', type: 'text', hint: 'Empty: 127.0.0.1:9050, or Tor Browser on 9150' },
 ];
 
 function get(config: Record<string, unknown>, path: string): unknown {

@@ -17,6 +17,7 @@ import {
   type Rating,
 } from '../shared/taxonomy.js';
 import { wilson, quality } from './ranking.js';
+import { matchesLanguages } from '../shared/language.js';
 
 /** What the node knows about one content id. Ids it has no entry for are "unknown". */
 export interface Entry {
@@ -287,7 +288,7 @@ export class Registry {
     const blockedTags = new Set((preferences.blockedTags ?? []).map(normalizeTag));
     const blockedCreators = new Set(preferences.blockedCreators ?? []);
     const kinds = preferences.creatorKinds?.length ? new Set(preferences.creatorKinds) : null;
-    const languages = preferences.languages?.length ? new Set(preferences.languages.map((l) => l.toLowerCase())) : null;
+    const languages = preferences.languages?.length ? preferences.languages : null;
     return this.all().filter((entry) => {
       if (entry.status !== 'listed') return false;
       if (!ratingAllowed(entry.rating, limit)) return false;
@@ -298,7 +299,7 @@ export class Registry {
       const creator = this.creator(entry.creatorId);
       if (creator?.status === 'blocked') return false;
       if (kinds && !kinds.has(creator?.kind ?? 'unknown')) return false;
-      if (languages && entry.language && !languages.has(entry.language.toLowerCase())) return false;
+      if (languages && !matchesLanguages(entry, languages)) return false;
       return true;
     });
   }

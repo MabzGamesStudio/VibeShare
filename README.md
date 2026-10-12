@@ -31,14 +31,15 @@ Paste it into the client to use the node; delete it or drag it down when it is s
 
 ## Download and run
 
-VibeShare runs on **macOS, Linux and Windows**. Releases are built by GitHub Actions when a `v*` tag is pushed (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+VibeShare runs on **macOS, Linux, Windows and iOS**. Releases are built by GitHub Actions when a `v*` tag is pushed (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | **Desktop app** (client) | `VibeShare-…-mac-arm64.dmg` / `-x64.dmg` | `.AppImage`, `.deb`, `.tar.gz` | `VibeShare-…-win-x64.exe` installer or `.zip` |
 | **Command line** (every node type, GUI included) | `vibeshare-…-macos-arm64` / `-x64` | `vibeshare-…-linux-x64` / `-arm64` | `vibeshare-…-windows-x64.exe` |
 | **Docker** (provider, algorithm) | `ghcr.io/mabzgamesstudio/vibeshare` | same | same |
-| **Web client** (no install) | [MabzGamesStudio.github.io/WebPages/VibeShare](https://MabzGamesStudio.github.io/WebPages/VibeShare) — any browser | same | same |
+| **iPhone and iPad** | `VibeShare-unsigned.ipa` from the *iOS app* workflow (install with AltStore or Sideloadly), or TestFlight — see [mobile/README.md](mobile/README.md) | | |
+| **Web client** (no install) | [mabzgamesstudio.github.io/WebPages/pages/vibeShare/web](https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/) — any browser | same | same |
 
 Install the command-line build in one line:
 
@@ -82,7 +83,7 @@ Desktop app from source: `npm run build && cd desktop && npm install && npm star
 
 ![Home](docs/images/home.png)
 
-- **Credits in the top bar.** The top right shows your credits on your first provider and your first algorithm node (hover for every node; *+N* counts the others). A dot shows whether the node answered your last request.
+- **Credits in the top bar.** The top right shows your credits on your first provider and your first algorithm node (hover for every node; *+N* counts the others), live: they change the moment a node's answer changes them — while a video streams, when a vote earns a credit — and briefly show by how much. A dot shows whether the node answered your last request.
 - **Pages.** The left panel lists your pages. Four come preset — **Home**, **Videos**, **Shorts** and **Images** — and *New page* adds your own. Each page picks its content (recommendations from your algorithm nodes, a saved search, or the newest from your subscriptions; formats, topics, creator kinds, a lower age rating), its layout and what it shows with each item, in your order. *Customize* on any page (or *Settings → Pages*) edits it with a live preview; pages can be reordered, hidden from the panel, duplicated, reset or deleted.
   - **Home**: a 2D canvas of cards to move around in any direction — scroll, swipe, drag or use the arrow keys; there are no scrollbars. Cards near the middle slow down, come forward, grow and go from faded to clear; the card in the middle opens with a tap or Enter. Each card keeps its media's shape (vertical shorts, square images, wide videos) and shows only its picture, title and creator. More cards load as you reach the edge.
   - **Videos**: a grid of large thumbnails with title, creator and platform (VibeShare for content published here) — swap the platform for the like count, add views or duration, drop the thumbnail…
@@ -91,14 +92,16 @@ Desktop app from source: `npm run build && cd desktop && npm install && npm star
   - Layouts: 2D canvas, grid, list, vertical swipe, one-column feed, masonry wall. Thumbnails show only the picture and a video's length — no age rating or media badges. Every list loads more as you scroll, after a short pause (*Settings → Pause before loading more*, 1.5 s by default) so fast scrolling doesn't spend credits faster than you can look.
 - **Explore** searches with filters. Queries understand `#tag`, `@creator`, `format:music` and `topic:science`. Pasting a content id or a link opens it directly. Algorithm nodes also look your query up on other platforms, so creators and titles from elsewhere show up too.
 - **Subscriptions** shows the newest content of the creators you follow, from every algorithm node.
-- **Watch** streams native content from your providers (seeking only fetches the chunks it needs; every chunk is checked against its hash). When no provider has it, the content plays from the platform it came from — its media file, or the platform's player. Blocked content and content no algorithm node has reviewed are gated according to your settings. Like/dislike and *Suggest* (tags, topics, format, age rating or a report — with a reason and the timestamp that shows it) earn credits on algorithm nodes that reward them.
-- **Share** on any item, the watch page or a short opens a popup: copy the link, send it to another app, or show a **QR code** (download as PNG or SVG). Links open the [web client](#the-web-client) on that content — `https://MabzGamesStudio.github.io/WebPages/VibeShare/#/watch/<id>` by default; *Settings → Sharing* points them at another hosted copy.
+- **Watch** shows content in its own shape — a vertical short in a tall frame, a square image in a square one, a wide video across the page — as large as the window allows. It streams native content from your providers (seeking only fetches the chunks it needs; every chunk is checked against its hash). When no provider has it, the content plays from the platform it came from — its media file, or the platform's player. Blocked content and content no algorithm node has reviewed are gated according to your settings. Like/dislike and *Suggest* (tags, topics, format, age rating or a report — with a reason and the timestamp that shows it) earn credits on algorithm nodes that reward them.
+- **Share** on any item, the watch page or a short opens a popup: copy the link, send it to another app, or show a **QR code** (download as PNG or SVG). Links open the [web client](#the-web-client) on that content — `https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/#/watch/<id>` by default; *Settings → Sharing* points them at another hosted copy.
 - **Publish** uploads a file to the providers you pick and submits it to algorithm nodes for review. Files are signed with your key so people can subscribe to you as a creator. You can also list content that lives elsewhere (YouTube, Vimeo, Dailymotion, SoundCloud, Spotify, TikTok, Instagram, X, Bluesky, Mastodon, Twitch, archive.org, PeerTube, IPFS or any link).
 - **Nodes** is where you add nodes by pasting references (one per line, or plain URLs), reorder them (drag or arrows), switch them on and off, set a price limit, pick the account mode, and share your whole list with someone else.
-- **No background requests.** The client never polls your nodes: it learns whether a node is up, and your balance there, from the answers to the requests you make anyway. Opening a page or coming back to the window refreshes what you see.
+- **No background requests.** The client never polls your nodes: it learns whether a node is up, and your balance there, from the answers to the requests you make anyway, and passes changes to the GUI as they happen.
+- **Languages.** *Settings → Content preferences → Languages* (English by default) keeps titles that could be in the languages you pick. It only looks at the letters a title uses, and leniently: a title in Cyrillic, Arabic or Japanese script is not English, and many letters missing from a language's alphabet rule it out, but an English title with *café* in it still passes. Content whose language is known is matched by that instead. Nodes filter by it, and the client again for nodes that do not.
+- **Tor.** *Settings → Tor* sends requests to nodes through Tor (the Tor service, or Tor Browser while it is open): only to nodes at `.onion` addresses (the default), or to every node — then through a node's own onion address when it has one, and in the desktop app the window's own traffic too. *Test Tor* checks that traffic leaves through Tor. In a browser, open the web client in Tor Browser instead.
 - **Credits** shows your balance on each node — credits never move between nodes — with each node's payment methods (vouchers, crypto, Lightning, card checkout, manual) and history.
 - **Earn** turns on the storage service (offer disk space to providers for credits) and shows your contributions to algorithm nodes.
-- **Settings**: pages, preferences, account mode for new nodes, creator profile, cache size, IPFS gateway, theme, the share address, and your identity backup.
+- **Settings**: pages, preferences, languages, account mode for new nodes, Tor, creator profile, cache size, IPFS gateway, theme, the share address, and your identity backup.
 
 ### Accounts on nodes
 
@@ -116,6 +119,8 @@ Your identity backup (*Settings → Identity*) is a single `vibeshare-seed-…` 
 
 [`distribution/`](distribution) builds the client into a static website (hash routes, so any static host works) that shared links open. It is the whole client — pages, shorts, search, publishing, credits — with its backend running in the browser: a service worker keeps the visitor's keys and nodes in the browser, calls the nodes directly, checks every chunk and streams with seeking. `distribution/config.json` names the nodes a first-time visitor starts with and where shared links point; `npm run build:web` writes the site to `distribution/web/`, ready to copy into a GitHub Pages repository (or let the *Web client* workflow publish it). Nodes it talks to need HTTPS. Details: [distribution/README.md](distribution/README.md).
 
+The **iOS app** ([`mobile/`](mobile)) is this web client in a native shell (Capacitor). The *iOS app* workflow builds it on macOS: an unsigned `.ipa` for sideloading, a simulator build, and — with App Store Connect secrets — signed builds for TestFlight. Details: [mobile/README.md](mobile/README.md).
+
 ## Running a content provider
 
 ```bash
@@ -129,6 +134,8 @@ It prints its reference, the dashboard address (`/admin`) and the admin token. E
 - **Payment methods** — vouchers, ETH and ERC-20 tokens on any EVM chain, on-chain bitcoin, SOL and SPL tokens, Lightning (LNbits), hosted checkouts with signed webhooks (Stripe, or anything that can sign a webhook) and manual approval.
 - **Storage backends** — local disk, S3-compatible (AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO, Storj, Filebase…), WebDAV (Nextcloud, rclone…), IPFS, read-only HTTP mirrors, other VibeShare providers (pull-through mirroring) and client nodes, with priorities and replication.
 - **Storage service** — jobs that pay client nodes to keep copies: you choose the content, the number of copies, how long, and the rewards (upfront, per retrieval, per passed proof-of-storage challenge, at completion).
+
+Provider and algorithm nodes can also be **Tor onion services**: with Tor running (and its `ControlPort` on), `--onion` — or *Settings → Publish as a Tor onion service* — publishes the node at a `.onion` address that stays the same across restarts. Clients with Tor reach it without the node having a public address or open port; with a public URL too, clients that send everything through Tor use the onion address. `tor.outbound` sends the node's own requests to other nodes (and the crawler) through Tor as well ([docs/OPERATORS.md](docs/OPERATORS.md#tor)).
 
 See [docs/OPERATORS.md](docs/OPERATORS.md) and [examples/provider.config.json](examples/provider.config.json).
 
@@ -169,6 +176,7 @@ src/cli.ts      the `vibeshare` command
 gui/            React GUI (client app at /, node dashboard at /admin); gui/src/web: the web client's backend
 distribution/   the static web client: config.json and the built site (web/)
 desktop/        Electron desktop app for the client
+mobile/         iOS app (Capacitor around the web client)
 scripts/        standalone binary builds, installers, icon
 examples/       operator configs, custom ranking module, systemd units
 tests/          unit, integration and end-to-end tests
@@ -193,12 +201,13 @@ tests/          unit, integration and end-to-end tests
 This is a first version. Things to know:
 
 - **Live streaming** is not implemented yet; streaming is on-demand (chunked, seekable).
-- Provider and algorithm nodes need a reachable address (a public IP, a reverse proxy or a tunnel). Client nodes do not, even when they store data for providers.
+- Provider and algorithm nodes need a reachable address (a public IP, a reverse proxy or a tunnel) — or a Tor onion address (`--onion`), which needs neither. Client nodes do not, even when they store data for providers.
 - Crypto payments are verified against the operator's own RPC/explorer endpoints; invoices are identified by a unique amount, so pay the exact amount shown.
 - The JSON-file storage of nodes suits small and medium nodes; very large catalogs would want a database.
 - Desktop apps and binaries are unsigned until signing certificates are configured in the release workflow.
 - The crawler's platform adapters follow each platform's public API or feed format; they are tested against recorded responses, and platforms change their APIs from time to time. YouTube search needs a Data API key (channel feeds do not); the platforms in the *API keys* tab do nothing until the operator adds credentials, and each platform's developer terms (attribution, caching, rate limits, approval for some APIs such as Instagram's hashtag search or X's paid tiers) are the operator's to follow.
 - The web client cannot run the storage service (it only runs while a page is open).
+- The iOS app plays native content once its file is downloaded (no streaming without service workers), and does not run the storage service.
 
 ## License
 

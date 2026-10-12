@@ -1,5 +1,5 @@
 import { Coins, Compass, History, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry } from '../../src/shared/clientapi';
 import { newPageId, presetPage } from '../../src/shared/clientdefaults';
@@ -61,18 +61,40 @@ function TopSearch() {
  * Credits on the nodes of one kind: the balance on the first enabled node (the one used
  * first), with every node's balance in the tooltip. Credits never move between nodes.
  */
+/** The last change of a balance, shown for a moment next to it. */
+function useBalanceDelta(nodeId: string | undefined, balance: number | undefined): { amount: number; key: number } | null {
+  const previous = useRef<{ nodeId?: string; balance?: number }>({ nodeId, balance });
+  const [delta, setDelta] = useState<{ amount: number; key: number } | null>(null);
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = { nodeId, balance };
+    if (before.nodeId !== nodeId || before.balance === undefined || balance === undefined || before.balance === balance) return;
+    setDelta({ amount: balance - before.balance, key: Date.now() });
+    const timer = setTimeout(() => setDelta(null), 1800);
+    return () => clearTimeout(timer);
+  }, [nodeId, balance]);
+  return delta;
+}
+
 function CreditChip({ nodes, label, icon }: { nodes: NodeEntry[]; label: string; icon: React.ReactNode }) {
   const enabled = nodes.filter((node) => node.enabled);
   const primary = enabled[0];
   const title = enabled.length
     ? `${label} credits\n${enabled.map((node) => `${node.name}: ${node.balance ?? '–'}${node.status.online === false ? ' (offline)' : ''}`).join('\n')}`
     : `No ${label.toLowerCase()} node: add one on the Nodes page`;
+  const delta = useBalanceDelta(primary?.id, primary?.balance);
   return (
     <NavLink to={enabled.length ? '/wallet' : '/nodes'} className="credit-chip" title={title}>
       <StatusDot online={primary ? primary.status.online : undefined} enabled={Boolean(primary)} />
       {icon}
       <span className="credit-label">{label}</span>
-      <strong>{primary?.balance ?? '–'}</strong>
+      <strong className={delta ? (delta.amount < 0 ? 'spent' : 'earned') : undefined}>{primary?.balance ?? '–'}</strong>
+      {delta && (
+        <span key={delta.key} className={`credit-delta ${delta.amount < 0 ? 'spent' : 'earned'}`} aria-hidden>
+          {delta.amount > 0 ? '+' : '−'}
+          {Math.abs(delta.amount)}
+        </span>
+      )}
       {enabled.length > 1 && <span className="credit-more">+{enabled.length - 1}</span>}
     </NavLink>
   );

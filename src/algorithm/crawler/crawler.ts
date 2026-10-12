@@ -222,7 +222,9 @@ export class Crawler {
   constructor(
     private readonly config: () => CrawlerConfig,
     statePath: string | null,
-    private readonly ingest: Ingest
+    private readonly ingest: Ingest,
+    /** A fetch through Tor for this URL when the node sends the crawler through Tor. */
+    transport?: (url: URL) => typeof fetch | undefined
   ) {
     this.fetcher = new PoliteFetcher({
       userAgent: config().userAgent,
@@ -231,6 +233,7 @@ export class Crawler {
       allowPrivate: () => this.config().allowPrivateAddresses,
       apiDelayMs: () => this.config().apiDelayMs,
       blocked: (host) => this.hostBlocked(host),
+      transport,
     });
     this.ctx = this.contextFor(null, 'crawl');
     this.store = new JsonFile<CrawlerState>(

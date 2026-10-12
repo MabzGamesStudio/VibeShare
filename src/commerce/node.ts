@@ -14,6 +14,8 @@ import {
   type Ctx,
 } from '../shared/http.js';
 import { log } from '../shared/log.js';
+import type { Transport } from '../shared/remote.js';
+import { isOnionUrl, OnionService, TorRouter, type TorMode } from '../shared/tor.js';
 import { formatNodeRef, parseNodeRef, type NodeType } from '../shared/noderef.js';
 import {
   infoSigningPayload,
@@ -44,7 +46,37 @@ export interface BaseConfig {
   payments: PaymentConfig[];
   /** Node references this operator recommends to clients. */
   peers: string[];
+  tor: NodeTorConfig;
 }
+
+/** Tor: publishing the node as an onion service, and which outgoing requests go through Tor. */
+export interface NodeTorConfig {
+  /** Publish the node at a .onion address, through Tor's control port. */
+  onionService: boolean;
+  /** Tor's control port (ControlPort in torrc). */
+  controlPort: string;
+  /** Its password (HashedControlPassword); empty = cookie or no authentication. */
+  controlPassword: string;
+  /** Port of the onion address: 80 gives http://<address>.onion/. */
+  onionPort: number;
+  /**
+   * Outgoing requests through Tor: off; onion = only to .onion addresses (other nodes that
+   * are onion services); all = every request to other nodes and, on algorithm nodes, the crawler.
+   * Payment checks and storage backends always connect directly.
+   */
+  outbound: TorMode;
+  /** Tor's SOCKS address; empty = 127.0.0.1:9050 (or Tor Browser's 9150). */
+  proxy: string;
+}
+
+export const DEFAULT_NODE_TOR: NodeTorConfig = {
+  onionService: false,
+  controlPort: '127.0.0.1:9051',
+  controlPassword: '',
+  onionPort: 80,
+  outbound: 'onion',
+  proxy: '',
+};
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends (infer U)[] ? U[] : T[K] extends object ? DeepPartial<T[K]> : T[K] };
 
@@ -83,6 +115,10 @@ export abstract class BaseNode<C extends BaseConfig> {
   protected readonly configFile: JsonFile<C>;
   private overrides: DeepPartial<C>;
   private server: Server | null = null;
+  /** Outgoing requests through Tor, as tor.outbound says. */
+  readonly tor: TorRouter;
+  private onion: OnionService | null = null;
+  private onionKey: string | undefined;
   port = 0;
 
   constructor(
@@ -102,6 +138,50 @@ export abstract class BaseNode<C extends BaseConfig> {
     this.ledger = new Ledger(this.path('ledger.json'), this.path('ledger-audit.jsonl'));
     this.auth = new Auth(this.ledger, () => this.identity.id, () => this.config.signup);
     this.payments = new Payments(this.path('payments.json'), this.ledger, () => this.config.payments);
+    this.tor = new TorRouter(() => ({ mode: this.config.tor.outbound, proxy: this.config.tor.proxy }));
+  }
+
+  /** How to send a request to a URL: through Tor when tor.outbound says so (undefined: directly). */
+  transport(url: string): Transport | undefined {
+    return this.tor.routes(url) || isOnionUrl(url) ? { fetch: this.tor.fetch, timeoutFactor: 4 } : undefined;
+  }
+
+  /** The node's onion address (http://….onion), once Tor has published it. */
+  onionUrl(): string | undefined {
+    const address = this.onion?.address;
+    if (!address) return undefined;
+    const port = this.config.tor.onionPort;
+    return `http://${address}${port === 80 ? '' : `:${port}`}`;
+  }
+
+  /** Starts or stops the onion service to match the config. */
+  private async applyTor(): Promise<void> {
+    const tor = this.config.tor;
+    if (!tor.onionService) {
+      this.onion?.stop();
+      this.onion = null;
+      return;
+    }
+    if (this.onion || !this.server) return;
+    const keyFile = this.path('onion-key');
+    const host = this.config.host;
+    this.onion = new OnionService({
+      controlPort: tor.controlPort,
+      password: tor.controlPassword || undefined,
+      virtualPort: tor.onionPort,
+      target: { host: host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host, port: this.port },
+      loadKey: () => (keyFile && existsSync(keyFile) ? readFileSync(keyFile, 'utf8').trim() : this.onionKey),
+      saveKey: (key) => {
+        this.onionKey = key;
+        if (keyFile) writeFileSync(keyFile, key + '\n', { mode: 0o600 });
+      },
+      onReady: () => log.info(`${this.type} node published as a Tor onion service: ${this.onionUrl()}`),
+    });
+    try {
+      await this.onion.start();
+    } catch (error) {
+      log.warn(`Could not publish the onion service (trying again every 30 s): ${(error as Error).message}`);
+    }
   }
 
   /** The config file merged with command line overrides. */
@@ -134,6 +214,14 @@ export abstract class BaseNode<C extends BaseConfig> {
     return token;
   }
 
+  /** The address clients get (references, node info): the public URL, else the onion address, else url(). */
+  sharedUrl(): string {
+    const config = this.config;
+    if (config.publicUrl) return config.publicUrl.replace(/\/+$/, '');
+    return this.onionUrl() ?? this.url();
+  }
+
+  /** Where the node answers: its public URL, or the address it listens on. */
   url(): string {
     const config = this.config;
     if (config.publicUrl) return config.publicUrl.replace(/\/+$/, '');
@@ -142,7 +230,7 @@ export abstract class BaseNode<C extends BaseConfig> {
   }
 
   reference(): string {
-    return formatNodeRef({ type: this.type, id: this.identity.id, url: this.url() });
+    return formatNodeRef({ type: this.type, id: this.identity.id, url: this.sharedUrl() });
   }
 
   protected abstract extraInfo(): Partial<NodeInfo>;
@@ -160,7 +248,8 @@ export abstract class BaseNode<C extends BaseConfig> {
       description: config.description,
       software: SOFTWARE,
       time: new Date().toISOString(),
-      url: this.url(),
+      url: this.sharedUrl(),
+      onion: this.onionUrl(),
       contact: config.contact,
       terms: config.terms,
       signup: { grant: config.signup.grant, powBits: config.signup.powBits, anonymous: config.signup.anonymous },
@@ -221,6 +310,7 @@ export abstract class BaseNode<C extends BaseConfig> {
       }
       this.configFile.data = next;
       this.configFile.changed();
+      void this.applyTor();
       return next;
     });
     router.get('/v1/admin/accounts', (ctx) => {
@@ -308,9 +398,12 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
     });
     this.port = await listen(this.server, this.config.port, this.config.host);
     log.info(`${this.type} node "${this.config.name}" listening on ${this.config.host}:${this.port}`);
+    await this.applyTor();
   }
 
   async stop(): Promise<void> {
+    this.onion?.stop();
+    this.onion = null;
     if (this.server) await closeServer(this.server);
     this.server = null;
     this.flush();
