@@ -33,6 +33,12 @@ export function base32Decode(text: string): Buffer {
       bits -= 8;
     }
   }
+  // Strict canonical form (RFC 4648): every byte string has exactly one encoding, so
+  // ids cannot be mangled into other spellings of the same id and typos surface instead
+  // of silently decoding. The last character may carry up to 4 unused padding bits, which
+  // must be zero, and it must always contribute to a byte (no dangling whole characters).
+  if (bits >= 5) throw new Error('Invalid base32 length');
+  if (bits > 0 && (value & ((1 << bits) - 1)) !== 0) throw new Error('Invalid base32 padding bits');
   return Buffer.from(out);
 }
 

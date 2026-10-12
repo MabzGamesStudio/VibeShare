@@ -6,6 +6,7 @@ import {
   derivePseudonym,
   generateIdentity,
   identityFromSeed,
+  isKeyId,
   signData,
   solveProofOfWork,
   verifySignature,
@@ -24,6 +25,19 @@ describe('encoding', () => {
     assert.equal(base32Encode(Buffer.from('foobar')), 'mzxw6ytboi');
     assert.equal(canonicalJson({ b: 1, a: [true, { d: null, c: 'x' }], z: undefined }), '{"a":[true,{"c":"x","d":null}],"b":1}');
   });
+
+  it('accepts only the canonical base32 of a byte string', () => {
+    assert.deepEqual(base32Decode('mzxw6ytboi'), Buffer.from('foobar'));
+    assert.deepEqual(base32Decode('MZXW6YTBOI='), Buffer.from('foobar')); // case and padding are tolerated
+    for (let size = 0; size < 40; size++) {
+      const bytes = Buffer.alloc(size, (size * 7) & 255);
+      assert.deepEqual(base32Decode(base32Encode(bytes)), bytes);
+    }
+    assert.throws(() => base32Decode('mzxw6ytboj'), /padding bits/); // non-zero trailing bits
+    assert.throws(() => base32Decode('mzxw6ytboi' + 'a'), /length/); // a trailing character that forms no byte
+    assert.throws(() => base32Decode('m'), /length/); // too short to form a byte
+    assert.throws(() => base32Decode('mzxw6ytbo1'), /character/);
+  });
 });
 
 describe('identities', () => {
@@ -37,6 +51,12 @@ describe('identities', () => {
     assert.equal(derivePseudonym(identity.seed, 'node-a').id, a1.id);
     assert.notEqual(derivePseudonym(identity.seed, 'node-b').id, a1.id);
     assert.notEqual(a1.id, identity.id);
+    // Ids are canonical: only one spelling decodes to a key, so mangled trailing
+    // bits cannot turn an id into another text for the same key.
+    const mangled = identity.id.slice(0, -1) + (identity.id.endsWith('a') ? 'b' : 'r');
+    assert.ok(isKeyId(identity.id));
+    assert.ok(!isKeyId(mangled));
+    assert.ok(!verifySignature(mangled, 'hello', sig));
   });
 
   it('solves and checks proof of work', () => {
