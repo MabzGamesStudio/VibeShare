@@ -117,12 +117,11 @@ export class ClientCore {
     const priceKind = kind === 'search' ? 'search' : 'feed';
     const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
       const price = this.nodes.algorithmPrice(node, priceKind);
-      const page = await this.nodes.client(node).json<Page<ContentItem>>(path, {
+      // (Paid answers carry the new balance; nothing else is asked.)
+      return this.nodes.client(node).json<Page<ContentItem>>(path, {
         body: { ...body, limit, cursor: cursors[node.id] ?? undefined },
         auth: price > 0,
       });
-      if (price > 0) void this.nodes.refreshBalance(node);
-      return page;
     };
 
     if (this.settings.feedMode === 'primary') {

@@ -1,5 +1,5 @@
 import { decodeEntities, cleanText } from '../html.js';
-import type { Adapter, CrawlContext, Discovered } from '../types.js';
+import type { Adapter, ApiBudget, CrawlContext, Discovered } from '../types.js';
 import { inferTopics, toIso, videoFormat } from '../types.js';
 import type { Format } from '../../../shared/taxonomy.js';
 
@@ -7,11 +7,11 @@ import type { Format } from '../../../shared/taxonomy.js';
 // YouTube: channel Atom feeds (no key needed); search through the Data API v3 when the
 // operator configures an API key (YouTube's own search pages are not for crawlers).
 
-export interface YouTubeConfig {
+export interface YouTubeConfig extends ApiBudget {
   enabled: boolean;
   /** Channel ids (UC…) whose new uploads are followed. */
   channels: string[];
-  /** YouTube Data API key, for searches. */
+  /** YouTube Data API key: searches for the queries and for client searches. */
   apiKey: string;
   siteUrl: string;
   apiUrl: string;
@@ -57,11 +57,59 @@ export function parseYouTubeFeed(xml: string): Discovered[] {
   return items;
 }
 
+async function youtubeSearch(ctx: CrawlContext, config: YouTubeConfig, query: string): Promise<Discovered[]> {
+  if (!config.apiKey) return [];
+  // search.list costs 100 of the 10,000 daily quota units.
+  const url = `${config.apiUrl}/search?part=snippet&type=video&maxResults=15&q=${encodeURIComponent(query)}&key=${encodeURIComponent(config.apiKey)}`;
+  const data = (await ctx.api(url, { units: 100 })).json<{
+    items?: {
+      id?: { videoId?: string };
+      snippet?: {
+        title?: string;
+        description?: string;
+        channelId?: string;
+        channelTitle?: string;
+        publishedAt?: string;
+        thumbnails?: Record<string, { url: string }>;
+      };
+    }[];
+  }>();
+  return (data.items ?? []).flatMap((item): Discovered[] => {
+    const id = item.id?.videoId;
+    const snippet = item.snippet;
+    if (!id || !snippet?.title) return [];
+    const title = decodeEntities(snippet.title);
+    return [
+      {
+        id: `yt:${id}`,
+        title,
+        description: snippet.description,
+        format: 'video',
+        publishedAt: toIso(snippet.publishedAt),
+        creator: snippet.channelId ? { id: `youtube:${snippet.channelId}`, name: snippet.channelTitle ?? snippet.channelId } : undefined,
+        thumbnailUrl: snippet.thumbnails?.high?.url ?? snippet.thumbnails?.medium?.url ?? snippet.thumbnails?.default?.url,
+        pageUrl: `https://www.youtube.com/watch?v=${id}`,
+        topics: inferTopics(`${title} ${snippet.description ?? ''}`),
+        adapter: 'youtube',
+      },
+    ];
+  });
+}
+
 export const youtube: Adapter<YouTubeConfig> = {
   id: 'youtube',
   label: 'YouTube',
-  description: 'New uploads of followed channels (RSS); searches with a YouTube Data API key.',
+  description: 'New uploads of followed channels (RSS, no key); with a YouTube Data API key also searches for the queries and for client searches.',
+  api: {
+    signupUrl: 'https://console.cloud.google.com/apis/library/youtube.googleapis.com',
+    credentials: [{ key: 'apiKey', label: 'YouTube Data API v3 key', secret: true }],
+    note: '10,000 quota units a day by default; one search costs 100. Channel feeds need no key.',
+    defaultDailyLimit: 10_000,
+    optional: true,
+  },
   defaults: {
+    dailyLimit: 10_000,
+    searchShare: 0.5,
     enabled: true,
     channels: [
       'UCLA_DiR1FfKNvjuUpBHmylQ', // NASA
@@ -74,51 +122,16 @@ export const youtube: Adapter<YouTubeConfig> = {
     siteUrl: 'https://www.youtube.com',
     apiUrl: 'https://www.googleapis.com/youtube/v3',
   },
-  targets: (config) => config.channels.map((channel) => `channel:${channel}`),
+  targets: (config, queries) => [...config.channels.map((channel) => `channel:${channel}`), ...(config.apiKey ? queries.map((query) => `q:${query}`) : [])],
   async discover(ctx, config, target) {
+    if (target.startsWith('q:')) return { items: await youtubeSearch(ctx, config, target.slice(2)) };
     const channel = target.slice('channel:'.length);
     const response = await ctx.fetcher.get(`${config.siteUrl}/feeds/videos.xml?channel_id=${encodeURIComponent(channel)}`, {
       accept: 'application/atom+xml,application/xml',
     });
     return { items: parseYouTubeFeed(response.text()) };
   },
-  async search(ctx, config, query) {
-    if (!config.apiKey) return [];
-    const url = `${config.apiUrl}/search?part=snippet&type=video&maxResults=15&q=${encodeURIComponent(query)}&key=${encodeURIComponent(config.apiKey)}`;
-    const data = (await ctx.fetcher.get(url, { accept: 'application/json' })).json<{
-      items?: {
-        id?: { videoId?: string };
-        snippet?: {
-          title?: string;
-          description?: string;
-          channelId?: string;
-          channelTitle?: string;
-          publishedAt?: string;
-          thumbnails?: Record<string, { url: string }>;
-        };
-      }[];
-    }>();
-    return (data.items ?? []).flatMap((item): Discovered[] => {
-      const id = item.id?.videoId;
-      const snippet = item.snippet;
-      if (!id || !snippet?.title) return [];
-      const title = decodeEntities(snippet.title);
-      return [
-        {
-          id: `yt:${id}`,
-          title,
-          description: snippet.description,
-          format: 'video',
-          publishedAt: toIso(snippet.publishedAt),
-          creator: snippet.channelId ? { id: `youtube:${snippet.channelId}`, name: snippet.channelTitle ?? snippet.channelId } : undefined,
-          thumbnailUrl: snippet.thumbnails?.high?.url ?? snippet.thumbnails?.medium?.url ?? snippet.thumbnails?.default?.url,
-          pageUrl: `https://www.youtube.com/watch?v=${id}`,
-          topics: inferTopics(`${title} ${snippet.description ?? ''}`),
-          adapter: 'youtube',
-        },
-      ];
-    });
-  },
+  search: youtubeSearch,
 };
 
 // ---------------------------------------------------------------------------

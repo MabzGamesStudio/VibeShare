@@ -108,9 +108,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('POST', '/api/vote', async (request) => {
     const body = await request.json<{ nodeId?: string; id?: string; vote?: number }>();
     const entry = nodes.require(String(body.nodeId));
-    const result = await nodes.client(entry).json<{ credited: number }>('/v1/votes', { body: { id: body.id, vote: body.vote } });
-    if (result.credited) void nodes.refreshBalance(entry);
-    return result;
+    return nodes.client(entry).json<{ credited: number }>('/v1/votes', { body: { id: body.id, vote: body.vote } });
   });
   on('GET', '/api/vote/:id', (request) =>
     nodes.client(node(request)).json(`/v1/votes/${encodeURIComponent(request.query.get('content') ?? '')}`)
@@ -119,9 +117,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     const body = await request.json<{ nodeId?: string; id?: string; kind?: string; value?: string; reason?: string; timestamp?: number }>();
     const entry = nodes.require(String(body.nodeId));
     const { nodeId: _node, ...rest } = body;
-    const result = await nodes.client(entry).json<{ status: string }>('/v1/suggestions', { body: rest });
-    void nodes.refreshBalance(entry);
-    return result;
+    return nodes.client(entry).json<{ status: string }>('/v1/suggestions', { body: rest });
   });
   on('GET', '/api/contributions', () => core.contributions());
 

@@ -11,20 +11,11 @@ import { compact, Fields } from './Fields';
 import { MediaView, Poster } from './Player';
 import type { Paged } from './usePaged';
 
-function LikeButton({ item, active }: { item: FeedItem; active: boolean }) {
-  const { toast } = useApp();
+/** Likes without asking the node for each short's vote first (no request per swipe). */
+function LikeButton({ item }: { item: FeedItem }) {
+  const { toast, refresh } = useApp();
   const [vote, setVote] = useState(0);
   const [likes, setLikes] = useState(item.stats.likes);
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    api<{ vote: number }>(`/api/vote/${encodeURIComponent(item.via)}?content=${encodeURIComponent(item.id)}`)
-      .then((result) => !cancelled && setVote(result.vote))
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [active, item.id, item.via]);
   const count = likes || item.stats.platformLikes;
   return (
     <button
@@ -38,7 +29,10 @@ function LikeButton({ item, active }: { item: FeedItem; active: boolean }) {
           const result = await api<{ likes: number; credited: number }>('/api/vote', { body: { nodeId: item.via, id: item.id, vote: next } });
           setVote(next);
           setLikes(result.likes);
-          if (result.credited) toast(`+${result.credited} credits on ${item.viaName} for voting`, 'success');
+          if (result.credited) {
+            toast(`+${result.credited} credits on ${item.viaName} for voting`, 'success');
+            void refresh();
+          }
         } catch (error) {
           toast(errorMessage(error), 'error');
         }
@@ -93,7 +87,7 @@ function Short({
         )}
       </div>
       <div className="short-rail">
-        <LikeButton item={item} active={active} />
+        <LikeButton item={item} />
         <ShareButton target={{ id: item.id, title: item.title }} className="rail-button" label="Share" />
         <button type="button" className="rail-button" onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
           {muted ? <VolumeX size={22} /> : <Volume2 size={22} />}

@@ -192,26 +192,71 @@ The crawler fills the catalog with content from other platforms. It is on by def
   "searchTimeoutMs": 3000,       // how long a client search waits for them (results are cached)
   "searchCacheMinutes": 30,
   "allowPrivateAddresses": false,
+  "apiDelayMs": 250,             // between two calls to one platform API
+  "blockedSources": [],          // sources never crawled, e.g. ["tiktok", "x"] (see Sources below)
+  "sites": { "allow": [], "block": [] },   // web crawler: only these sites (empty = any) / never these sites
   "adapters": {
-    "youtube":     { "enabled": true, "channels": ["UCLA_DiR1FfKNvjuUpBHmylQ", …], "apiKey": "" },   // channel feeds; search needs a Data API key
+    "youtube":     { "enabled": true, "channels": ["UCLA_DiR1FfKNvjuUpBHmylQ", …], "apiKey": "", "dailyLimit": 10000, "searchShare": 0.5 },   // channel feeds; search needs a Data API key
     "peertube":    { "enabled": true, "instances": ["https://framatube.org", "https://tilvids.com"], "searchIndex": "https://sepiasearch.org" },
     "dailymotion": { "enabled": true },
     "archive":     { "enabled": true },
     "wikimedia":   { "enabled": true },
     "openverse":   { "enabled": true },
-    "flickr":      { "enabled": true, "tags": ["landscape", "nature", …] },
+    "flickr":      { "enabled": true, "tags": ["landscape", "nature", …], "apiKey": "" },   // public tag feeds; search with an API key
     "mastodon":    { "enabled": true, "instances": ["https://mastodon.social"], "tags": ["photography", "art", …] },
     "bluesky":     { "enabled": true },
     "lemmy":       { "enabled": true, "instances": ["https://lemmy.world"] },
-    "web":         { "enabled": true, "seeds": ["https://example.org/videos/"], "maxDepth": 2, "sameSite": true }
+    "web":         { "enabled": true, "seeds": ["https://example.org/videos/"], "maxDepth": 2, "sameSite": true },
+    "vimeo":       { "enabled": true, "accessToken": "", "dailyLimit": 1000, "searchShare": 0.5 },
+    "reddit":      { "enabled": true, "clientId": "", "clientSecret": "", "subreddits": ["EarthPorn", "pics", …] },
+    …                            // every platform API below, with its credentials, dailyLimit and searchShare
   }
-}
+},
+"sources": { "priorities": { "vibeshare": 10 } }   // 0 (hidden) – 10; sources not named here are 5
 ```
 
 - **Manners.** Every URL — and every redirect — is checked against the host's `robots.txt` (RFC 9309: the most specific rule wins, `Allow` wins ties, wildcards; a missing robots.txt allows everything, an unreachable one blocks everything for a while). Requests to a host are spaced by `hostDelayMs` or its Crawl-delay, responses are size-limited, and private and local addresses are never fetched.
 - **What a find becomes.** Its id is the platform source (`yt:…`, `peertube:host/uuid`, `ig:reel/…`, `url:…`), so clients play it from the platform: its media file when the platform offers one, its embedded player otherwise. Formats come from the platform and the media's shape (portrait video is a short video), ratings from the platform's sensitive/adult flags (otherwise `defaultRating`), topics from the words of the title and description.
 - **Your decisions win.** Content you listed, blocked or edited is never changed by the crawler; it only adds what is missing (a thumbnail, a media link). Bulk-list or block pending finds from the catalog.
 - Set `"enabled": false` to run a hand-curated node.
+
+### Platform APIs
+
+Platforms that only allow automated access through their official API are crawled with credentials from your own developer account. Paste them in the dashboard's *API keys* tab (or under `crawler.adapters.<id>` in `config.json`); an API without its credentials does nothing. Each API card links to the place to get them.
+
+| Adapter | Credentials | Default daily budget | Finds |
+|---|---|---|---|
+| `youtube` | `apiKey` (YouTube Data API v3) | 10 000 units (a search costs 100) | videos and shorts matching the queries; channel feeds work without a key |
+| `flickr` | `apiKey` | 3 000 | photos matching the queries; tag feeds work without a key |
+| `vimeo` | `accessToken` (public scope) | 1 000 | videos |
+| `twitch` | `clientId`, `clientSecret` | 5 000 | live channels and videos of matching categories |
+| `unsplash` | `accessKey` | 1 000 | photos |
+| `pexels` | `apiKey` | 600 | photos and videos |
+| `giphy` | `apiKey` | 1 000 | GIFs |
+| `tenor` | `apiKey` (Google Cloud key with the Tenor API) | 5 000 | GIFs |
+| `imgur` | `clientId` | 5 000 | images and videos |
+| `deviantart` | `clientId`, `clientSecret` | 2 000 | artwork (mature works are skipped) |
+| `europeana` | `apiKey` | 5 000 | images, video and sound from European museums and archives |
+| `reddit` | `clientId`, `clientSecret`, `subreddits` | 5 000 | images, videos and links to platforms from the subreddits and from searches |
+| `tumblr` | `apiKey` (OAuth consumer key) | 4 000 | photo and video posts with matching tags |
+| `x` | `bearerToken` | 100 | posts with photos and videos (search access depends on your X API tier) |
+| `instagram` | `accessToken`, `userId`, `hashtags` | 100 | top media of hashtags (Instagram Graph API hashtag search; needs a professional account and app review) |
+| `spotify` | `clientId`, `clientSecret`, `market` | 5 000 | tracks and podcast episodes |
+| `jamendo` | `clientId` | 1 000 | Creative Commons music |
+| `freesound` | `token` | 2 000 | sounds |
+
+- **Budgets.** `dailyLimit` counts calls (YouTube: quota units) per UTC day; set it within the platform's own limit. `searchShare` (0–1, default 0.5) is the part kept for client searches: the crawler stops at `dailyLimit × (1 − searchShare)`, while searches may use the whole budget. When a client searches and the API still has budget, the platform is searched too (with `searchPlatforms` on) and what it returns is added to the catalog.
+- **Rate limits.** Calls to an API are spaced by `apiDelayMs`. When a platform answers 429, the API is paused for as long as its `Retry-After` says (an hour otherwise), crawling and searching alike. Usage and pauses are shown on each API card.
+- **Tokens.** APIs with a client ID and secret (Twitch, DeviantArt, Reddit, Spotify) get an app token from the platform and reuse it until it expires. Credentials are only ever sent to the API they belong to.
+- **Terms.** Each platform's developer terms apply to your use: attribution, how long results may be kept, and some APIs (Instagram's hashtag search, higher X tiers, TikTok's Research API) need approval first. Platforms whose terms do not allow this kind of use are not included.
+
+### Sources and priorities
+
+The *Sources* tab lists every source of content — VibeShare (content published on providers) and each platform — with how many of its items are listed or pending.
+
+- **Crawl.** Untick a source to block it (`crawler.blockedSources`): its adapter stops, links to it are no longer followed or identified, its hosts are never fetched, nothing more from it is added, and what was found there before is left out of feeds and search (content you added yourself stays).
+- **Priority.** 0 to 10 (`sources.priorities`), 5 when not set and 10 for VibeShare. Within a source the ranking's order is kept; between sources, every step above 5 moves items up and every step below moves them down — at 10, an item ranks where one ten times further down the list would. Priority 0 leaves the source out of feeds and search altogether.
+- **Sites.** `crawler.sites.block` lists sites that are never fetched, not even through a platform's API; `crawler.sites.allow`, when not empty, limits the web crawler to the sites on it. A name covers its subdomains.
 
 ## Security checklist
 

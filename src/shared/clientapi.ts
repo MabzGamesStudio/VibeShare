@@ -44,10 +44,11 @@ export interface StorageServiceSettings {
 }
 
 /** How a page shows its content. */
-export const PAGE_LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'] as const;
+export const PAGE_LAYOUTS = ['canvas', 'grid', 'list', 'shorts', 'stream', 'masonry'] as const;
 export type PageLayout = (typeof PAGE_LAYOUTS)[number];
 
 export const PAGE_LAYOUT_LABELS: Record<PageLayout, string> = {
+  canvas: '2D canvas (move in any direction; the card in the middle comes forward)',
   grid: 'Grid of cards',
   list: 'List',
   shorts: 'Vertical swipe (one at a time, plays automatically)',
@@ -176,6 +177,11 @@ export interface Settings {
   /** Account mode for newly added nodes. */
   defaultAuth: AuthMode;
   autoplay: boolean;
+  /**
+   * How long the GUI waits before loading more items when you reach the end of a list:
+   * a little friction, so scrolling fast does not spend credits on content nobody looks at.
+   */
+  loadPauseMs: number;
   cacheMiB: number;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };

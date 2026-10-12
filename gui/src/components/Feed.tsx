@@ -2,16 +2,24 @@ import { AlertTriangle, Compass } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { FeedResponse, PageConfig } from '../../../src/shared/clientapi';
 import { presetPage } from '../../../src/shared/clientdefaults';
+import { useApp } from '../state';
 import { GridLayout } from './feed/Cards';
 import { usePaged, useSentinel } from './feed/usePaged';
 import { Empty, Spinner } from './ui';
 
 /** How cards look outside configurable pages (search, subscriptions, creators). */
-export const CARD_PAGE: PageConfig = presetPage('home');
+export const CARD_PAGE: PageConfig = {
+  ...presetPage('videos'),
+  id: 'cards',
+  preset: undefined,
+  filters: presetPage('home').filters,
+  fields: ['title', 'creator', 'published', 'via'],
+};
 
 /** A grid of content from algorithm nodes that loads more as you scroll, with per-node errors. */
 export function Feed({ load, deps, empty }: { load: (cursor?: string) => Promise<FeedResponse>; deps: unknown[]; empty?: ReactNode }) {
-  const paged = usePaged(load, JSON.stringify(deps));
+  const { state } = useApp();
+  const paged = usePaged(load, JSON.stringify(deps), state?.settings.loadPauseMs ?? 1500);
   const sentinel = useSentinel(paged.loadMore, !paged.done, paged.items.length);
   return (
     <>
@@ -39,7 +47,11 @@ export function Feed({ load, deps, empty }: { load: (cursor?: string) => Promise
         <GridLayout items={paged.items} page={CARD_PAGE} />
       )}
       <div ref={sentinel} className="sentinel">
-        {paged.loading && <Spinner />}
+        {paged.loading && (
+          <span className="row faint small">
+            <Spinner /> Loading more…
+          </span>
+        )}
       </div>
     </>
   );

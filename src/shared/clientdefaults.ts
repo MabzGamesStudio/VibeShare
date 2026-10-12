@@ -17,11 +17,11 @@ export function presetPage(preset: PagePreset): PageConfig {
         title: 'Home',
         icon: 'home',
         preset,
-        layout: 'grid',
+        layout: 'canvas',
         source: 'feed',
         filters: { ...NO_FILTERS },
         thumbnail: true,
-        fields: ['title', 'creator', 'published', 'via'],
+        fields: ['title', 'creator'],
         options: { autoplay: false, muted: true, columns: 0, size: 'medium' },
         sidebar: true,
       };
@@ -36,7 +36,7 @@ export function presetPage(preset: PagePreset): PageConfig {
         filters: { ...NO_FILTERS, formats: ['video', 'live'] },
         thumbnail: true,
         fields: ['title', 'creator', 'platform'],
-        options: { autoplay: false, muted: true, columns: 0, size: 'medium' },
+        options: { autoplay: false, muted: true, columns: 0, size: 'large' },
         sidebar: true,
       };
     case 'shorts':
@@ -85,6 +85,7 @@ export function defaultSettings(): Settings {
     unknownContent: 'warn',
     defaultAuth: 'pseudonym',
     autoplay: true,
+    loadPauseMs: 1500,
     cacheMiB: 1024,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
@@ -111,7 +112,20 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   return merged;
 }
 
+/** The home page as it came before the 2D canvas: replaced if the user never changed it. */
+function isOldDefaultHome(page: Partial<PageConfig>): boolean {
+  return (
+    page.preset === 'home' &&
+    page.layout === 'grid' &&
+    page.source === 'feed' &&
+    JSON.stringify(page.fields) === JSON.stringify(['title', 'creator', 'published', 'via']) &&
+    !page.filters?.formats?.length &&
+    !page.filters?.topics?.length
+  );
+}
+
 export function normalizePage(page: Partial<PageConfig> & { id: string }): PageConfig {
+  if (isOldDefaultHome(page)) return { ...presetPage('home'), title: page.title || 'Home', sidebar: page.sidebar ?? true };
   const template = page.preset ? presetPage(page.preset) : presetPage('home');
   return {
     ...template,
@@ -158,7 +172,7 @@ export function newPageId(): string {
   return `p-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'];
+const LAYOUTS = ['canvas', 'grid', 'list', 'shorts', 'stream', 'masonry'];
 const SOURCES = ['feed', 'search', 'subscriptions'];
 
 /**
@@ -177,6 +191,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
   if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
+  next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
   next.storageService.quotaGiB = Math.max(0, Number(next.storageService.quotaGiB) || 0);
   try {
     const url = new URL(next.shareBaseUrl);

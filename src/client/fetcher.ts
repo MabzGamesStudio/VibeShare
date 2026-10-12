@@ -90,8 +90,6 @@ export class Fetcher {
         const response = await this.nodes.client(provider).fetch(`/v1/chunks/${chunkId}?cid=${cid}`, { timeoutMs: 60000 });
         const data = Buffer.from(await response.arrayBuffer());
         if (chunkIdOf(data) !== chunkId) throw new Error('Corrupt chunk');
-        const balance = response.headers.get('x-vs-balance');
-        if (balance !== null) this.nodes.setBalance(provider.id, Number(balance));
         await this.cache.put(chunkId, data);
         return data;
       } catch (error) {

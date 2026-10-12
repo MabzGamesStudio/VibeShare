@@ -374,6 +374,18 @@ export function SettingsPage() {
         <Switch checked={s.autoplay} onChange={(autoplay) => void updateSettings({ autoplay })} label="Start playing reviewed content automatically" />
         <div className="form-grid">
           <label className="field">
+            Pause before loading more (seconds)
+            <input
+              type="number"
+              min={0}
+              max={10}
+              step={0.5}
+              defaultValue={s.loadPauseMs / 1000}
+              onBlur={(e) => void updateSettings({ loadPauseMs: Math.round(Number(e.target.value) * 1000) })}
+            />
+            <span className="hint">A little friction at the end of each list, so fast scrolling does not spend credits on content you skip.</span>
+          </label>
+          <label className="field">
             Cache size (MiB)
             <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
           </label>

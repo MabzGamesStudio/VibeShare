@@ -15,6 +15,7 @@ import { Loading, Modal } from '../components/ui';
 import { formatDuration, splitList, timeAgo } from '../util';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
+import { ApiKeys, Sources } from './SourcesTabs';
 
 interface Submission {
   id: string;
@@ -610,8 +611,10 @@ interface CrawlerStatus {
     label: string;
     description: string;
     enabled: boolean;
+    blocked: boolean;
     targets: number;
     search: boolean;
+    api?: { configured: boolean; optional?: boolean; pausedUntil?: string };
     stats: { runs: number; found: number; added: number; errors: number; blocked: number; lastRun?: string; lastError?: string };
   }[];
   queues: { frontier: number; identify: number; seen: number };
@@ -719,6 +722,10 @@ function Crawler() {
                     />
                     <strong>{adapter.label}</strong>
                     {adapter.search && <span className="badge">search</span>}
+                    {adapter.api && <span className="badge">API</span>}
+                    {adapter.blocked && <span className="badge warn">blocked in Sources</span>}
+                    {adapter.api && !adapter.api.configured && !adapter.api.optional && <span className="badge">needs a key (API keys tab)</span>}
+                    {adapter.api?.pausedUntil && <span className="badge warn">rate limited</span>}
                   </label>
                   <div className="tiny faint">{adapter.description}</div>
                   {adapter.stats.lastError && <div className="tiny" style={{ color: 'var(--warn)' }}>{adapter.stats.lastError}</div>}
@@ -731,7 +738,13 @@ function Crawler() {
                 <td>
                   <button
                     className="small"
-                    disabled={busy !== null || !adapter.enabled || (adapter.id !== 'web' && adapter.targets === 0)}
+                    disabled={
+                      busy !== null ||
+                      !adapter.enabled ||
+                      adapter.blocked ||
+                      Boolean(adapter.api && !adapter.api.configured && !adapter.api.optional) ||
+                      (adapter.id !== 'web' && adapter.targets === 0)
+                    }
                     onClick={async () => {
                       setBusy(adapter.id);
                       try {
@@ -838,6 +851,8 @@ function Crawler() {
 
 export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'crawler') return <Crawler />;
+  if (tab === 'apis') return <ApiKeys />;
+  if (tab === 'sources') return <Sources />;
   if (tab === 'review') return <Review />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;

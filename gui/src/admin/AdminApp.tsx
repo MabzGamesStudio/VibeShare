@@ -549,6 +549,8 @@ export function AdminApp() {
           ['review', `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions})` : ''}`],
           ['catalog', 'Catalog'],
           ['crawler', 'Crawler'],
+          ['apis', 'API keys'],
+          ['sources', 'Sources'],
           ['creators', 'Creators'],
         ] as [string, string][])),
     ['accounts', 'Accounts'],
