@@ -10,6 +10,7 @@ const daemon = process.env.VIBESHARE_DAEMON ?? 'http://127.0.0.1:7700';
 export default defineConfig({
   plugins: [react()],
   base: '/',
+  define: { __VIBESHARE_WEB__: 'false' },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

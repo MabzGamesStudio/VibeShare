@@ -31,14 +31,18 @@ export function png(
   alpha = false
 ): Buffer {
   const channels = alpha ? 4 : 3;
-  const raw = Buffer.alloc((width * channels + 1) * height);
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  const line = Buffer.alloc(stride);
   for (let y = 0; y < height; y++) {
-    const row = y * (width * channels + 1);
-    raw[row] = 0;
+    const row = y * (stride + 1);
     for (let x = 0; x < width; x++) {
       const color = pixel(x, y);
-      for (let c = 0; c < channels; c++) raw[row + 1 + x * channels + c] = Math.round(color[c] ?? 255);
+      for (let c = 0; c < channels; c++) line[x * channels + c] = Math.max(0, Math.min(255, Math.round(color[c] ?? 255)));
     }
+    // "Sub" filter: each byte minus the one to its left, which makes gradients compress well.
+    raw[row] = 1;
+    for (let i = 0; i < stride; i++) raw[row + 1 + i] = (line[i] - (i >= channels ? line[i - channels] : 0)) & 0xff;
   }
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
@@ -125,18 +129,42 @@ export function melody(seconds: number, seed = 1, sampleRate = 44100): Buffer {
   return Buffer.concat([header, data]);
 }
 
-export function svgArt(seed: number): Buffer {
+export function svgArt(seed: number, width = 1600, height = 900, baseHue?: number): Buffer {
   let state = seed;
   const random = () => ((state = (state * 16807) % 2147483647) / 2147483647);
-  const hue = Math.floor(random() * 360);
+  const first = Math.floor(random() * 360);
+  const hue = baseHue ?? first;
+  const scale = Math.sqrt((width * height) / (1600 * 900));
   const shapes = Array.from({ length: 28 }, () => {
-    const x = Math.round(random() * 1600);
-    const y = Math.round(random() * 900);
-    const r = Math.round(20 + random() * 220);
+    const x = Math.round(random() * width);
+    const y = Math.round(random() * height);
+    const r = Math.round((20 + random() * 220) * scale);
     const h = (hue + Math.round(random() * 140)) % 360;
     return `<circle cx="${x}" cy="${y}" r="${r}" fill="hsl(${h} 85% 60%)" opacity="${(0.15 + random() * 0.5).toFixed(2)}"/>`;
   }).join('');
   return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue} 60% 12%)"/><stop offset="1" stop-color="hsl(${(hue + 60) % 360} 70% 22%)"/></linearGradient><filter id="b"><feGaussianBlur stdDeviation="18"/></filter></defs><rect width="1600" height="900" fill="url(#g)"/><g filter="url(#b)">${shapes}</g></svg>`
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue} 60% 12%)"/><stop offset="1" stop-color="hsl(${(hue + 60) % 360} 70% 22%)"/></linearGradient><filter id="b"><feGaussianBlur stdDeviation="18"/></filter></defs><rect width="${width}" height="${height}" fill="url(#g)"/><g filter="url(#b)">${shapes}</g></svg>`
   );
+}
+
+/** The colour fields of the demo clips (see clips.ts) at time `t`: their thumbnails. */
+export function plasma(kind: 'neon' | 'ocean' | 'ember' | 'aurora', width: number, height: number, t = 2): Buffer {
+  // The clips are drawn on a 180×320 (or 320×180) grid and scaled up.
+  const grid = kind === 'aurora' ? [320, 180] : [180, 320];
+  const clamp = (value: number) => Math.max(0, Math.min(255, value));
+  return png(width, height, (px, py) => {
+    const X = (px / width) * grid[0];
+    const Y = (py / height) * grid[1];
+    const d = Math.hypot(X - 90, Y - 160);
+    const sin = Math.sin;
+    const rgb: [number, number, number] =
+      kind === 'neon'
+        ? [128 + 100 * sin(X / 14 + t * 2.1), 60 + 50 * sin(Y / 18 - t * 1.4), 170 + 80 * sin((X + Y) / 22 + t * 1.1)]
+        : kind === 'ocean'
+          ? [25 + 20 * sin(X / 40 + t), 120 + 70 * sin(Y / 12 + 3 * sin(X / 30 + t) - t * 2), 185 + 65 * sin(Y / 16 - t * 1.6)]
+          : kind === 'ember'
+            ? [200 + 55 * sin(d / 6 - t * 4), 90 + 70 * sin(d / 9 - t * 3), 50 + 40 * sin(d / 12 - t * 2)]
+            : [60 + 55 * sin(X / 25 + t * 0.8), 150 + 95 * sin(X / 17 + 2 * sin(Y / 30 + t)), 150 + 90 * sin(Y / 20 - t)];
+    return [clamp(rgb[0]), clamp(rgb[1]), clamp(rgb[2])];
+  });
 }

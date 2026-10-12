@@ -58,10 +58,14 @@ The content id is `vs1` + base32(SHA-256(canonicalJson(manifest))) — the signa
 |---|---|---|
 | `yt` | YouTube video id | `yt:dQw4w9WgXcQ` |
 | `vimeo` | Vimeo id | `vimeo:76979871` |
+| `dm` | Dailymotion id | `dm:x8abc12` |
 | `sc` | SoundCloud path | `sc:artist/track` |
 | `spotify` | `type:id` | `spotify:track:4uLU6hMCjMI75M1A2tKUQC` |
 | `tiktok` | video id | `tiktok:7234567890` |
+| `ig` | `p` or `reel` + `/` + shortcode | `ig:reel/Cabc123` |
 | `x` | post id | `x:1234` |
+| `bsky` | `handle-or-did/post-key` | `bsky:alice.bsky.social/3kabc` |
+| `masto` | `host/@user/status-id` | `masto:mastodon.social/@bob/1123581321` |
 | `twitch` | channel, or `v` + video id | `twitch:v987` |
 | `ia` | Internet Archive identifier | `ia:BigBuckBunny_124` |
 | `peertube` | `host/video-id` | `peertube:tube.example/abc` |
@@ -156,6 +160,10 @@ Rewards: `perRetrieval` per correct retrieval, `perChallenge` per passed challen
 
 `LookupResult` is a full `ContentItem` (status `listed`), `{ id, status: "blocked", reason }`, or `{ id, status: "unknown" }` for every id the operator never set.
 
+`ContentItem`: `id` (with fallbacks), `title`, `description`, `format`, `rating`, `topics`, `tags`, `language`, `durationSeconds`, `creator`, `thumbnail` (a `/v1/thumbnails/<key>` path, or an https URL for content found on other platforms), `media { url, type: image|video|audio, width, height }` (a file the platform serves directly), `pageUrl` (the content's page on its platform), `origin` (`operator`, `submission` or `crawler`), `publishedAt`, `stats { likes, dislikes, views?, platformLikes? }` (VibeShare votes on this node; views and likes on the original platform when known), `providers` and `notes` (accepted suggestions as evidence).
+
+A search may also query other platforms (see the operator guide's discovery crawler); what they return is added to the catalog and can be in the same page of results.
+
 `Preferences`: `formats`, `maxRating`, `topics`, `onlyTopics`, `blockedTags`, `blockedCreators`, `creatorKinds`, `languages`. Ratings are ordered `all < 10+ < 13+ < 16+ < 18+ < nsfw`; the node never returns more than its own `policy.maxRating`.
 
 ## 6. Admin API
@@ -164,4 +172,6 @@ Both node types expose `/v1/admin/*` to the operator with `x-admin-token: <token
 
 ## 7. Client daemon (local API)
 
-The client node serves its GUI and a local API on `127.0.0.1:7700`. The API requires the per-run token found in the page (`<meta name="vs-token">`, header `x-vs-token`) and refuses foreign `Host` headers (DNS rebinding). Streams are served at `/stream/<content id>` with `Range` support; untrusted content is served with a sandboxing Content-Security-Policy. See [`src/client/daemon.ts`](../src/client/daemon.ts).
+The client node serves its GUI and a local API on `127.0.0.1:7700`. The API requires the per-run token found in the page (`<meta name="vs-token">`, header `x-vs-token`) and refuses foreign `Host` headers (DNS rebinding). Streams are served at `/stream/<content id>` with `Range` support; untrusted content is served with a sandboxing Content-Security-Policy. The routes are defined once in [`src/client/api.ts`](../src/client/api.ts) on top of the client core ([`src/client/core.ts`](../src/client/core.ts)); the daemon ([`src/client/daemon.ts`](../src/client/daemon.ts)) adds uploads to disk, proxied thumbnails and the storage service.
+
+The web client ([distribution/](../distribution)) answers the same routes in the browser: a service worker serves `api/…` and `stream/…` relative to where the site is hosted, keeps its data in IndexedDB and loads thumbnails straight from the algorithm nodes. Shared links have the form `<web client>/#/watch/<content id>`, optionally with `?p=<provider reference>` naming a provider that hosts the content.

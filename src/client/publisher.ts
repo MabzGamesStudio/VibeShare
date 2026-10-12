@@ -1,51 +1,29 @@
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
-import { open, rm, stat } from 'node:fs/promises';
-import type { IncomingMessage } from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { randomId, signData } from '../shared/crypto.js';
-import { buildManifestFromFile, contentIdOf, signManifest, validateManifest, type Manifest } from '../shared/content.js';
+import { buildManifest, contentIdOf, DEFAULT_CHUNK_SIZE, signManifest, validateManifest, type Manifest } from '../shared/content.js';
 import type { ExternalPublishRequest, Job, JobStep, LibraryItem, NodeEntry, PublishRequest } from '../shared/clientapi.js';
-import { badRequest, HttpError, notFound } from '../shared/http.js';
+import { badRequest } from '../shared/errors.js';
 import { claimSigningPayload, type SubmissionRequest } from '../shared/protocol.js';
 import { formatSource, sourceFromUrl, withSources, parseSource } from '../shared/sources.js';
 import { FORMATS, RATINGS, type Format, type Rating } from '../shared/taxonomy.js';
+import type { ClientStoreLike, UploadedFile, UploadStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
-import type { ClientStore } from './state.js';
 
-const MAX_UPLOAD = 64 * 1024 * 1024 * 1024;
+/** Reads a file a chunk at a time. */
+async function* readChunks(file: UploadedFile, chunkSize: number): AsyncGenerator<Uint8Array> {
+  for (let offset = 0; offset < file.size; offset += chunkSize) yield file.read(offset, Math.min(chunkSize, file.size - offset));
+}
 
 /** Publishing: upload content to providers and submit its metadata to algorithm nodes. */
 export class Publisher {
   readonly jobs = new Map<string, Job>();
-  private readonly dir: string;
+  /** Settles when a job ends (lets service workers stay alive while publishing). */
+  readonly running = new Map<string, Promise<void>>();
 
   constructor(
-    private readonly store: ClientStore,
+    private readonly store: ClientStoreLike,
     private readonly nodes: NodeManager,
-    dataDir: string | null
-  ) {
-    this.dir = join(dataDir ?? join(tmpdir(), 'vibeshare-client'), 'uploads');
-    mkdirSync(this.dir, { recursive: true });
-  }
-
-  /** Receives a file from the GUI into a temporary file. */
-  async receive(req: IncomingMessage): Promise<{ fileId: string; size: number }> {
-    const declared = Number(req.headers['content-length'] ?? 0);
-    if (declared > MAX_UPLOAD) throw new HttpError(413, 'too_large', 'File too large');
-    const fileId = randomId('f', 10);
-    const path = join(this.dir, fileId);
-    await pipeline(req, createWriteStream(path));
-    return { fileId, size: (await stat(path)).size };
-  }
-
-  private filePath(fileId: string): string {
-    if (!/^f[a-z2-7]{16}$/.test(fileId)) throw badRequest('Bad file id');
-    const path = join(this.dir, fileId);
-    if (!existsSync(path)) throw notFound('The uploaded file is gone; upload it again');
-    return path;
-  }
+    private readonly uploads: UploadStore
+  ) {}
 
   private newJob(kind: Job['kind'], title: string, steps: string[]): Job {
     const job: Job = {
@@ -76,8 +54,9 @@ export class Publisher {
       });
   }
 
-  publish(request: PublishRequest): Job {
-    const path = this.filePath(request.fileId);
+  async publish(request: PublishRequest): Promise<Job> {
+    if (!/^f[a-z2-7]{16}$/.test(String(request.fileId))) throw badRequest('Bad file id');
+    const file = await this.uploads.get(request.fileId);
     if (!request.title?.trim()) throw badRequest('A title is required');
     const providers = this.nodesOf(request.providers ?? [], 'provider');
     const algorithms = this.nodesOf(request.algorithms ?? [], 'algorithm');
@@ -88,13 +67,18 @@ export class Publisher {
       ...providers.map((node) => `Upload to ${node.name}`),
       ...algorithms.map((node) => `Submit to ${node.name}`),
     ]);
-    void this.runPublish(job, path, request, providers, algorithms, sources);
+    this.track(job, this.runPublish(job, file, request, providers, algorithms, sources));
     return job;
+  }
+
+  private track(job: Job, task: Promise<void>): void {
+    const done = task.finally(() => this.running.delete(job.id));
+    this.running.set(job.id, done);
   }
 
   private async runPublish(
     job: Job,
-    path: string,
+    file: UploadedFile,
     request: PublishRequest,
     providers: NodeEntry[],
     algorithms: NodeEntry[],
@@ -108,7 +92,7 @@ export class Publisher {
       step(0, 'running');
       const format = FORMATS.includes(request.format as Format) ? (request.format as Format) : undefined;
       const rating = RATINGS.includes(request.rating as Rating) ? (request.rating as Rating) : undefined;
-      let manifest: Manifest = await buildManifestFromFile(path, {
+      let manifest: Manifest = await buildManifest(readChunks(file, DEFAULT_CHUNK_SIZE), {
         name: request.name || 'file',
         mime: request.mime || 'application/octet-stream',
         meta: {
@@ -135,9 +119,8 @@ export class Publisher {
         job.progress = Math.min(1, done / total);
       };
 
-      const handle = await open(path, 'r');
       const stored: NodeEntry[] = [];
-      try {
+      {
         for (const [i, provider] of providers.entries()) {
           const index = 1 + i;
           step(index, 'running');
@@ -150,9 +133,8 @@ export class Publisher {
             const missing = new Set(started.missing);
             for (const [chunkIndex, chunk] of manifest.chunks.entries()) {
               if (missing.has(chunk.id)) {
-                const buffer = Buffer.alloc(chunk.size);
-                await handle.read(buffer, 0, chunk.size, chunkIndex * manifest.chunkSize);
-                await client.fetch(`/v1/uploads/${cid}/chunks/${chunk.id}`, { method: 'PUT', raw: buffer, timeoutMs: 120000 });
+                const data = await file.read(chunkIndex * manifest.chunkSize, chunk.size);
+                await client.fetch(`/v1/uploads/${cid}/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120000 });
                 missing.delete(chunk.id);
               }
               tick();
@@ -166,8 +148,6 @@ export class Publisher {
             done += manifest.chunks.length;
           }
         }
-      } finally {
-        await handle.close();
       }
       if (!stored.length) throw new Error('No provider node accepted the upload');
 
@@ -203,7 +183,7 @@ export class Publisher {
       job.result = { id };
       job.status = 'done';
       job.progress = 1;
-      await rm(path, { force: true });
+      await this.uploads.remove(request.fileId);
     } catch (error) {
       job.status = 'error';
       job.error = errorText(error);
@@ -285,7 +265,7 @@ export class Publisher {
       publishedAt: library.publishedAt,
     };
     let done = 0;
-    void this.submitAll(job, 0, algorithms, submission, id, false, library, () => {
+    const task = this.submitAll(job, 0, algorithms, submission, id, false, library, () => {
       done++;
       job.progress = done / algorithms.length;
     }).then(() => {
@@ -295,6 +275,7 @@ export class Publisher {
       job.status = library.algorithms.some((entry) => entry.submissionId) ? 'done' : 'error';
       if (job.status === 'error') job.error = 'No algorithm node accepted the submission';
     });
+    this.track(job, task);
     return job;
   }
 }

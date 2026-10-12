@@ -1,24 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { badRequest, HttpError, notFound } from './errors.js';
 import { log } from './log.js';
 
-export class HttpError extends Error {
-  constructor(
-    public status: number,
-    public code: string,
-    message: string,
-    public extra?: Record<string, unknown>
-  ) {
-    super(message);
-  }
-}
-
-export const badRequest = (message: string) => new HttpError(400, 'bad_request', message);
-export const unauthorized = (message = 'Authentication required') => new HttpError(401, 'unauthorized', message);
-export const forbidden = (message: string) => new HttpError(403, 'forbidden', message);
-export const notFound = (message = 'Not found') => new HttpError(404, 'not_found', message);
-export const paymentRequired = (message: string, extra?: Record<string, unknown>) =>
-  new HttpError(402, 'payment_required', message, extra);
+export * from './errors.js';
+export * from './remote.js';
 
 export interface Ctx {
   req: IncomingMessage;
@@ -215,67 +201,3 @@ export function closeServer(server: Server): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Outgoing requests to other nodes
-
-export class RemoteError extends Error {
-  constructor(
-    public status: number,
-    public code: string,
-    message: string,
-    public body?: unknown
-  ) {
-    super(message);
-  }
-}
-
-export interface RequestOptions {
-  method?: string;
-  body?: unknown;
-  raw?: Buffer | Uint8Array;
-  headers?: Record<string, string>;
-  timeoutMs?: number;
-}
-
-export async function request(url: string, options: RequestOptions = {}): Promise<Response> {
-  const headers: Record<string, string> = { ...options.headers };
-  let body: Buffer | Uint8Array | string | undefined;
-  if (options.raw) {
-    body = options.raw;
-    headers['content-type'] ??= 'application/octet-stream';
-  } else if (options.body !== undefined) {
-    body = JSON.stringify(options.body);
-    headers['content-type'] = 'application/json';
-  }
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: options.method ?? (body ? 'POST' : 'GET'),
-      headers,
-      body,
-      signal: AbortSignal.timeout(options.timeoutMs ?? 15000),
-    });
-  } catch (error) {
-    const cause = (error as Error).name === 'TimeoutError' ? 'timed out' : (error as Error).message;
-    throw new RemoteError(0, 'unreachable', `${new URL(url).host} ${cause}`);
-  }
-  if (!response.ok) {
-    let parsed: unknown;
-    let message = `${response.status} ${response.statusText}`;
-    let code = `http_${response.status}`;
-    try {
-      parsed = await response.json();
-      const error = (parsed as { error?: { code?: string; message?: string } }).error;
-      if (error?.message) message = error.message;
-      if (error?.code) code = error.code;
-    } catch {
-      // not JSON
-    }
-    throw new RemoteError(response.status, code, message, parsed);
-  }
-  return response;
-}
-
-export async function requestJson<T>(url: string, options: RequestOptions = {}): Promise<T> {
-  const response = await request(url, options);
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
-}

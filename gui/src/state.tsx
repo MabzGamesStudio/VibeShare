@@ -12,7 +12,8 @@ interface AppContext {
   state: ClientState | null;
   error: string | null;
   refresh: () => Promise<void>;
-  updateSettings: (patch: Partial<Settings>) => Promise<void>;
+  /** Saves settings; false (after showing why) when the client refused them. */
+  updateSettings: (patch: Partial<Settings>) => Promise<boolean>;
   toast: (message: string, kind?: Toast['kind']) => void;
   providers: NodeEntry[];
   algorithms: NodeEntry[];
@@ -45,8 +46,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const settings = await api<Settings>('/api/settings', { method: 'PATCH', body: patch });
         setState((current) => (current ? { ...current, settings } : current));
+        return true;
       } catch (e) {
         toast(errorMessage(e), 'error');
+        return false;
       }
     },
     [toast]

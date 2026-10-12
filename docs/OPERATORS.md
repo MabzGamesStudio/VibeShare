@@ -171,6 +171,48 @@ Create jobs for particular content from *Content → Storage job* (copies, days,
 - `hot`: votes over age, Hacker-News style. `new`: newest first. `top`: Wilson lower bound of approval. `random`: seeded shuffle.
 - `custom`: an ES module whose default export receives the entries that passed the viewer's filters and returns them sorted, or `{ [id]: score }`. It may be async — call your own recommendation service. See [examples/ranking/ranker.mjs](../examples/ranking/ranker.mjs).
 
+### Discovery (crawler)
+
+The crawler fills the catalog with content from other platforms. It is on by default; the *Crawler* tab of the dashboard shows each adapter's runs, finds and errors, the hosts it talked to and what their `robots.txt` blocked, and lets you pause it, run an adapter now, add seed sites and edit the discovery queries.
+
+```jsonc
+"crawler": {
+  "enabled": true,
+  "userAgent": "VibeShareBot/0.1 (+https://github.com/MabzGamesStudio/VibeShare)",  // matched against robots.txt groups
+  "concurrency": 2,              // adapters working at once
+  "pauseMs": 4000,               // between two units of work
+  "hostDelayMs": 2000,           // between two requests to one host (more when its robots.txt asks for a Crawl-delay)
+  "timeoutMs": 15000,
+  "maxEntries": 20000,           // discoveries kept; the oldest unvoted ones are pruned first
+  "autoList": true,              // list finds right away, or keep them "pending" in Review
+  "defaultRating": "13+",        // for finds whose platform does not flag adult content
+  "queries": ["science", "music", "nature", …],   // searched on platforms that have search
+  "learnFromSearches": true,     // client searches become queries too
+  "searchPlatforms": true,       // also search the platforms when a client searches (first page only)
+  "searchTimeoutMs": 3000,       // how long a client search waits for them (results are cached)
+  "searchCacheMinutes": 30,
+  "allowPrivateAddresses": false,
+  "adapters": {
+    "youtube":     { "enabled": true, "channels": ["UCLA_DiR1FfKNvjuUpBHmylQ", …], "apiKey": "" },   // channel feeds; search needs a Data API key
+    "peertube":    { "enabled": true, "instances": ["https://framatube.org", "https://tilvids.com"], "searchIndex": "https://sepiasearch.org" },
+    "dailymotion": { "enabled": true },
+    "archive":     { "enabled": true },
+    "wikimedia":   { "enabled": true },
+    "openverse":   { "enabled": true },
+    "flickr":      { "enabled": true, "tags": ["landscape", "nature", …] },
+    "mastodon":    { "enabled": true, "instances": ["https://mastodon.social"], "tags": ["photography", "art", …] },
+    "bluesky":     { "enabled": true },
+    "lemmy":       { "enabled": true, "instances": ["https://lemmy.world"] },
+    "web":         { "enabled": true, "seeds": ["https://example.org/videos/"], "maxDepth": 2, "sameSite": true }
+  }
+}
+```
+
+- **Manners.** Every URL — and every redirect — is checked against the host's `robots.txt` (RFC 9309: the most specific rule wins, `Allow` wins ties, wildcards; a missing robots.txt allows everything, an unreachable one blocks everything for a while). Requests to a host are spaced by `hostDelayMs` or its Crawl-delay, responses are size-limited, and private and local addresses are never fetched.
+- **What a find becomes.** Its id is the platform source (`yt:…`, `peertube:host/uuid`, `ig:reel/…`, `url:…`), so clients play it from the platform: its media file when the platform offers one, its embedded player otherwise. Formats come from the platform and the media's shape (portrait video is a short video), ratings from the platform's sensitive/adult flags (otherwise `defaultRating`), topics from the words of the title and description.
+- **Your decisions win.** Content you listed, blocked or edited is never changed by the crawler; it only adds what is missing (a thumbnail, a media link). Bulk-list or block pending finds from the catalog.
+- Set `"enabled": false` to run a hand-curated node.
+
 ## Security checklist
 
 - Keep `identity.json` and `admin-token` private (they are written with mode 600).

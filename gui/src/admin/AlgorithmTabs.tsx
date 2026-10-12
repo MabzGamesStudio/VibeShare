@@ -204,7 +204,10 @@ function Review() {
 interface Entry {
   id: string;
   sources: string[];
-  status: 'listed' | 'blocked';
+  status: 'listed' | 'blocked' | 'pending';
+  origin?: 'operator' | 'submission' | 'crawler';
+  adapter?: string;
+  pageUrl?: string;
   reason?: string;
   title: string;
   description?: string;
@@ -368,8 +371,19 @@ function Catalog() {
         <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 'auto' }}>
           <option value="">All</option>
           <option value="listed">Listed</option>
+          <option value="pending">Found by the crawler, waiting for review</option>
           <option value="blocked">Blocked</option>
         </select>
+        {status === 'pending' && page && page.items.length > 0 && (
+          <button
+            onClick={async () => {
+              await admin('/v1/admin/content/bulk', { body: { ids: page.items.map((entry) => entry.id), status: 'listed' } }).catch((e) => show(message(e)));
+              load();
+            }}
+          >
+            List all {page.items.length}
+          </button>
+        )}
         <button className="primary" onClick={() => setEditing(blankEntry())}>
           Add content
         </button>
@@ -389,7 +403,21 @@ function Catalog() {
                     {entry.reason && <div className="tiny" style={{ color: 'var(--danger)' }}>{entry.reason}</div>}
                   </td>
                   <td>
-                    <span className={`badge ${entry.status === 'listed' ? 'ok' : 'danger'}`}>{entry.status}</span>
+                    <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
+                    {entry.origin === 'crawler' && (
+                      <div className="tiny faint" style={{ marginTop: 4 }}>
+                        found on {entry.adapter}
+                        {entry.pageUrl && (
+                          <>
+                            {' '}
+                            ·{' '}
+                            <a className="link" href={entry.pageUrl} target="_blank" rel="noreferrer">
+                              open
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="small">
                     {FORMAT_LABELS[entry.format]} · {RATING_LABELS[entry.rating]}
@@ -572,7 +600,244 @@ function Creators() {
   );
 }
 
+interface CrawlerStatus {
+  enabled: boolean;
+  userAgent: string;
+  autoList: boolean;
+  searchPlatforms: boolean;
+  adapters: {
+    id: string;
+    label: string;
+    description: string;
+    enabled: boolean;
+    targets: number;
+    search: boolean;
+    stats: { runs: number; found: number; added: number; errors: number; blocked: number; lastRun?: string; lastError?: string };
+  }[];
+  queues: { frontier: number; identify: number; seen: number };
+  queries: string[];
+  recentSearches: { query: string; count: number; last: string }[];
+  hosts: { host: string; requests: number; blocked: number; errors: number; lastError?: string }[];
+}
+
+function Crawler() {
+  const [status, setStatus] = useState<CrawlerStatus | null>(null);
+  const [config, setConfig] = useState<{ crawler: { seeds?: string[]; queries: string[]; defaultRating: Rating; adapters: { web: { seeds: string[] } } } } | null>(null);
+  const [seed, setSeed] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<CrawlerStatus>('/v1/admin/crawler').then(setStatus).catch((e) => show(message(e)));
+    admin<NonNullable<typeof config>>('/v1/admin/config').then(setConfig).catch(() => undefined);
+  }, [show]);
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const set = async (patch: Record<string, unknown>) => {
+    try {
+      await admin('/v1/admin/config', { method: 'PUT', body: { crawler: patch } });
+      load();
+    } catch (e) {
+      show(message(e));
+    }
+  };
+
+  if (!status || !config) return <Loading />;
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="card form-stack">
+        <div className="row between">
+          <div>
+            <h3>Content discovery</h3>
+            <p className="small muted" style={{ marginTop: 4 }}>
+              The crawler looks for videos, shorts, images and music on other platforms and lists them here. It reads each site's robots.txt
+              first and keeps away from what it disallows, waits between requests to the same site, and identifies itself as{' '}
+              <code>{status.userAgent}</code>.
+            </p>
+          </div>
+          <button className={status.enabled ? '' : 'primary'} onClick={() => set({ enabled: !status.enabled })}>
+            {status.enabled ? 'Pause' : 'Start'}
+          </button>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            New discoveries
+            <select value={String(status.autoList)} onChange={(e) => set({ autoList: e.target.value === 'true' })}>
+              <option value="true">List them right away</option>
+              <option value="false">Wait for my review (Catalog → pending)</option>
+            </select>
+          </label>
+          <label className="field">
+            Age rating when the platform says nothing
+            <select value={config.crawler.defaultRating} onChange={(e) => set({ defaultRating: e.target.value })}>
+              {RATINGS.map((rating) => (
+                <option key={rating} value={rating}>
+                  {RATING_LABELS[rating]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            When clients search
+            <select value={String(status.searchPlatforms)} onChange={(e) => set({ searchPlatforms: e.target.value === 'true' })}>
+              <option value="true">Also search the platforms</option>
+              <option value="false">Only search what is listed here</option>
+            </select>
+          </label>
+        </div>
+        <div className="small muted">
+          Queues: {status.queues.frontier} pages to visit · {status.queues.identify} platform links to identify · {status.queues.seen} URLs seen
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Found</th>
+              <th>New</th>
+              <th>Robots / errors</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {status.adapters.map((adapter) => (
+              <tr key={adapter.id}>
+                <td>
+                  <label className="row" style={{ gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={adapter.enabled}
+                      disabled={adapter.id === 'identify'}
+                      onChange={(e) => set({ adapters: { [adapter.id]: { enabled: e.target.checked } } })}
+                    />
+                    <strong>{adapter.label}</strong>
+                    {adapter.search && <span className="badge">search</span>}
+                  </label>
+                  <div className="tiny faint">{adapter.description}</div>
+                  {adapter.stats.lastError && <div className="tiny" style={{ color: 'var(--warn)' }}>{adapter.stats.lastError}</div>}
+                </td>
+                <td className="small">{adapter.stats.found}</td>
+                <td className="small">{adapter.stats.added}</td>
+                <td className="small">
+                  {adapter.stats.blocked} / {adapter.stats.errors}
+                </td>
+                <td>
+                  <button
+                    className="small"
+                    disabled={busy !== null || !adapter.enabled || (adapter.id !== 'web' && adapter.targets === 0)}
+                    onClick={async () => {
+                      setBusy(adapter.id);
+                      try {
+                        const result = await admin<{ found: number; added: number; target?: string }>('/v1/admin/crawler/run', { body: { adapter: adapter.id } });
+                        show(`${adapter.label}: ${result.found} found, ${result.added} new${result.target ? ` (${result.target})` : ''}`);
+                      } catch (e) {
+                        show(message(e));
+                      } finally {
+                        setBusy(null);
+                        load();
+                      }
+                    }}
+                  >
+                    {busy === adapter.id ? 'Running…' : 'Run now'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card form-stack">
+        <h3>Seed sites</h3>
+        <p className="small muted">Pages the web crawler starts from: it lists the video and photo pages it finds and identifies links to platforms.</p>
+        {config.crawler.adapters.web.seeds.map((url) => (
+          <div key={url} className="row between small">
+            <code>{url}</code>
+            <button
+              className="small"
+              onClick={() => set({ adapters: { web: { seeds: config.crawler.adapters.web.seeds.filter((s) => s !== url) } } })}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <div className="row">
+          <input type="url" value={seed} onChange={(e) => setSeed(e.target.value)} placeholder="https://example.org/gallery" style={{ flex: 1 }} />
+          <button
+            disabled={!seed.trim()}
+            onClick={async () => {
+              try {
+                await admin('/v1/admin/crawler/seeds', { body: { url: seed.trim() } });
+                setSeed('');
+                load();
+              } catch (e) {
+                show(message(e));
+              }
+            }}
+          >
+            Add seed
+          </button>
+        </div>
+      </div>
+
+      <div className="card form-stack">
+        <h3>What to look for</h3>
+        <label className="field">
+          Discovery queries <span className="hint">Comma separated. Recent searches of your users are added automatically.</span>
+          <input
+            type="text"
+            key={config.crawler.queries.join(',')}
+            defaultValue={config.crawler.queries.join(', ')}
+            onBlur={(e) => set({ queries: splitList(e.target.value) })}
+          />
+        </label>
+        {status.recentSearches.length > 0 && (
+          <div className="small muted">
+            Recent searches: {status.recentSearches.map((search) => `${search.query} (${search.count})`).join(', ')}
+          </div>
+        )}
+      </div>
+
+      {status.hosts.length > 0 && (
+        <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Site</th>
+                <th>Requests</th>
+                <th>Kept out by robots.txt</th>
+                <th>Errors</th>
+              </tr>
+            </thead>
+            <tbody>
+              {status.hosts.map((host) => (
+                <tr key={host.host}>
+                  <td className="small">
+                    {host.host}
+                    {host.lastError && <div className="tiny faint">{host.lastError}</div>}
+                  </td>
+                  <td className="small">{host.requests}</td>
+                  <td className="small">{host.blocked}</td>
+                  <td className="small">{host.errors}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AlgorithmTabs({ tab }: { tab: string }) {
+  if (tab === 'crawler') return <Crawler />;
   if (tab === 'review') return <Review />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;

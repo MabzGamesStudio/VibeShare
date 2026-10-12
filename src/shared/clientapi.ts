@@ -2,7 +2,7 @@
 import type { NodeType } from './noderef.js';
 import type { ContentItem, CreatorInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
-import type { CreatorKind } from './taxonomy.js';
+import type { CreatorKind, Format, Rating } from './taxonomy.js';
 
 export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
 
@@ -43,7 +43,131 @@ export interface StorageServiceSettings {
   providers: string[];
 }
 
+/** How a page shows its content. */
+export const PAGE_LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'] as const;
+export type PageLayout = (typeof PAGE_LAYOUTS)[number];
+
+export const PAGE_LAYOUT_LABELS: Record<PageLayout, string> = {
+  grid: 'Grid of cards',
+  list: 'List',
+  shorts: 'Vertical swipe (one at a time, plays automatically)',
+  stream: 'Vertical feed (one column, endless)',
+  masonry: 'Masonry wall',
+};
+
+/** Where a page gets its content. */
+export const PAGE_SOURCES = ['feed', 'search', 'subscriptions'] as const;
+export type PageSource = (typeof PAGE_SOURCES)[number];
+
+/** Pieces of metadata a page can show for each item, in the order chosen. */
+export const METADATA_FIELDS = [
+  'title',
+  'creator',
+  'platform',
+  'likes',
+  'dislikes',
+  'views',
+  'published',
+  'duration',
+  'format',
+  'rating',
+  'tags',
+  'topics',
+  'via',
+  'description',
+] as const;
+export type MetadataField = (typeof METADATA_FIELDS)[number];
+
+export const METADATA_LABELS: Record<MetadataField, string> = {
+  title: 'Title',
+  creator: 'Creator name',
+  platform: 'Platform',
+  likes: 'Like count',
+  dislikes: 'Dislike count',
+  views: 'Views on the platform',
+  published: 'When it was published',
+  duration: 'Duration',
+  format: 'Format',
+  rating: 'Age rating',
+  tags: 'Tags',
+  topics: 'Topics',
+  via: 'Algorithm node',
+  description: 'Description',
+};
+
+export const PAGE_ICONS = [
+  'home',
+  'film',
+  'smartphone',
+  'image',
+  'music',
+  'podcast',
+  'gamepad',
+  'book',
+  'newspaper',
+  'flask',
+  'graduation',
+  'heart',
+  'star',
+  'flame',
+  'compass',
+  'search',
+  'users',
+  'sparkles',
+  'tv',
+  'radio',
+] as const;
+export type PageIcon = (typeof PAGE_ICONS)[number];
+
+export type PagePreset = 'home' | 'videos' | 'shorts' | 'images';
+
+export interface PageFilters {
+  /** Only these formats (empty = all). */
+  formats: Format[];
+  /** Highest age rating on this page; never above the rating limit in the preferences. */
+  maxRating?: Rating;
+  /** Topics to favour, or (with onlyTopics) to require. */
+  topics: string[];
+  onlyTopics: boolean;
+  creatorKinds: CreatorKind[];
+  /** Search pages: how results are ordered. */
+  sort?: 'relevance' | 'new' | 'top';
+}
+
+/** A page of the client: a preset (home, videos, shorts, images) or one the user made. */
+export interface PageConfig {
+  id: string;
+  title: string;
+  icon: PageIcon;
+  /** Set on the built-in pages (they can be changed and reset, but not deleted). */
+  preset?: PagePreset;
+  layout: PageLayout;
+  source: PageSource;
+  /** For search pages: the query (#tags, @creators, words). */
+  query?: string;
+  filters: PageFilters;
+  /** Show the image preview (thumbnail) of each item. */
+  thumbnail: boolean;
+  /** Metadata shown with each item, in order. */
+  fields: MetadataField[];
+  options: {
+    /** Play videos as they come into view (vertical swipe). */
+    autoplay: boolean;
+    /** Start muted (browsers only autoplay muted media). */
+    muted: boolean;
+    /** Columns of grid and masonry layouts (0 = as many as fit). */
+    columns: number;
+    size: 'small' | 'medium' | 'large';
+  };
+  /** Show the page in the left panel. */
+  sidebar: boolean;
+}
+
 export interface Settings {
+  /** The pages of the client, in the order of the left panel. "home" is the start page. */
+  pages: PageConfig[];
+  /** Where shared links point: a hosted copy of the web client. */
+  shareBaseUrl: string;
   preferences: Preferences;
   /** blend: mix every enabled algorithm node by priority; primary: only the first that answers. */
   feedMode: 'blend' | 'primary';

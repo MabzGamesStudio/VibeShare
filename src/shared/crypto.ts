@@ -12,6 +12,9 @@ import {
 } from 'node:crypto';
 import { base32Decode, base32Encode, base64url, fromBase64url } from './encoding.js';
 
+// The Node implementation. Browser builds swap in src/web/crypto.ts, which has the same
+// exports (keep the two in step).
+
 // DER prefixes that wrap a raw 32-byte Ed25519 seed / public key.
 const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -90,6 +93,10 @@ export function hmacHex(secret: string | Buffer, data: string | Uint8Array): str
 
 export function randomToken(bytes = 24): string {
   return base64url(randomBytes(bytes));
+}
+
+export function randomHex(bytes = 12): string {
+  return randomBytes(bytes).toString('hex');
 }
 
 export function randomId(prefix = '', bytes = 9): string {

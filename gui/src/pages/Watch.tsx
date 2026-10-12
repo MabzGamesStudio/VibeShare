@@ -12,8 +12,9 @@ import {
   ThumbsUp,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { ContentView, NodeEntry } from '../../../src/shared/clientapi';
+import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
 import {
   CREATOR_KIND_LABELS,
@@ -26,7 +27,9 @@ import {
 } from '../../../src/shared/taxonomy';
 import { api, errorMessage } from '../api';
 import { FormatIcon } from '../components/ContentCard';
+import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
+import { ShareButton } from '../components/Share';
 import { Avatar, CopyButton, Loading, Modal, Spinner } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, timeAgo } from '../util';
@@ -39,9 +42,11 @@ const KIND_LABELS: Record<SuggestionKind, string> = {
   report: 'Report a problem',
 };
 
-function TextViewer({ url, markdown }: { url: string; markdown: boolean }) {
+function TextViewer({ url: src, markdown }: { url: string; markdown: boolean }) {
   const [text, setText] = useState<string | null>(null);
+  const url = useMediaSrc(src);
   useEffect(() => {
+    if (!url) return;
     fetch(url)
       .then((response) => response.text())
       .then(setText)
@@ -67,7 +72,8 @@ function NativePlayer({
   mediaRef: React.RefObject<HTMLMediaElement | null>;
 }) {
   const mime = view.manifest!.mime;
-  const src = view.streamUrl!;
+  const src = useMediaSrc(view.streamUrl!);
+  const download = useMediaSrc(view.downloadUrl);
   if (mime.startsWith('video/')) {
     return (
       <div className="player">
@@ -93,7 +99,7 @@ function NativePlayer({
       </div>
     );
   }
-  if (mime.startsWith('text/') || mime === 'application/json') return <TextViewer url={src} markdown={mime === 'text/markdown'} />;
+  if (mime.startsWith('text/') || mime === 'application/json') return <TextViewer url={view.streamUrl!} markdown={mime === 'text/markdown'} />;
   if (mime === 'application/pdf') {
     return (
       <div className="player" style={{ aspectRatio: '4 / 5' }}>
@@ -109,11 +115,20 @@ function NativePlayer({
         <p className="muted" style={{ marginBottom: 16 }}>
           {mime} · {formatBytes(view.manifest!.size)}
         </p>
-        <a className="button primary" href={view.downloadUrl}>
+        <a className="button primary" href={download} download={view.manifest!.name}>
           <Download size={16} /> Download
         </a>
       </div>
     </div>
+  );
+}
+
+function DownloadButton({ url, name }: { url: string; name?: string }) {
+  const href = useMediaSrc(url);
+  return (
+    <a className="button" href={href} download={name}>
+      <Download size={16} /> Download
+    </a>
   );
 }
 
@@ -178,7 +193,15 @@ function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: n
 }
 
 function Unavailable({ view, onAdded }: { view: ContentView; onAdded: () => void }) {
-  const { toast, refresh } = useApp();
+  const { toast, refresh, providers } = useApp();
+  // A shared link can name the provider that hosts the content (?p=<reference>).
+  const [params] = useSearchParams();
+  const hint = params.get('p');
+  const hinted = hint ? parseNodeRef(hint) : null;
+  const suggested = [...view.suggestedProviders];
+  if (hint && hinted?.type === 'provider' && !providers.some((node) => node.id === hinted.id || node.url === hinted.url) && !suggested.includes(hint)) {
+    suggested.unshift(hint);
+  }
   const add = async (ref: string) => {
     try {
       const result = await api<{ added: NodeEntry[]; errors: { error: string }[] }>('/api/nodes', { body: { text: ref } });
@@ -203,10 +226,10 @@ function Unavailable({ view, onAdded }: { view: ContentView; onAdded: () => void
             </div>
           ))}
         </div>
-        {view.suggestedProviders.length > 0 && (
+        {suggested.length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <p className="small">The algorithm node says these providers host it:</p>
-            {view.suggestedProviders.map((ref) => (
+            <p className="small">These providers host it:</p>
+            {suggested.map((ref) => (
               <div key={ref} className="row" style={{ marginTop: 8, justifyContent: 'center' }}>
                 <code className="tiny">{ref.length > 48 ? ref.slice(0, 48) + '…' : ref}</code>
                 <button className="small" onClick={() => add(ref)}>
@@ -524,11 +547,8 @@ export function WatchPage() {
                 <Flag size={16} /> Suggest
               </button>
             )}
-            {view.downloadUrl && (
-              <a className="button" href={view.downloadUrl}>
-                <Download size={16} /> Download
-              </a>
-            )}
+            {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
+            <ShareButton target={{ id: view.id, title }} className="" label="Share" />
             <CopyButton text={view.id} label="Copy id" small={false} />
           </div>
 

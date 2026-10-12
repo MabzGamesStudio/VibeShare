@@ -2,12 +2,13 @@ import { mkdirSync, readdirSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isChunkId } from '../shared/sources.js';
+import type { ChunkStore } from './model.js';
 
 /**
  * Chunks already downloaded, kept on disk (or in memory) up to a size limit and
  * evicted least-recently-used first. Rewatching or seeking costs no credits.
  */
-export class ChunkCache {
+export class ChunkCache implements ChunkStore {
   private entries = new Map<string, number>();
   private memory = new Map<string, Buffer>();
   private used = 0;

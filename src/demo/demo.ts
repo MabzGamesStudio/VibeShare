@@ -6,7 +6,8 @@ import { buildManifestFromBuffer, contentIdOf, signManifest, type ManifestMeta }
 import { identityFromSeed, sha256 } from '../shared/crypto.js';
 import { base32Encode } from '../shared/encoding.js';
 import type { CreatorKind } from '../shared/taxonomy.js';
-import { artwork, dataUrl, melody, svgArt } from './media.js';
+import { clip } from './clips.js';
+import { artwork, dataUrl, melody, plasma, svgArt } from './media.js';
 
 const WELCOME = `# Welcome to VibeShare
 
@@ -41,6 +42,8 @@ interface DemoItem {
   topics: string[];
   tags: string[];
   art: number;
+  /** A thumbnail (PNG) other than the artwork for `art`. */
+  thumb?: () => Buffer;
   description: string;
 }
 
@@ -117,6 +120,84 @@ const ITEMS: DemoItem[] = [
   },
 ];
 
+// Short vertical videos and a landscape video for the Shorts and Videos pages.
+const CLIPS: DemoItem[] = [
+  {
+    title: 'Neon Plasma',
+    name: 'neon-plasma.webm',
+    mime: 'video/webm',
+    data: () => clip('neon'),
+    meta: { format: 'short-video', rating: 'all', durationSeconds: 6 },
+    creator: CREATORS.studio,
+    topics: ['art'],
+    tags: ['loop', 'abstract'],
+    art: 0,
+    thumb: () => plasma('neon', 180, 320),
+    description: 'Six seconds of shifting neon colour. Swipe up for the next short.',
+  },
+  {
+    title: 'Ocean Swell',
+    name: 'ocean-swell.webm',
+    mime: 'video/webm',
+    data: () => clip('ocean'),
+    meta: { format: 'short-video', rating: 'all', durationSeconds: 6 },
+    creator: CREATORS.ada,
+    topics: ['nature', 'art'],
+    tags: ['waves', 'calm', 'loop'],
+    art: 0,
+    thumb: () => plasma('ocean', 180, 320),
+    description: 'Waves of blue and green rolling down the screen, with a soft chord.',
+  },
+  {
+    title: 'Ember Rings',
+    name: 'ember-rings.webm',
+    mime: 'video/webm',
+    data: () => clip('ember'),
+    meta: { format: 'short-video', rating: 'all', durationSeconds: 6 },
+    creator: CREATORS.studio,
+    topics: ['art'],
+    tags: ['rings', 'warm', 'loop'],
+    art: 0,
+    thumb: () => plasma('ember', 180, 320),
+    description: 'Warm rings pulsing out from the centre.',
+  },
+  {
+    title: 'Aurora Sweep',
+    name: 'aurora-sweep.webm',
+    mime: 'video/webm',
+    data: () => clip('aurora'),
+    meta: { format: 'video', rating: 'all', durationSeconds: 6 },
+    creator: CREATORS.studio,
+    topics: ['art', 'nature'],
+    tags: ['aurora', 'loop'],
+    art: 0,
+    thumb: () => plasma('aurora', 400, 225),
+    description: 'Curtains of green and violet light, streamed from the demo provider in one chunk.',
+  },
+];
+
+// Images of different shapes for the Images page.
+const IMAGES: DemoItem[] = [
+  ['Violet Hour', 101, 900, 1600, 265, CREATORS.studio],
+  ['Coral Reef', 202, 1200, 1200, 8, CREATORS.ada],
+  ['Night Garden', 303, 1080, 1350, 150, CREATORS.studio],
+  ['Glass Dunes', 404, 1600, 900, 32, CREATORS.ada],
+  ['Polar Light', 505, 1080, 1620, 190, CREATORS.studio],
+  ['Citrus Sky', 606, 1200, 1200, 48, CREATORS.ada],
+].map(([title, seed, width, height, hue, creator]) => ({
+  title: title as string,
+  name: `${String(title).toLowerCase().replace(/ /g, '-')}.svg`,
+  mime: 'image/svg+xml',
+  data: () => svgArt(seed as number, width as number, height as number, hue as number),
+  meta: { format: 'image', rating: 'all' },
+  creator: creator as DemoItem['creator'],
+  topics: ['art'],
+  tags: ['generative', (width as number) < (height as number) ? 'portrait' : (width as number) > (height as number) ? 'landscape' : 'square'],
+  art: seed as number,
+  thumb: () => artwork(seed as number, Math.round((240 * (width as number)) / Math.max(width as number, height as number)), Math.round((240 * (height as number)) / Math.max(width as number, height as number))),
+  description: 'Generative artwork: blurred light over a gradient.',
+}));
+
 const EXTERNAL = [
   {
     id: 'yt:aqz-KE-bpKQ~ia:BigBuckBunny_124',
@@ -179,9 +260,11 @@ export async function startDemo(options: DemoOptions) {
   await provider.start();
   await algorithm.start();
 
-  const seeded = provider.store.stats().contents > 0;
-  if (!seeded) {
-    for (const [index, item] of ITEMS.entries()) {
+  // Seeds what is missing, so demo networks made by older versions get the newer samples too.
+  const titles = new Set(algorithm.registry.all().map((entry) => entry.title));
+  const missing = [...ITEMS, ...CLIPS, ...IMAGES].filter((item) => !titles.has(item.title));
+  if (missing.length) {
+    for (const [index, item] of missing.entries()) {
       const creator = demoIdentity(item.creator.seed);
       let manifest = await buildManifestFromBuffer(
         item.data(),
@@ -206,7 +289,7 @@ export async function startDemo(options: DemoOptions) {
         providers: [provider.reference()],
         publishedAt: new Date(Date.now() - (index + 1) * 5 * 3600_000).toISOString(),
       });
-      algorithm.registry.setThumbnail(cid, dataUrl(artwork(item.art, 400, 225)));
+      algorithm.registry.setThumbnail(cid, dataUrl(item.thumb ? item.thumb() : artwork(item.art, 400, 225)));
       if (item.name === 'ambient-drift.wav') {
         provider.service.createJob({
           cid,
@@ -218,6 +301,8 @@ export async function startDemo(options: DemoOptions) {
         });
       }
     }
+  }
+  if (!titles.has(EXTERNAL[0].title)) {
     for (const item of EXTERNAL) {
       algorithm.registry.upsertCreator(item.creator);
       algorithm.registry.upsert({
@@ -236,9 +321,9 @@ export async function startDemo(options: DemoOptions) {
       algorithm.registry.setThumbnail(item.id, dataUrl(artwork(item.art, 400, 225)));
     }
     algorithm.registry.upsert({ id: 'x:1234567890', status: 'blocked', title: 'Free crypto giveaway', reason: 'Scam' });
-    provider.flush();
-    algorithm.flush();
   }
+  provider.flush();
+  algorithm.flush();
 
   const client = new ClientNode({ dataDir: join(dataDir, 'client'), port: basePort, guiDir });
   await client.start();
