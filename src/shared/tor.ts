@@ -271,9 +271,13 @@ export function torFetch(options: TorFetchOptions): typeof fetch {
       if (hops >= 20) throw new TypeError('Too many redirects');
       const next = new URL(location, url);
       const asGet = status === 303 || ((status === 301 || status === 302) && request.method === 'POST');
+      const nextHeaders = new Headers(request.headers);
+      // Like fetch: credentials never follow a redirect to another site.
+      if (next.origin !== url.origin) for (const name of ['authorization', 'cookie', 'proxy-authorization']) nextHeaders.delete(name);
+      if (asGet) for (const name of ['content-type', 'content-length']) nextHeaders.delete(name);
       const nextRequest = new Request(next, {
         method: asGet ? 'GET' : request.method,
-        headers: request.headers,
+        headers: nextHeaders,
         redirect: request.redirect,
         signal: request.signal,
       });

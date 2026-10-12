@@ -17,12 +17,14 @@ describe('fetch through Tor', () => {
       req.on('data', (data) => (body += data));
       req.on('end', () => {
         if (req.url === '/moved') return void res.writeHead(302, { location: '/here' }).end();
+        if (req.url === '/away') return void res.writeHead(307, { location: 'http://otherexample.onion/landing' }).end();
         res.writeHead(200, { 'content-type': 'application/json', 'x-vs-balance': '7' });
-        res.end(JSON.stringify({ method: req.method, url: req.url, host: req.headers.host, body }));
+        res.end(JSON.stringify({ method: req.method, url: req.url, host: req.headers.host, body, authorization: req.headers.authorization }));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     tor.onions.set('exampleexample.onion', (server.address() as AddressInfo).port);
+    tor.onions.set('otherexample.onion', (server.address() as AddressInfo).port);
   });
   after(async () => {
     server.close();
@@ -33,13 +35,17 @@ describe('fetch through Tor', () => {
     const send = torFetch({ proxy: { host: '127.0.0.1', port: tor.socksPort } });
     const got = await send('http://exampleexample.onion/hello?x=1');
     assert.deepEqual(await got.json(), { method: 'GET', url: '/hello?x=1', host: 'exampleexample.onion', body: '' });
+    const away = (await (await send('http://exampleexample.onion/away', { headers: { authorization: 'Bearer secret' } })).json()) as Record<string, string>;
+    assert.deepEqual([away.host, away.url, away.authorization], ['otherexample.onion', '/landing', undefined], 'no token for another site');
+    const same = (await (await send('http://exampleexample.onion/moved', { headers: { authorization: 'Bearer secret' } })).json()) as Record<string, string>;
+    assert.equal(same.authorization, 'Bearer secret');
     const posted = await send('http://exampleexample.onion/post', { method: 'POST', body: '{"a":1}', headers: { 'content-type': 'application/json' } });
     assert.equal(posted.headers.get('x-vs-balance'), '7');
     assert.equal(((await posted.json()) as { body: string }).body, '{"a":1}');
     assert.equal(((await (await send('http://exampleexample.onion/moved')).json()) as { url: string }).url, '/here');
     const manual = await send('http://exampleexample.onion/moved', { redirect: 'manual' });
     assert.deepEqual([manual.status, manual.headers.get('location')], [302, '/here']);
-    assert.ok(tor.requests.every((request) => request.host === 'exampleexample.onion' && request.username === 'vibeshare:exampleexample.onion'));
+    assert.ok(tor.requests.every((request) => request.username === `vibeshare:${request.host}`));
   });
 
   it('explains what went wrong', async () => {
