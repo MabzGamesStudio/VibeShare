@@ -105,6 +105,9 @@ export interface ProviderRewards {
   /** Credits for reporting a content id the node did not have. */
   report: number;
   reportDailyCap: number;
+  /** Credits for a suggestion of missing data (sources, duplicates) the node did not have. */
+  suggestion: number;
+  suggestionDailyCap: number;
 }
 
 export interface AlgorithmInfo extends NodeInfoBase {
@@ -349,7 +352,7 @@ export interface Page<T> {
   total?: number;
 }
 
-export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'creator', 'published', 'report'] as const;
+export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate'] as const;
 export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
 
 export interface SuggestionRequest {
@@ -358,6 +361,8 @@ export interface SuggestionRequest {
   value: string;
   reason: string;
   timestamp?: number;
+  /** For kind `source`: the platform the suggested link points at (youtube, twitch…). */
+  platform?: string;
 }
 
 /**
@@ -374,6 +379,84 @@ export interface ReportResponse {
   /** True when the node already had the content. */
   known: boolean;
   /** Credits earned for the report (0 when the node already had it). */
+  credited: number;
+}
+
+/**
+ * Popularity numbers a client saw for content on its platform (views, likes, comments,
+ * subscribers…), posted to an algorithm node. The node pays only for numbers it did not
+ * have yet, multiplied by the source's credit multipliers and the recency factor.
+ */
+export interface ClaimRequest {
+  /** A content id (with sources) or a link to the content. */
+  id: string;
+  /** The platform the numbers come from (youtube, reddit…); defaults to the id's source. */
+  source?: string;
+  /** The numbers the client saw, by metric key (views, likes, comments, upvotes…). */
+  metrics: Record<string, number>;
+  /** When the content was posted on its platform, for the recency factor. */
+  publishedAt?: string;
+}
+
+export interface ClaimResponse {
+  /** True when the node already knew the content. */
+  known: boolean;
+  /** True when at least one number was new to the node (the only case that pays). */
+  newInfo: boolean;
+  /** Credits earned (0 when nothing was new). */
+  credited: number;
+  /** The multiplier the source's rules produced (1 or more). */
+  multiplier: number;
+  /** The metric keys the node kept as new. */
+  updated: string[];
+}
+
+/** One platform link a client suggests adding to a piece of content. */
+export interface SourceSuggestion {
+  /** Platform key (youtube, twitch, reddit…). */
+  platform: string;
+  /** The link to the content there. */
+  url: string;
+}
+
+export const PROVIDER_SUGGESTION_KINDS = ['source', 'duplicate', 'missing'] as const;
+export type ProviderSuggestionKind = (typeof PROVIDER_SUGGESTION_KINDS)[number];
+
+/**
+ * What a client suggests a content provider node is missing: links to the content on
+ * other platforms, another content id the content is a duplicate of (helps the node
+ * compress or dedupe its store), or a note that the content data itself is missing
+ * (the client can upload it right after).
+ */
+export interface ProviderSuggestionRequest {
+  /** The content id (or link) the suggestion is about. */
+  id: string;
+  kind: ProviderSuggestionKind;
+  /** For kind `source`: the missing platform links (a cid can have several sources). */
+  sources?: SourceSuggestion[];
+  /** For kind `duplicate`: the id of the content this one duplicates. */
+  duplicateOf?: string;
+  /** Free text for the operator. */
+  note?: string;
+}
+
+export interface ProviderSuggestion {
+  id: string;
+  contentId: string;
+  kind: ProviderSuggestionKind;
+  sources?: SourceSuggestion[];
+  duplicateOf?: string;
+  note?: string;
+  accountId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: string;
+  reviewedAt?: string;
+}
+
+export interface ProviderSuggestionResponse {
+  suggestion: ProviderSuggestion;
+  /** True when the node did not already have this suggestion (the only case that pays). */
+  newInfo: boolean;
   credited: number;
 }
 

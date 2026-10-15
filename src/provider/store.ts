@@ -27,6 +27,10 @@ export interface ContentRecord {
   downloads: number;
   bytesServed: number;
   creditsEarned: number;
+  /** Extra platform links clients suggested (`yt:…`, `url:…`); one cid can carry several. */
+  sources?: string[];
+  /** Content ids clients reported as duplicates of this one (helps dedupe/compression). */
+  duplicates?: string[];
 }
 
 interface IndexData {
@@ -281,6 +285,20 @@ export class ContentStore {
     record.creditsEarned += credits;
     if (firstChunk) record.downloads++;
     this.index.changed();
+  }
+
+  /** Merges suggested sources and duplicate ids into a content record. */
+  annotate(cid: string, patch: { sources?: string[]; duplicates?: string[] }): ContentRecord | undefined {
+    const record = this.index.data.contents[cid];
+    if (!record) return undefined;
+    if (patch.sources?.length) {
+      record.sources = [...new Set([...(record.sources ?? []), ...patch.sources])].slice(0, 16);
+    }
+    if (patch.duplicates?.length) {
+      record.duplicates = [...new Set([...(record.duplicates ?? []), ...patch.duplicates])].slice(0, 64);
+    }
+    this.index.changed();
+    return record;
   }
 
   async deleteContent(cid: string): Promise<boolean> {

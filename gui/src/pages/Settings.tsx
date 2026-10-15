@@ -1,7 +1,7 @@
-import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Pencil, Plus, RotateCcw, Share2, Shield, ShieldAlert, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Lock, Pencil, Plus, RotateCcw, Share2, Shield, ShieldAlert, Trash2, UserRound } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type Settings, type TorSettings } from '../../../src/shared/clientapi';
+import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type ProfileSummary, type Settings, type TorSettings } from '../../../src/shared/clientapi';
 import { DEFAULT_SHARE_BASE_URL, newPageId, presetPage, shareLink } from '../../../src/shared/clientdefaults';
 import { LANGUAGES } from '../../../src/shared/language';
 import {
@@ -375,6 +375,273 @@ function IdentityCard() {
   );
 }
 
+/**
+ * Profiles: several people (or personas) sharing this client. Each profile keeps its
+ * own nodes, settings, history and client id. A profile is public (anyone using the
+ * client can switch to it) or locked with a username and a password.
+ */
+function ProfilesCard() {
+  const { state, refresh, toast } = useApp();
+  const profiles = state?.profiles ?? [];
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [unlocking, setUnlocking] = useState<ProfileSummary | null>(null);
+  const [unlockUser, setUnlockUser] = useState('');
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [protecting, setProtecting] = useState<ProfileSummary | null>(null);
+  const [protectUser, setProtectUser] = useState('');
+  const [protectPassword, setProtectPassword] = useState('');
+
+  const create = async () => {
+    try {
+      await api('/api/profiles', { body: { name, username: username || undefined, password: password || undefined } });
+      setCreating(false);
+      setName('');
+      setUsername('');
+      setPassword('');
+      toast('Profile created', 'success');
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
+
+  const switchTo = async (profile: ProfileSummary, creds?: { username: string; password: string }) => {
+    try {
+      await api(`/api/profiles/${encodeURIComponent(profile.id)}/switch`, { body: creds ?? {} });
+      toast(`Switched to ${profile.name}`, 'success');
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
+
+  const protect = async () => {
+    if (!protecting) return;
+    try {
+      await api(`/api/profiles/${encodeURIComponent(protecting.id)}`, {
+        method: 'PATCH',
+        body: protectPassword ? { username: protectUser || protecting.username, password: protectPassword } : { makePublic: true },
+      });
+      setProtecting(null);
+      setProtectUser('');
+      setProtectPassword('');
+      toast('Profile updated', 'success');
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
+
+  return (
+    <div className="card form-stack" id="profiles">
+      <div className="row between">
+        <div className="row">
+          <UserRound size={20} />
+          <h2>Profiles</h2>
+        </div>
+        <button className="primary small" onClick={() => setCreating(true)}>
+          <Plus size={15} /> New profile
+        </button>
+      </div>
+      <p className="small muted">
+        Each profile has its own nodes, settings, history and client id — like a separate account on this device. Public profiles open for
+        anyone; protected ones need their username and password to switch to.
+      </p>
+      <div className="page-list">
+        {profiles.map((profile) => (
+          <div key={profile.id} className="page-row">
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <strong>
+                {profile.name} {profile.active && <span className="badge accent">active</span>}
+              </strong>
+              <div className="tiny faint">
+                {profile.access === 'protected' ? (
+                  <>
+                    <Lock size={11} /> {profile.username} · password protected
+                  </>
+                ) : (
+                  'Public'
+                )}
+              </div>
+            </div>
+            <div className="row" style={{ gap: 4 }}>
+              {!profile.active && (
+                <button
+                  className="small"
+                  onClick={() => {
+                    if (profile.access === 'protected') {
+                      setUnlocking(profile);
+                      setUnlockUser(profile.username ?? '');
+                      setUnlockPassword('');
+                    } else void switchTo(profile);
+                  }}
+                >
+                  Switch
+                </button>
+              )}
+              <button
+                className="small"
+                title="Rename"
+                onClick={async () => {
+                  const next = window.prompt('Profile name', profile.name);
+                  if (next === null || !next.trim()) return;
+                  try {
+                    await api(`/api/profiles/${encodeURIComponent(profile.id)}`, { method: 'PATCH', body: { name: next.trim() } });
+                    await refresh();
+                  } catch (error) {
+                    toast(errorMessage(error), 'error');
+                  }
+                }}
+              >
+                <Pencil size={14} />
+              </button>
+              <button
+                className="small"
+                title={profile.access === 'protected' ? 'Change password or make public' : 'Protect with a username and password'}
+                onClick={() => {
+                  setProtecting(profile);
+                  setProtectUser(profile.username ?? '');
+                  setProtectPassword('');
+                }}
+              >
+                <Lock size={14} />
+              </button>
+              {!profile.active && (
+                <button
+                  className="small danger"
+                  title="Delete"
+                  onClick={async () => {
+                    if (!window.confirm(`Delete the profile “${profile.name}” and all of its data?`)) return;
+                    try {
+                      await api(`/api/profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
+                      await refresh();
+                    } catch (error) {
+                      toast(errorMessage(error), 'error');
+                    }
+                  }}
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {creating && (
+        <Modal
+          title="New profile"
+          onClose={() => setCreating(false)}
+          actions={
+            <>
+              <button onClick={() => setCreating(false)}>Cancel</button>
+              <button className="primary" disabled={!name.trim()} onClick={create}>
+                Create
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            <label className="field">
+              Name
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Work, Family, Anonymous…" autoFocus />
+            </label>
+            <p className="small muted">
+              Leave the username and password empty for a public profile. A protected profile only opens with its username and password.
+            </p>
+            <div className="form-grid">
+              <label className="field">
+                Username (for a protected profile)
+                <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" />
+              </label>
+              <label className="field">
+                Password
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
+              </label>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {unlocking && (
+        <Modal
+          title={`Switch to ${unlocking.name}`}
+          onClose={() => setUnlocking(null)}
+          actions={
+            <>
+              <button onClick={() => setUnlocking(null)}>Cancel</button>
+              <button
+                className="primary"
+                onClick={async () => {
+                  await switchTo(unlocking, { username: unlockUser, password: unlockPassword });
+                  setUnlocking(null);
+                }}
+              >
+                Unlock
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            <label className="field">
+              Username
+              <input type="text" value={unlockUser} onChange={(e) => setUnlockUser(e.target.value)} autoFocus />
+            </label>
+            <label className="field">
+              Password
+              <input type="password" value={unlockPassword} onChange={(e) => setUnlockPassword(e.target.value)} autoComplete="current-password" />
+            </label>
+          </div>
+        </Modal>
+      )}
+      {protecting && (
+        <Modal
+          title={`Protection of ${protecting.name}`}
+          onClose={() => setProtecting(null)}
+          actions={
+            <>
+              <button onClick={() => setProtecting(null)}>Cancel</button>
+              <button className="primary" onClick={protect}>
+                {protectPassword ? 'Protect' : 'Make public'}
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            {protecting.access === 'protected' && (
+              <button
+                onClick={async () => {
+                  try {
+                    await api(`/api/profiles/${encodeURIComponent(protecting.id)}`, { method: 'PATCH', body: { makePublic: true } });
+                    setProtecting(null);
+                    await refresh();
+                  } catch (error) {
+                    toast(errorMessage(error), 'error');
+                  }
+                }}
+              >
+                Remove the password (make it public)
+              </button>
+            )}
+            <p className="small muted">Or set a username and password: the profile then only opens with them.</p>
+            <div className="form-grid">
+              <label className="field">
+                Username
+                <input type="text" value={protectUser} onChange={(e) => setProtectUser(e.target.value)} autoComplete="off" />
+              </label>
+              <label className="field">
+                New password
+                <input type="password" value={protectPassword} onChange={(e) => setProtectPassword(e.target.value)} autoComplete="new-password" />
+              </label>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { state, updateSettings } = useApp();
   const location = useLocation();
@@ -476,6 +743,8 @@ export function SettingsPage() {
       </div>
 
       <TorCard />
+
+      <ProfilesCard />
 
       <div className="card form-stack">
         <h2>Creator profile</h2>

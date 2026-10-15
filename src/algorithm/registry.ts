@@ -63,7 +63,8 @@ export interface Entry {
   /** Remote thumbnail of discovered content. */
   thumbnailUrl?: string;
   media?: ContentMedia;
-  platformStats?: { views?: number; likes?: number };
+  /** Platform popularity numbers the node kept (views, likes, comments… from claims). */
+  platformStats?: Record<string, number>;
 }
 
 export interface CreatorRecord extends CreatorInfo {
@@ -435,7 +436,7 @@ export class Registry {
         existing.thumbnailUrl = item.thumbnailUrl ?? existing.thumbnailUrl;
         existing.media = item.media ?? existing.media;
         existing.pageUrl = item.pageUrl ?? existing.pageUrl;
-        if (item.stats) existing.platformStats = { ...existing.platformStats, ...item.stats };
+        if (item.stats) existing.platformStats = { ...existing.platformStats, ...(item.stats as Record<string, number>) };
         if (item.rating === 'nsfw') existing.rating = 'nsfw';
       } else {
         existing.thumbnailUrl ??= item.thumbnailUrl;
@@ -482,7 +483,7 @@ export class Registry {
       pageUrl: item.pageUrl,
       thumbnailUrl: item.thumbnailUrl,
       media: item.media,
-      platformStats: item.stats,
+      platformStats: item.stats as Record<string, number> | undefined,
     };
     this.changed();
     return 'added';

@@ -60,7 +60,7 @@ function describe(page: PageConfig, preferences: Preferences, nodes: number, fee
     .join(' · ');
 }
 
-export function PageView({ page }: { page: PageConfig }) {
+export function PageView({ page, embedded }: { page: PageConfig; embedded?: boolean }) {
   const { state, algorithms, providers } = useApp();
   const [format, setFormat] = useState<Format | null>(null);
   const [seed, setSeed] = useState(() => Math.random().toString(36).slice(2));
@@ -145,19 +145,21 @@ export function PageView({ page }: { page: PageConfig }) {
           paged={paged}
           empty={empty}
           header={
-            <>
-              <h1 className="row" style={{ gap: 8 }}>
-                <PageIconView icon={page.icon} size={20} /> {page.title}
-              </h1>
-              {page.source === 'feed' && (
-                <button className="ghost icon small" title="New mix" aria-label="New mix" onClick={() => setSeed(Math.random().toString(36).slice(2))}>
-                  <RefreshCw size={15} />
+            embedded ? null : (
+              <>
+                <h1 className="row" style={{ gap: 8 }}>
+                  <PageIconView icon={page.icon} size={20} /> {page.title}
+                </h1>
+                {page.source === 'feed' && (
+                  <button className="ghost icon small" title="New mix" aria-label="New mix" onClick={() => setSeed(Math.random().toString(36).slice(2))}>
+                    <RefreshCw size={15} />
+                  </button>
+                )}
+                <button className="small" onClick={() => setEditing(true)}>
+                  <Settings2 size={14} /> Customize
                 </button>
-              )}
-              <button className="small" onClick={() => setEditing(true)}>
-                <Settings2 size={14} /> Customize
-              </button>
-            </>
+              </>
+            )
           }
         />
         {editor}
@@ -174,14 +176,16 @@ export function PageView({ page }: { page: PageConfig }) {
           ipfsGateway={ipfsGateway}
           empty={paged.failure ? <div className="banner danger">{paged.failure}</div> : empty}
           header={
-            <>
-              <h1 className="row" style={{ gap: 8 }}>
-                <PageIconView icon={page.icon} size={20} /> {page.title}
-              </h1>
-              <button className="small" onClick={() => setEditing(true)}>
-                <Settings2 size={14} /> Customize
-              </button>
-            </>
+            embedded ? null : (
+              <>
+                <h1 className="row" style={{ gap: 8 }}>
+                  <PageIconView icon={page.icon} size={20} /> {page.title}
+                </h1>
+                <button className="small" onClick={() => setEditing(true)}>
+                  <Settings2 size={14} /> Customize
+                </button>
+              </>
+            )
           }
         />
         {editor}
@@ -193,20 +197,22 @@ export function PageView({ page }: { page: PageConfig }) {
 
   return (
     <div className={`page ${page.layout === 'stream' ? 'page-stream' : ''}`}>
-      <div className="page-header">
-        <div>
-          <h1 className="row" style={{ gap: 10 }}>
-            <PageIconView icon={page.icon} size={24} /> {page.title}
-          </h1>
-          <p>
-            {summary} · <Link to="/settings" className="link">preferences</Link> ·{' '}
-            <Link to="/nodes" className="link">
-              <Network size={13} /> nodes
-            </Link>
-          </p>
+      {!embedded && (
+        <div className="page-header">
+          <div>
+            <h1 className="row" style={{ gap: 10 }}>
+              <PageIconView icon={page.icon} size={24} /> {page.title}
+            </h1>
+            <p>
+              {summary} · <Link to="/settings" className="link">preferences</Link> ·{' '}
+              <Link to="/nodes" className="link">
+                <Network size={13} /> nodes
+              </Link>
+            </p>
+          </div>
+          {actions}
         </div>
-        {actions}
-      </div>
+      )}
       {page.id === 'home' && !providers.length && (
         <div className="banner info">
           <Sparkles size={18} />

@@ -15,6 +15,7 @@ import { Loading, Modal } from '../components/ui';
 import { formatDuration, splitList, timeAgo } from '../util';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
+import { Claims } from './ClaimsTab';
 import { ApiKeys, Sources } from './SourcesTabs';
 
 interface Submission {
@@ -206,7 +207,7 @@ interface Entry {
   id: string;
   sources: string[];
   status: 'listed' | 'blocked' | 'pending';
-  origin?: 'operator' | 'submission' | 'crawler';
+  origin?: 'operator' | 'submission' | 'crawler' | 'report';
   adapter?: string;
   pageUrl?: string;
   reason?: string;
@@ -221,6 +222,11 @@ interface Entry {
   likes: number;
   dislikes: number;
   updatedAt: string;
+  /** Preview image: a /v1/thumbnails/… path on this node, or a remote image. */
+  thumbnail?: string;
+  /** Platform numbers clients claimed (views, likes, comments…). */
+  platformStats?: Record<string, number>;
+  publishedAt?: string;
 }
 
 const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', rating: 'all', topics: [], tags: [], status: 'listed' });
@@ -240,7 +246,18 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
     try {
       await admin('/v1/admin/content', {
         method: 'PUT',
-        body: { ...draft, id: resolvedId, sources: undefined, likes: undefined, dislikes: undefined, updatedAt: undefined },
+        // The preview image and the claimed numbers are shown here but never edited
+        // back: the thumbnail field only accepts data: URLs, and numbers come from claims.
+        body: {
+          ...draft,
+          id: resolvedId,
+          sources: undefined,
+          likes: undefined,
+          dislikes: undefined,
+          updatedAt: undefined,
+          thumbnail: undefined,
+          platformStats: undefined,
+        },
       });
       onSaved();
     } catch (e) {
@@ -264,6 +281,7 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
           <input type="text" className="mono" value={idText} onChange={(e) => setIdText(e.target.value)} disabled={Boolean(entry.id)} placeholder="vs1… or https://youtube.com/watch?v=…" />
           {resolvedId && resolvedId !== idText.trim() && <span className="hint">Id: {resolvedId}</span>}
         </label>
+        {entry.thumbnail && <img src={entry.thumbnail} alt="Preview image" className="admin-thumb-large" />}
         <label className="field">
           Title
           <input type="text" value={draft.title ?? ''} onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
@@ -399,9 +417,29 @@ function Catalog() {
               {page.items.map((entry) => (
                 <tr key={entry.id}>
                   <td>
-                    <strong>{entry.title}</strong>
-                    <div className="mono tiny faint">{entry.id}</div>
-                    {entry.reason && <div className="tiny" style={{ color: 'var(--danger)' }}>{entry.reason}</div>}
+                    <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
+                      {entry.thumbnail ? (
+                        <img src={entry.thumbnail} alt="" className="admin-thumb" loading="lazy" />
+                      ) : (
+                        <div className="admin-thumb empty" title="No preview image" />
+                      )}
+                      <div>
+                        <strong>{entry.title}</strong>
+                        <div className="mono tiny faint">{entry.id}</div>
+                        {entry.platformStats && Object.keys(entry.platformStats).length > 0 && (
+                          <div className="tiny faint" title="Platform numbers clients reported">
+                            {Object.entries(entry.platformStats)
+                              .map(([key, value]) => `${key} ${value}`)
+                              .join(' · ')}
+                          </div>
+                        )}
+                        {entry.reason && (
+                          <div className="tiny" style={{ color: 'var(--danger)' }}>
+                            {entry.reason}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </td>
                   <td>
                     <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
@@ -853,6 +891,7 @@ export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'crawler') return <Crawler />;
   if (tab === 'apis') return <ApiKeys />;
   if (tab === 'sources') return <Sources />;
+  if (tab === 'claims') return <Claims />;
   if (tab === 'review') return <Review />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;

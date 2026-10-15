@@ -16,7 +16,20 @@ import {
 import { log } from '../shared/log.js';
 import { NodeClient } from '../shared/nodeclient.js';
 import { parseNodeRef } from '../shared/noderef.js';
-import type { ProviderInfo, ProviderPricing, ProviderRewards, ReportRequest, ReportResponse, StorageRewards } from '../shared/protocol.js';
+import type {
+  ProviderInfo,
+  ProviderPricing,
+  ProviderRewards,
+  ProviderSuggestion,
+  ProviderSuggestionKind,
+  ProviderSuggestionRequest,
+  ProviderSuggestionResponse,
+  ReportRequest,
+  ReportResponse,
+  SourceSuggestion,
+  StorageRewards,
+} from '../shared/protocol.js';
+import { randomId } from '../shared/crypto.js';
 import { baseId, isChunkId, isNativeId } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { RemoteError } from '../shared/http.js';
@@ -77,7 +90,7 @@ export function providerDefaults(): ProviderConfig {
       upload: { mode: 'open', perMiB: 0, maxBytes: 4 * 1024 * MiB },
       overrides: {},
     },
-    rewards: { report: 1, reportDailyCap: 100 },
+    rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -109,6 +122,15 @@ interface PendingUpload {
   createdAt: number;
 }
 
+/** A suggestion with the same content and the same value as an earlier one is not new. */
+function suggestionSignature(suggestion: { kind: string; sources?: SourceSuggestion[]; duplicateOf?: string; note?: string }): string {
+  const sources = (suggestion.sources ?? [])
+    .map((source) => `${source.platform}:${source.url}`)
+    .sort()
+    .join('\n');
+  return [suggestion.kind, sources, suggestion.duplicateOf ?? '', suggestion.note ?? ''].join('\n');
+}
+
 const UPLOAD_TTL_MS = 24 * 3600_000;
 
 export class ProviderNode extends BaseNode<ProviderConfig> {
@@ -117,6 +139,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private uploads: JsonFile<{ uploads: Record<string, PendingUpload> }>;
   /** Content ids clients reported; the node learns what is out there from them. */
   private reports: JsonFile<{ ids: Record<string, { at: string; account: string }> }>;
+  /** What clients suggest this node is missing (sources, duplicates, absent data). */
+  private suggestions: JsonFile<{ items: Record<string, ProviderSuggestion & { signature: string }> }>;
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
   private gcTimer: NodeJS.Timeout;
 
@@ -124,6 +148,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     super('provider', providerDefaults(), options);
     this.uploads = new JsonFile(this.path('uploads.json'), () => ({ uploads: {} }));
     this.reports = new JsonFile(this.path('reports.json'), () => ({ ids: {} }));
+    this.suggestions = new JsonFile(this.path('suggestions.json'), () => ({ items: {} }));
     this.service = new StorageService(
       this.path('storage-service.json'),
       this.ledger,
@@ -293,6 +318,69 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     return recovered;
   }
 
+  /**
+   * Records a client's suggestion of missing data about content. What the node already
+   * had pays nothing; a new suggestion earns `rewards.suggestion` (daily capped).
+   */
+  suggest(account: Account, body: ProviderSuggestionRequest): ProviderSuggestionResponse {
+    const kind = String(body.kind ?? '') as ProviderSuggestionKind;
+    if (!(['source', 'duplicate', 'missing'] as string[]).includes(kind)) throw badRequest('kind is source, duplicate or missing');
+    const contentId = String(body.id ?? '').trim();
+    if (!contentId || contentId.length > 4096) throw badRequest('id is required');
+    const note = String(body.note ?? '').trim().slice(0, 1000);
+    let sources: SourceSuggestion[] | undefined;
+    let duplicateOf: string | undefined;
+    if (kind === 'source') {
+      const list = Array.isArray(body.sources) ? body.sources.slice(0, 16) : [];
+      sources = list.map((source) => ({
+        platform: String(source?.platform ?? '').trim().toLowerCase().slice(0, 32) || 'web',
+        url: String(source?.url ?? '').trim().slice(0, 2048),
+      }));
+      if (!sources.length) throw badRequest('At least one source link is required');
+      for (const source of sources) {
+        let url: URL;
+        try {
+          url = new URL(source.url);
+        } catch {
+          throw badRequest(`Not a link: ${source.url.slice(0, 80)}`);
+        }
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') throw badRequest('Source links must be http(s) links');
+      }
+    } else if (kind === 'duplicate') {
+      duplicateOf = String(body.duplicateOf ?? '').trim();
+      if (!duplicateOf || duplicateOf.length > 4096) throw badRequest('duplicateOf (the other content id) is required');
+    }
+    const signature = suggestionSignature({ kind, sources, duplicateOf, note });
+    const known = Object.values(this.suggestions.data.items).find((s) => s.contentId === contentId && s.signature === signature);
+    if (known) {
+      const { signature: _signature, ...suggestion } = known;
+      return { suggestion, newInfo: false, credited: 0 };
+    }
+    const stored: ProviderSuggestion & { signature: string } = {
+      id: randomId('sug-', 8),
+      contentId,
+      kind,
+      sources,
+      duplicateOf,
+      note: note || undefined,
+      accountId: account.id,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      signature,
+    };
+    this.suggestions.data.items[stored.id] = stored;
+    this.suggestions.changed();
+    let credited = 0;
+    const rewards = this.config.rewards;
+    if (rewards.suggestion > 0 && this.ledger.daily(account, 'suggestions') < rewards.suggestionDailyCap) {
+      this.ledger.addDaily(account, 'suggestions', 1);
+      this.ledger.credit(account.id, rewards.suggestion, 'suggestion', contentId);
+      credited = rewards.suggestion;
+    }
+    const { signature: _signature, ...suggestion } = stored;
+    return { suggestion, newInfo: true, credited };
+  }
+
   protected registerRoutes(): void {
     const router = this.router;
 
@@ -343,6 +431,26 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         }
       }
       return { known, credited } satisfies ReportResponse;
+    });
+
+    // A client suggests what this node is missing about content: links to it on other
+    // platforms, another content id it duplicates (helps dedupe and compression), or
+    // that its data is absent altogether. New suggestions are rewarded; the operator
+    // reviews them in the dashboard.
+    router.post('/v1/suggestions', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<ProviderSuggestionRequest>(ctx.req);
+      return this.suggest(account, body);
+    });
+
+    router.get('/v1/suggestions/mine', (ctx) => {
+      const account = this.auth.require(ctx);
+      return {
+        suggestions: Object.values(this.suggestions.data.items)
+          .filter((s) => s.accountId === account.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 200),
+      };
     });
 
     router.get('/v1/quote/:cid', (ctx) => {
@@ -463,7 +571,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           createdAt: record.createdAt,
           meta: manifest?.meta,
           creator: manifest?.creator ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind } : undefined,
-          sources: manifest?.sources,
+          // One content id can carry several sources: the manifest's own plus any the
+          // operator accepted from client suggestions.
+          sources: (() => {
+            const merged = [...new Set([...(manifest?.sources ?? []), ...(record.sources ?? [])])].slice(0, 16);
+            return merged.length ? merged : undefined;
+          })(),
         };
       });
       return { items, next: items.length === limit ? offset + limit : undefined };
@@ -519,6 +632,74 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const offset = Math.max(0, Number(ctx.query.get('offset') ?? 0));
       const limit = Math.min(500, Math.max(1, Number(ctx.query.get('limit') ?? 100)));
       return { items: this.store.list(offset, limit), stats: this.store.stats() };
+    });
+    // Everything the node knows about one content, for the dashboard's details modal.
+    router.get('/v1/admin/content/:cid', (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = ctx.params.cid;
+      const record = this.store.getContent(cid);
+      if (!record) throw notFound('No such content');
+      const manifest = this.store.getManifest(cid);
+      return {
+        record,
+        manifest: manifest
+          ? {
+              name: manifest.name,
+              mime: manifest.mime,
+              size: manifest.size,
+              chunkSize: manifest.chunkSize,
+              createdAt: manifest.createdAt,
+              meta: manifest.meta,
+              sources: manifest.sources,
+              creator: manifest.creator
+                ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind }
+                : undefined,
+            }
+          : undefined,
+        chunks: manifest?.chunks.map((chunk) => {
+          const stored = this.store.chunkRecord(chunk.id);
+          return { id: chunk.id, size: chunk.size, backends: stored ? Object.keys(stored.locations) : [] };
+        }),
+        suggestions: Object.values(this.suggestions.data.items)
+          .filter((s) => s.contentId === cid)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .map(({ signature: _signature, ...suggestion }) => suggestion),
+      };
+    });
+    // What clients suggested this node is missing, newest first.
+    router.get('/v1/admin/suggestions', (ctx) => {
+      this.requireAdmin(ctx);
+      const status = ctx.query.get('status') ?? 'pending';
+      const suggestions = Object.values(this.suggestions.data.items)
+        .filter((s) => s.status === status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 300)
+        .map(({ signature: _signature, ...suggestion }) => ({
+          ...suggestion,
+          title: this.store.getContent(suggestion.contentId)?.title ?? this.store.getContent(suggestion.contentId)?.name,
+        }));
+      return { suggestions };
+    });
+    router.post('/v1/admin/suggestions/:id/:action', (ctx) => {
+      this.requireAdmin(ctx);
+      const suggestion = this.suggestions.data.items[ctx.params.id];
+      if (!suggestion) throw notFound('No such suggestion');
+      if (ctx.params.action === 'accept') {
+        suggestion.status = 'accepted';
+        suggestion.reviewedAt = new Date().toISOString();
+        this.suggestions.changed();
+        // Applied to the content record: sources become part of its catalog entry, and
+        // duplicate ids are kept so the operator can dedupe or compress the store.
+        this.store.annotate(suggestion.contentId, {
+          sources: suggestion.sources?.map((source) => source.url),
+          duplicates: suggestion.duplicateOf ? [suggestion.duplicateOf] : undefined,
+        });
+      } else if (ctx.params.action === 'reject') {
+        suggestion.status = 'rejected';
+        suggestion.reviewedAt = new Date().toISOString();
+        this.suggestions.changed();
+      } else throw notFound();
+      return { ok: true };
     });
     router.delete('/v1/admin/content/:cid', async (ctx) => {
       this.requireAdmin(ctx);
@@ -649,6 +830,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     super.flush();
     this.store.flush();
     this.uploads.flush();
+    this.suggestions.flush();
     this.service.flush();
   }
 }

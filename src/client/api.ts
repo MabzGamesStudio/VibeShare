@@ -103,6 +103,11 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     if (!body.id) throw badRequest('id is required');
     return core.report(String(body.id));
   });
+  on('POST', '/api/claim', async (request) => {
+    const body = await request.json<{ id?: string; source?: string; metrics?: Record<string, number>; publishedAt?: string }>();
+    if (!body.id || !body.metrics) throw badRequest('id and metrics are required');
+    return core.claim(String(body.id), body.metrics, body.source, body.publishedAt);
+  });
   on('POST', '/api/subscriptions/feed', async (request) => {
     const body = await request.json<{ cursor?: string }>();
     return core.browse({ source: 'subscriptions', cursor: body.cursor });
@@ -120,10 +125,17 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     nodes.client(node(request)).json(`/v1/votes/${encodeURIComponent(request.query.get('content') ?? '')}`)
   );
   on('POST', '/api/suggest', async (request) => {
-    const body = await request.json<{ nodeId?: string; id?: string; kind?: string; value?: string; reason?: string; timestamp?: number }>();
+    const body = await request.json<{ nodeId?: string; id?: string; kind?: string; value?: string; reason?: string; timestamp?: number; platform?: string }>();
     const entry = nodes.require(String(body.nodeId));
     const { nodeId: _node, ...rest } = body;
     return nodes.client(entry).json<{ status: string }>('/v1/suggestions', { body: rest });
+  });
+  // Missing data suggestions to a content provider node (sources, duplicates, absent data).
+  on('POST', '/api/suggest/provider', async (request) => {
+    const body = await request.json<{ nodeId?: string; id?: string; kind?: string; sources?: { platform: string; url: string }[]; duplicateOf?: string; note?: string }>();
+    const entry = nodes.require(String(body.nodeId));
+    const { nodeId: _node, ...rest } = body;
+    return nodes.client(entry).json('/v1/suggestions', { body: rest });
   });
   on('GET', '/api/contributions', () => core.contributions());
 
@@ -149,6 +161,12 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // Settings, identity, cache
   on('PATCH', '/api/settings', async (request) => core.updateSettings(await request.json<Partial<Settings>>()));
+  // Profiles (each keeps its own nodes, settings, history and client id)
+  on('GET', '/api/profiles', () => ({ profiles: core.profileSummaries(), active: core.store.data.data.activeProfile }));
+  on('POST', '/api/profiles', async (request) => ({ profiles: await core.createProfile(await request.json()) }));
+  on('PATCH', '/api/profiles/:id', async (request) => ({ profiles: await core.updateProfile({ ...(await request.json()), id: request.params.id }) }));
+  on('DELETE', '/api/profiles/:id', (request) => ({ profiles: core.deleteProfile(request.params.id) }));
+  on('POST', '/api/profiles/:id/switch', async (request) => core.switchProfile({ ...(await request.json()), id: request.params.id }));
   on('GET', '/api/identity/export', () => ({ seed: formatSeed(core.store.identity.seed), id: core.store.identity.id }));
   on('POST', '/api/identity/import', async (request) => {
     const body = await request.json<{ seed?: string }>();

@@ -12,6 +12,8 @@ import {
   type AlgorithmInfo,
   type AlgorithmPricing,
   type AlgorithmRewards,
+  type ClaimRequest,
+  type ClaimResponse,
   type FeedRequest,
   type Page,
   type Preferences,
@@ -27,15 +29,21 @@ import { baseId, parseContentId } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
+import { claimDefaults, claimMultiplier, claimRuleFor, type ClaimConfig } from './metrics.js';
 import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
 import type { Discovered } from './crawler/types.js';
-import { Registry, identityOf, type Entry, type EntryInput } from './registry.js';
+import { Registry, identityOf, normalizeLink, type Entry, type EntryInput } from './registry.js';
 import { prioritize, priorityOf, SOURCE_CATALOG, sourceKeyOf } from './sources.js';
 
 export interface AlgorithmConfig extends BaseConfig {
   pricing: AlgorithmPricing;
   rewards: AlgorithmRewards;
   ranking: RankingConfig;
+  /**
+   * What clients earn for reporting platform popularity numbers (claims) about content,
+   * and the per-source credit multipliers of every metric.
+   */
+  claims: ClaimConfig;
   policy: {
     /** Highest rating this node ever returns (e.g. 13+ for a family node). */
     maxRating: Rating;
@@ -69,6 +77,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     peers: [],
     pricing: { feed: 0, search: 0, lookup: 0, submission: 0 },
     rewards: { vote: 1, voteDailyCap: 50, acceptedSuggestion: 10, report: 2, reportDailyCap: 100, requireIdentity: false, autoAcceptAgreement: 3 },
+    claims: claimDefaults(),
     ranking: {
       strategy: 'balanced',
       weights: { quality: 1, recency: 1, preference: 1.5, discovery: 0.3 },
@@ -92,7 +101,7 @@ interface Suggestion {
   createdAt: string;
   reviewedAt?: string;
   /** Everyone who made this same suggestion, with their reason and evidence. */
-  votes: { account: string; reason: string; timestamp?: number; at: string }[];
+  votes: { account: string; reason: string; timestamp?: number; at: string; platform?: string }[];
 }
 
 interface Submission {
@@ -480,6 +489,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const body = await readJson<ReportRequest>(ctx.req);
       return this.report(ctx, account, String(body.id ?? ''));
     });
+
+    // Platform popularity numbers (views, likes, comments, subscribers…) the client saw:
+    // only what is new to the node pays, times the source's credit multipliers.
+    router.post('/v1/claims', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<ClaimRequest>(ctx.req);
+      return this.claim(ctx, account, body);
+    });
   }
 
   private validateSuggestion(kind: SuggestionKind, raw: string): string {
@@ -509,6 +526,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       }
       case 'report':
         return value.slice(0, 64) || 'other';
+      case 'source': {
+        // A link to the content on another platform; one content id can carry several.
+        return normalizeLink(value);
+      }
+      case 'duplicate': {
+        const identity = identityOf({ id: value });
+        return identity.key || value.slice(0, 4096);
+      }
     }
   }
 
@@ -540,7 +565,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       suggestions[suggestion.id] = suggestion;
     }
     if (!suggestion.votes.some((vote) => vote.account === account.id)) {
-      suggestion.votes.push({ account: account.id, reason, timestamp, at: new Date().toISOString() });
+      suggestion.votes.push({
+        account: account.id,
+        reason,
+        timestamp,
+        at: new Date().toISOString(),
+        platform: body.platform ? String(body.platform).slice(0, 32) : undefined,
+      });
     }
     this.contributions.changed();
     const needed = this.config.rewards.autoAcceptAgreement;
@@ -575,6 +606,15 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         }
         case 'published':
           entry.publishedAt = suggestion.value;
+          break;
+        case 'source':
+          // Missing sources of the content: one content id can carry several.
+          if (entry.sources.length < 16 && !entry.sources.includes(suggestion.value) && suggestion.value !== entry.id) {
+            entry.sources.push(suggestion.value);
+          }
+          break;
+        case 'duplicate':
+          // Reported as a duplicate of another id; kept as evidence for the operator.
           break;
         case 'report':
           break;
@@ -624,6 +664,69 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       credited = rewards.report;
     }
     return { known: !newInfo, credited };
+  }
+
+  /**
+   * A client reports the popularity numbers it saw for the content on its platform
+   * (views, likes, comments, subscribers, upvotes…). Only numbers the node did not have
+   * yet count as new information, and only those pay: `base × multiplier`, where the
+   * multiplier sums one weight per enabled metric of the source and is then multiplied
+   * by the recency factor (exponential decay to 1×). The multiplier is never below 1.
+   */
+  claim(ctx: Ctx, account: Account, body: ClaimRequest): ClaimResponse {
+    const trimmed = String(body.id ?? '').trim();
+    if (!trimmed) throw badRequest('id is required');
+    const raw = body.metrics;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw badRequest('metrics is required');
+    const metrics: Record<string, number> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>).slice(0, 16)) {
+      const name = key.trim().slice(0, 32);
+      const number = Number(value);
+      if (!name || !Number.isFinite(number) || number < 0) throw badRequest(`metrics.${key} must be a positive number`);
+      metrics[name] = Math.min(number, 1e15);
+    }
+    if (!Object.keys(metrics).length) throw badRequest('metrics is required');
+    let publishedAt: string | undefined;
+    if (body.publishedAt !== undefined && body.publishedAt !== null && body.publishedAt !== '') {
+      const time = Date.parse(String(body.publishedAt));
+      if (!Number.isFinite(time)) throw badRequest('publishedAt must be a date like 2024-05-01');
+      if (time > Date.now() + 86_400_000) throw badRequest('publishedAt cannot be in the future');
+      publishedAt = new Date(time).toISOString();
+    }
+    const { key, contentId, link } = identityOf({ id: trimmed });
+    let entry = this.registry.findByRef(trimmed);
+    const known = Boolean(entry);
+    if (!entry) {
+      // The node learns of the content itself: kept for review, like a report.
+      entry = this.registry.upsert({ id: key, contentId, link, status: 'pending', origin: 'report' });
+    }
+    // New information: a number higher than any the node kept for this content.
+    const stats = (entry.platformStats ??= {});
+    const updated: string[] = [];
+    for (const [name, value] of Object.entries(metrics)) {
+      if (value > (stats[name] ?? -1)) {
+        stats[name] = value;
+        updated.push(name);
+      }
+    }
+    const newInfo = updated.length > 0;
+    let credited = 0;
+    let multiplier = 1;
+    if (newInfo) {
+      const source = body.source ? String(body.source).slice(0, 32) : sourceKeyOf({ id: entry.id, adapter: entry.adapter });
+      multiplier = claimMultiplier(claimRuleFor(this.config.claims, source), metrics, publishedAt ?? entry.publishedAt).multiplier;
+      const claims = this.config.claims;
+      if (claims.base > 0 && this.canEarn(account) && this.ledger.daily(account, 'claims') < claims.dailyCap) {
+        this.ledger.addDaily(account, 'claims', 1);
+        credited = Math.max(1, Math.round(claims.base * multiplier));
+        const updatedAccount = this.ledger.credit(account.id, credited, 'claim', entry.id);
+        ctx.res.setHeader('x-vs-balance', String(updatedAccount.balance));
+      }
+      if (publishedAt && entry.origin === 'report') entry.publishedAt = publishedAt;
+      entry.updatedAt = new Date().toISOString();
+      this.registry.changed();
+    }
+    return { known, newInfo, credited, multiplier, updated };
   }
 
   submit(account: Account, body: SubmissionRequest): Submission {
@@ -723,7 +826,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const items = this.registry
         .all()
         .filter((entry) => (!status || entry.status === status) && (!q || entry.title.toLowerCase().includes(q) || entry.id.includes(q)))
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        // The preview image kept on this node (or the remote one of discovered content).
+        .map((entry) => ({
+          ...entry,
+          thumbnail: entry.thumbnail ? `/v1/thumbnails/${this.registry.thumbKey(entry.id)}` : entry.thumbnailUrl,
+        }));
       return pageOf(items, ctx.query.get('cursor') ?? undefined, 100);
     });
     router.put('/v1/admin/content', async (ctx) => {

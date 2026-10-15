@@ -227,12 +227,25 @@ export interface HistoryItem {
   at: string;
 }
 
+/** A profile of this client, as the GUI lists them. */
+export interface ProfileSummary {
+  id: string;
+  name: string;
+  /** public: anyone using this client can switch to it; protected: username + password. */
+  access: 'public' | 'protected';
+  username?: string;
+  active: boolean;
+}
+
 export interface ClientState {
   version: string;
   identity: { id: string };
   nodes: NodeEntry[];
   settings: Settings;
   subscriptions: Subscription[];
+  /** The profiles of this client and the one that is active. */
+  profiles: ProfileSummary[];
+  activeProfile: string;
 }
 
 /** A content item from an algorithm node, with where it came from. */

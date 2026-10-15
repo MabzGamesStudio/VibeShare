@@ -1,4 +1,4 @@
-import { Coins, Compass, History, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
+import { Coins, Columns2, Compass, History, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry } from '../../src/shared/clientapi';
@@ -9,6 +9,7 @@ import { PageView } from './components/feed/PageView';
 import { ShareProvider } from './components/Share';
 import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
+import { DualPage } from './pages/Dual';
 import { EarnPage } from './pages/Earn';
 import { LibraryPage } from './pages/Library';
 import { NodesPage } from './pages/Nodes';
@@ -146,6 +147,7 @@ export function App() {
           <button className="nav-link nav-add" onClick={() => setCreating(true)}>
             <Plus size={19} /> New page
           </button>
+          <NavItem to="/dual" icon={<Columns2 size={19} />} label="Dual" />
           <div className="nav-divider" />
           <NavItem to="/search" icon={<Compass size={19} />} label="Explore" />
           <NavItem to="/subscriptions" icon={<Users size={19} />} label="Subscriptions" count={state?.subscriptions.length} />
@@ -189,6 +191,7 @@ export function App() {
             <Routes>
               <Route path="/" element={<PageRoute id="videos" />} />
               <Route path="/p/:id" element={<PageRoute />} />
+              <Route path="/dual" element={<DualPage />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/subscriptions" element={<SubscriptionsPage />} />
               <Route path="/watch/:id" element={<WatchPage />} />

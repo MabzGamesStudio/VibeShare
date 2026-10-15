@@ -15,12 +15,17 @@ interface ContentRow {
   downloads: number;
   bytesServed: number;
   creditsEarned: number;
+  /** Platform links added from client suggestions (one cid can carry several). */
+  sources?: string[];
+  /** Content ids clients reported as duplicates of this one. */
+  duplicates?: string[];
 }
 
 function Content() {
   const [rows, setRows] = useState<ContentRow[] | null>(null);
   const [offset, setOffset] = useState(0);
   const [job, setJob] = useState<ContentRow | null>(null);
+  const [details, setDetails] = useState<string | null>(null);
   const [form, setForm] = useState({ replicas: '2', durationDays: '30', upfront: '5', perRetrieval: '1', perChallenge: '1', completion: '20' });
   const [importPath, setImportPath] = useState('');
   const [toast, show] = useToast();
@@ -76,12 +81,19 @@ function Content() {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.cid}>
-                  <td>
+                  <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(row.cid)}>
                     <strong>{row.title ?? row.name}</strong>
                     <div className="tiny faint">
                       {row.mime} · {timeAgo(row.createdAt)}
                     </div>
                     <div className="mono tiny faint">{row.cid.slice(0, 24)}…</div>
+                    {(row.sources?.length ?? 0) + (row.duplicates?.length ?? 0) > 0 && (
+                      <div className="tiny faint">
+                        {row.sources?.length ? `${row.sources.length} suggested source${row.sources.length === 1 ? '' : 's'}` : ''}
+                        {row.sources?.length && row.duplicates?.length ? ' · ' : ''}
+                        {row.duplicates?.length ? `${row.duplicates.length} duplicate${row.duplicates.length === 1 ? '' : 's'}` : ''}
+                      </div>
+                    )}
                   </td>
                   <td className="small">{formatBytes(row.size)}</td>
                   <td className="small">
@@ -190,6 +202,196 @@ function Content() {
           </div>
         </Modal>
       )}
+      {details && <ContentDetails cid={details} onClose={() => setDetails(null)} />}
+      <Suggestions />
+    </div>
+  );
+}
+
+interface ContentDetailsData {
+  record: ContentRow & { chunks: number };
+  manifest?: {
+    name: string;
+    mime: string;
+    size: number;
+    chunkSize: number;
+    createdAt: string;
+    meta?: Record<string, unknown>;
+    sources?: string[];
+    creator?: { id: string; name?: string; kind?: string };
+  };
+  chunks?: { id: string; size: number; backends: string[] }[];
+  suggestions?: SuggestionRow[];
+}
+
+/** Everything the node knows about one content, shown when its row is clicked. */
+function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) {
+  const [data, setData] = useState<ContentDetailsData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`).then(setData).catch((e) => setError(message(e)));
+  }, [cid]);
+  const meta = (data?.manifest?.meta ?? {}) as { title?: string; description?: string; tags?: string[]; topics?: string[]; format?: string; rating?: string; durationSeconds?: number };
+  const sources = [...new Set([...(data?.manifest?.sources ?? []), ...(data?.record.sources ?? [])])];
+  return (
+    <Modal title="Content details" onClose={onClose} wide>
+      {error ? (
+        <div className="banner danger small">{error}</div>
+      ) : !data ? (
+        <Loading />
+      ) : (
+        <div className="form-stack">
+          <div>
+            <h3>{data.record.title ?? meta.title ?? data.record.name}</h3>
+            <div className="mono tiny faint">{data.record.cid}</div>
+          </div>
+          <dl className="kv">
+            <dt>File</dt>
+            <dd>
+              {data.record.name} · {data.record.mime} · {formatBytes(data.record.size)}
+            </dd>
+            <dt>Chunks</dt>
+            <dd>
+              {data.record.chunks} × {formatBytes(data.manifest?.chunkSize ?? 0)} on{' '}
+              {[...new Set((data.chunks ?? []).flatMap((chunk) => chunk.backends))].join(', ') || 'no backend'}
+            </dd>
+            <dt>Uploader</dt>
+            <dd className="mono tiny">{data.record.uploader}</dd>
+            <dt>Added</dt>
+            <dd>{timeAgo(data.record.createdAt)}</dd>
+            <dt>Downloads</dt>
+            <dd>
+              {data.record.downloads} ({formatBytes(data.record.bytesServed)} served, {data.record.creditsEarned} credits earned)
+            </dd>
+            {data.manifest?.creator && (
+              <>
+                <dt>Creator</dt>
+                <dd>
+                  {data.manifest.creator.name ?? data.manifest.creator.id} ({data.manifest.creator.kind ?? 'unknown'})
+                </dd>
+              </>
+            )}
+            {meta.format && (
+              <>
+                <dt>Metadata</dt>
+                <dd>
+                  {meta.format}
+                  {meta.rating ? ` · ${meta.rating}` : ''}
+                  {meta.durationSeconds ? ` · ${Math.round(meta.durationSeconds)}s` : ''}
+                  {meta.topics?.length ? ` · ${meta.topics.join(', ')}` : ''}
+                  {meta.tags?.length ? ` · ${meta.tags.map((tag) => `#${tag}`).join(' ')}` : ''}
+                </dd>
+              </>
+            )}
+            <dt>Sources</dt>
+            <dd>{sources.length ? sources.join(' · ') : 'None'}</dd>
+            <dt>Duplicates</dt>
+            <dd>{data.record.duplicates?.length ? data.record.duplicates.join(' · ') : 'None reported'}</dd>
+          </dl>
+          {meta.description && <p className="small">{meta.description}</p>}
+          {data.suggestions && data.suggestions.length > 0 && (
+            <div>
+              <h3>Client suggestions</h3>
+              {data.suggestions.map((suggestion) => (
+                <div key={suggestion.id} className="small" style={{ marginTop: 6 }}>
+                  <span className="badge">{suggestion.status}</span>{' '}
+                  <strong>{suggestion.kind}</strong>{' '}
+                  {suggestion.sources?.map((source) => `${source.platform}: ${source.url}`).join(', ') ?? suggestion.duplicateOf ?? suggestion.note ?? ''}
+                  <div className="tiny faint">{timeAgo(suggestion.createdAt)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+interface SuggestionRow {
+  id: string;
+  contentId: string;
+  title?: string;
+  kind: 'source' | 'duplicate' | 'missing';
+  sources?: { platform: string; url: string }[];
+  duplicateOf?: string;
+  note?: string;
+  status: string;
+  createdAt: string;
+}
+
+/** What clients suggest this node is missing: sources, duplicates, absent data. */
+function Suggestions() {
+  const [rows, setRows] = useState<SuggestionRow[] | null>(null);
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ suggestions: SuggestionRow[] }>('/v1/admin/suggestions')
+      .then((r) => setRows(r.suggestions))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  return (
+    <div className="card form-stack">
+      <h3>Client suggestions</h3>
+      <p className="small muted">
+        What clients say this node is missing: links to the content on other platforms (one content id can carry several sources), other
+        content ids it duplicates (helps dedupe and compression), or content data that is not here at all. Accepting merges the sources and
+        duplicate ids into the content.
+      </p>
+      {!rows ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="small faint">Nothing pending.</p>
+      ) : (
+        <table className="table">
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="small">
+                  <strong>
+                    {row.kind}: {row.title ?? row.contentId.slice(0, 24)}
+                  </strong>
+                  <div className="mono tiny faint">{row.contentId.slice(0, 40)}</div>
+                  <div className="small">
+                    {row.sources?.map((source) => (
+                      <div key={source.url}>
+                        {source.platform}: {source.url}
+                      </div>
+                    ))}
+                    {row.duplicateOf && <div>duplicate of {row.duplicateOf}</div>}
+                    {row.note && <div className="muted">{row.note}</div>}
+                  </div>
+                </td>
+                <td className="tiny faint">{timeAgo(row.createdAt)}</td>
+                <td>
+                  <div className="row">
+                    <button
+                      className="small primary"
+                      onClick={async () => {
+                        await admin(`/v1/admin/suggestions/${row.id}/accept`, { body: {} }).catch((e) => show(message(e)));
+                        load();
+                      }}
+                    >
+                      Accept
+                    </button>
+                    <button
+                      className="small"
+                      onClick={async () => {
+                        await admin(`/v1/admin/suggestions/${row.id}/reject`, { body: {} }).catch((e) => show(message(e)));
+                        load();
+                      }}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {toast && <div className="banner info small">{toast}</div>}
     </div>
   );
 }

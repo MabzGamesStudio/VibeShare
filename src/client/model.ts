@@ -5,8 +5,16 @@ import { defaultSettings } from '../shared/clientdefaults.js';
 import type { Identity } from '../shared/crypto.js';
 import { base32Decode, base32Encode } from '../shared/encoding.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
+import type { ProfileAccess } from '../shared/profiles.js';
 
-export interface ClientData {
+/** One profile of the client: its own nodes, settings, history and client id. */
+export interface ProfileRecord {
+  id: string;
+  name: string;
+  /** public: anyone using this client may switch to it; password: username + password. */
+  access: ProfileAccess;
+  /** The profile's own client id (its key seed, base32). */
+  identitySeed: string;
   nodes: NodeEntry[];
   settings: Settings;
   subscriptions: Subscription[];
@@ -14,8 +22,29 @@ export interface ClientData {
   history: HistoryItem[];
 }
 
+export interface ClientData {
+  /** The active profile's data (what the client uses); mirrored into `profiles` on switch. */
+  nodes: NodeEntry[];
+  settings: Settings;
+  subscriptions: Subscription[];
+  library: LibraryItem[];
+  history: HistoryItem[];
+  /** Every profile of this client. Empty = the implicit single profile. */
+  profiles: ProfileRecord[];
+  /** The id of the profile whose data fills the fields above. */
+  activeProfile: string;
+}
+
 export function emptyClientData(): ClientData {
-  return { nodes: [], settings: defaultSettings(), subscriptions: [], library: [], history: [] };
+  return {
+    nodes: [],
+    settings: defaultSettings(),
+    subscriptions: [],
+    library: [],
+    history: [],
+    profiles: [],
+    activeProfile: 'main',
+  };
 }
 
 /** A document held in memory and saved shortly after each `changed()`. */

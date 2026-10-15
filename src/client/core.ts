@@ -10,19 +10,29 @@ import type {
   NodeEntry,
   PageFilters,
   PageSource,
+  ProfileSummary,
   Settings,
 } from '../shared/clientapi.js';
-import { applySettingsPatch, pagePreferences } from '../shared/clientdefaults.js';
+import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
-import { badRequest } from '../shared/errors.js';
+import { badRequest, notFound } from '../shared/errors.js';
 import { log } from '../shared/log.js';
 import { parseNodeRef } from '../shared/noderef.js';
 import { matchesLanguages } from '../shared/language.js';
-import { SOFTWARE, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import {
+  decodeProfileSeed,
+  encodeProfileSeed,
+  hashProfilePassword,
+  newProfileSeed,
+  randomProfileSalt,
+  verifyProfilePassword,
+  type ProfileAccess,
+} from '../shared/profiles.js';
+import { SOFTWARE, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
-import type { ChunkStore, ClientStoreLike, UploadStore } from './model.js';
+import type { ChunkStore, ClientStoreLike, ProfileRecord, UploadStore } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
 
@@ -87,6 +97,8 @@ export class ClientCore {
       nodes: this.nodes.list(),
       settings: this.settings,
       subscriptions: this.store.data.data.subscriptions,
+      profiles: this.profileSummaries(),
+      activeProfile: this.store.data.data.activeProfile ?? 'main',
     };
   }
 
@@ -304,6 +316,151 @@ export class ClientCore {
     return next;
   }
 
+  // -------------------------------------------------------------------------
+  // Profiles: several users of one client, each with their own nodes, settings,
+  // history and client id (key). Public profiles open for anyone; others need
+  // their username and password.
+
+  /** Makes sure the current data has a profile record (the implicit single profile). */
+  private ensureProfiles(): void {
+    const data = this.store.data.data;
+    data.profiles ??= [];
+    data.activeProfile ??= 'main';
+    if (data.profiles.length) return;
+    data.profiles.push({
+      id: data.activeProfile || 'main',
+      name: this.settings.profile.name || 'Main',
+      access: { mode: 'public' },
+      identitySeed: encodeProfileSeed(this.store.identity.seed),
+      nodes: data.nodes,
+      settings: data.settings,
+      subscriptions: data.subscriptions,
+      library: data.library,
+      history: data.history,
+    });
+  }
+
+  /** Saves the live data and client id into the active profile's slot. */
+  private snapshotProfile(): void {
+    const data = this.store.data.data;
+    this.ensureProfiles();
+    const record = data.profiles.find((profile) => profile.id === data.activeProfile);
+    if (!record) return;
+    record.nodes = data.nodes;
+    record.settings = data.settings;
+    record.subscriptions = data.subscriptions;
+    record.library = data.library;
+    record.history = data.history;
+    record.identitySeed = encodeProfileSeed(this.store.identity.seed);
+  }
+
+  profileSummaries(): ProfileSummary[] {
+    const data = this.store.data.data;
+    if (!data.profiles?.length) {
+      return [{ id: data.activeProfile || 'main', name: this.settings.profile.name || 'Main', access: 'public', active: true }];
+    }
+    return data.profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      access: profile.access.mode === 'password' ? 'protected' : 'public',
+      username: profile.access.mode === 'password' ? profile.access.username : undefined,
+      active: profile.id === data.activeProfile,
+    }));
+  }
+
+  /** Creates a fresh profile (default settings, no nodes, its own client id). */
+  async createProfile(body: { name?: string; username?: string; password?: string }): Promise<ProfileSummary[]> {
+    const data = this.store.data.data;
+    this.snapshotProfile();
+    const name = String(body.name ?? '').trim().slice(0, 60);
+    if (!name) throw badRequest('A profile name is required');
+    if (data.profiles.some((profile) => profile.name.toLowerCase() === name.toLowerCase())) {
+      throw badRequest('There is already a profile with that name');
+    }
+    const password = String(body.password ?? '');
+    let access: ProfileAccess = { mode: 'public' };
+    if (password) {
+      const username = String(body.username ?? '').trim().slice(0, 60);
+      if (!username) throw badRequest('A username is needed with a password');
+      const salt = randomProfileSalt();
+      access = { mode: 'password', username, salt, hash: await hashProfilePassword(password, salt, username) };
+    }
+    data.profiles.push({
+      id: `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      access,
+      identitySeed: encodeProfileSeed(newProfileSeed()),
+      nodes: [],
+      settings: defaultSettings(),
+      subscriptions: [],
+      library: [],
+      history: [],
+    });
+    this.store.changed();
+    return this.profileSummaries();
+  }
+
+  /** Switches to another profile: its data, its client id, its node accounts. */
+  async switchProfile(body: { id?: string; username?: string; password?: string }): Promise<ClientState> {
+    const data = this.store.data.data;
+    this.ensureProfiles();
+    const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
+    if (!target) throw notFound('No such profile');
+    if (target.id !== data.activeProfile) {
+      if (target.access.mode === 'password') {
+        const ok = await verifyProfilePassword(target.access, String(body.username ?? ''), String(body.password ?? ''));
+        if (!ok) throw badRequest('Wrong username or password for this profile');
+      }
+      this.snapshotProfile();
+      const previousSettings = data.settings;
+      data.nodes = target.nodes;
+      data.settings = normalizeSettings(target.settings);
+      data.subscriptions = target.subscriptions;
+      data.library = target.library;
+      data.history = target.history;
+      data.activeProfile = target.id;
+      this.store.replaceIdentity(decodeProfileSeed(target.identitySeed));
+      this.nodes.resetSessions();
+      this.store.changed();
+      this.options.onSettings?.(previousSettings, data.settings);
+      void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
+    }
+    return this.state();
+  }
+
+  /** Renames a profile and changes or clears its username/password protection. */
+  async updateProfile(body: { id?: string; name?: string; username?: string; password?: string; makePublic?: boolean }): Promise<ProfileSummary[]> {
+    const data = this.store.data.data;
+    this.ensureProfiles();
+    const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
+    if (!target) throw notFound('No such profile');
+    if (body.name !== undefined) {
+      const name = String(body.name).trim().slice(0, 60);
+      if (!name) throw badRequest('A profile name is required');
+      target.name = name;
+    }
+    if (body.makePublic) target.access = { mode: 'public' };
+    if (body.password) {
+      const username = String(body.username ?? (target.access.mode === 'password' ? target.access.username : '')).trim().slice(0, 60);
+      if (!username) throw badRequest('A username is needed with a password');
+      const salt = randomProfileSalt();
+      target.access = { mode: 'password', username, salt, hash: await hashProfilePassword(String(body.password), salt, username) };
+    }
+    this.store.changed();
+    return this.profileSummaries();
+  }
+
+  deleteProfile(id: string): ProfileSummary[] {
+    const data = this.store.data.data;
+    this.ensureProfiles();
+    if (id === data.activeProfile) throw badRequest('Switch to another profile before deleting this one');
+    const before = data.profiles.length;
+    data.profiles = data.profiles.filter((profile) => profile.id !== id);
+    if (data.profiles.length === before) throw notFound('No such profile');
+    this.store.changed();
+    return this.profileSummaries();
+  }
+
   async removeNode(id: string, release: boolean): Promise<void> {
     await this.options.beforeRemoveNode?.(id, release);
     this.nodes.remove(id);
@@ -336,6 +493,30 @@ export class ClientCore {
       [...this.nodes.active('algorithm'), ...this.nodes.active('provider')].map(async (entry) => {
         try {
           const result = await this.nodes.client(entry).json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
+          return { node: entry.id, name: entry.name, ...result };
+        } catch (error) {
+          return { node: entry.id, name: entry.name, error: errorText(error) };
+        }
+      })
+    );
+    return { nodes: results };
+  }
+
+  /**
+   * Reports platform popularity numbers (views, likes, comments, subscribers…) the
+   * client saw for the content to every algorithm node; each pays for the numbers it
+   * did not already have, times its per-source credit multipliers.
+   */
+  async claim(
+    id: string,
+    metrics: Record<string, number>,
+    source?: string,
+    publishedAt?: string
+  ): Promise<{ nodes: { node: string; name: string; newInfo?: boolean; credited?: number; multiplier?: number; updated?: string[]; error?: string }[] }> {
+    const results = await Promise.all(
+      this.nodes.active('algorithm').map(async (entry) => {
+        try {
+          const result = await this.nodes.client(entry).json<ClaimResponse>('/v1/claims', { body: { id, metrics, source, publishedAt } });
           return { node: entry.id, name: entry.name, ...result };
         } catch (error) {
           return { node: entry.id, name: entry.name, error: errorText(error) };

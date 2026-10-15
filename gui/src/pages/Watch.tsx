@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Ban,
+  BarChart3,
   Download,
   ExternalLink,
   Flag,
@@ -10,12 +11,16 @@ import {
   ShieldCheck,
   ThumbsDown,
   ThumbsUp,
+  Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { ContentView, NodeEntry } from '../../../src/shared/clientapi';
+import { claimSourceMetrics } from '../../../src/algorithm/metrics';
+import { SOURCE_CATALOG, sourceKeyOf } from '../../../src/algorithm/sources';
+import type { ContentView, Job, NodeEntry } from '../../../src/shared/clientapi';
 import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
+import { baseId } from '../../../src/shared/sources';
 import {
   CREATOR_KIND_LABELS,
   FORMAT_LABELS,
@@ -25,7 +30,7 @@ import {
   TOPICS,
   type CreatorKind,
 } from '../../../src/shared/taxonomy';
-import { api, errorMessage } from '../api';
+import { api, errorMessage, uploadFile } from '../api';
 import { FormatIcon } from '../components/ContentCard';
 import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
@@ -42,6 +47,8 @@ const KIND_LABELS: Record<SuggestionKind, string> = {
   creator: 'Add the creator',
   published: 'Add the publish time',
   report: 'Report a problem',
+  source: 'Add a source link',
+  duplicate: 'Mark as duplicate of other content',
 };
 
 function TextViewer({ url: src, markdown }: { url: string; markdown: boolean }) {
@@ -292,44 +299,141 @@ function Unavailable({ view, onAdded }: { view: ContentView; onAdded: () => void
   );
 }
 
-function SuggestDialog({
-  view,
-  nodeId,
-  mediaRef,
-  onClose,
-}: {
-  view: ContentView;
-  nodeId: string;
-  mediaRef: React.RefObject<HTMLMediaElement | null>;
-  onClose: () => void;
-}) {
-  const { toast } = useApp();
-  const [kind, setKind] = useState<SuggestionKind>('tag');
-  const [value, setValue] = useState('');
-  const [reason, setReason] = useState('');
-  const media = mediaRef.current;
-  const [atTime, setAtTime] = useState(Boolean(media && media.currentTime > 0));
-  const time = media?.currentTime ?? 0;
-  const [busy, setBusy] = useState(false);
+interface SourceRow {
+  platform: string;
+  url: string;
+}
 
-  const submit = async () => {
+/** Platform + link rows: one content id can carry several sources. */
+function SourceRows({ rows, onChange }: { rows: SourceRow[]; onChange: (rows: SourceRow[]) => void }) {
+  const update = (index: number, patch: Partial<SourceRow>) => onChange(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  return (
+    <div className="form-stack" style={{ gap: 6 }}>
+      {rows.map((row, index) => (
+        <div key={index} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+          <select value={row.platform} onChange={(e) => update(index, { platform: e.target.value })} style={{ maxWidth: 150 }}>
+            {SOURCE_CATALOG.map((source) => (
+              <option key={source.key} value={source.key}>
+                {source.name}
+              </option>
+            ))}
+          </select>
+          <input type="url" placeholder="https://…" value={row.url} onChange={(e) => update(index, { url: e.target.value })} style={{ flex: 1 }} />
+          <button className="ghost icon" title="Remove" onClick={() => onChange(rows.filter((_, i) => i !== index))}>
+            <Trash2 size={15} />
+          </button>
+        </div>
+      ))}
+      <button className="small" onClick={() => onChange([...rows, { platform: 'youtube', url: '' }])}>
+        <Plus size={14} /> Add another source
+      </button>
+    </div>
+  );
+}
+
+/** Uploads the content data when the providers do not have a content id yet. */
+function UploadSection({ providers, algorithms, sources }: { providers: string[]; algorithms: string[]; sources: string[] }) {
+  const { toast } = useApp();
+  const [file, setFile] = useState<File | null>(null);
+  const [expectedCid, setExpectedCid] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  const upload = async () => {
+    if (!file) return;
     setBusy(true);
+    setResult(null);
     try {
-      const result = await api<{ status: string; agreeing: number }>('/api/suggest', {
+      const { fileId } = await uploadFile(file, () => undefined);
+      let job = await api<Job>('/api/publish', {
         body: {
-          nodeId,
-          id: view.id,
-          kind,
-          value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
-          reason,
-          timestamp: atTime ? time : undefined,
+          fileId,
+          name: file.name,
+          mime: file.type || 'application/octet-stream',
+          title: file.name,
+          providers,
+          algorithms,
+          sources,
+          sign: false,
         },
       });
+      for (let attempt = 0; attempt < 240 && job.status === 'running'; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        job = await api<Job>(`/api/jobs/${job.id}`);
+      }
+      if (job.status === 'done' && job.result?.id) {
+        const expected = expectedCid.trim().split('~')[0];
+        setResult(
+          expected && expected !== job.result.id.split('~')[0]
+            ? `Uploaded as ${job.result.id} — this is NOT the id you expected (${expectedCid.trim()}).`
+            : `Uploaded as ${job.result.id}.`
+        );
+      } else if (job.status !== 'running') setResult(job.error ?? 'The upload failed.');
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="form-stack" style={{ gap: 8 }}>
+      <p className="small muted">
+        The content id is the hash of the data, so uploading the data creates the id. If you already know the id, the upload is checked
+        against it.
+      </p>
+      <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      <input
+        type="text"
+        className="mono"
+        placeholder="Content id, if you know it (optional)"
+        value={expectedCid}
+        onChange={(e) => setExpectedCid(e.target.value)}
+      />
+      <div className="row">
+        <button className="primary small" disabled={!file || busy} onClick={upload}>
+          {busy && <Spinner />} Upload content data
+        </button>
+        {result && <span className="small">{result}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Reports the platform numbers of the content (views, likes, comments…) for credits. */
+function ClaimDialog({ view, onClose }: { view: ContentView; onClose: () => void }) {
+  const { toast } = useApp();
+  const [source, setSource] = useState(() => sourceKeyOf({ id: baseId(view.id) }));
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [publishedAt, setPublishedAt] = useState(view.item?.publishedAt?.slice(0, 10) ?? '');
+  const [busy, setBusy] = useState(false);
+  const defs = claimSourceMetrics(source);
+
+  const submit = async () => {
+    const metrics: Record<string, number> = {};
+    for (const [key, text] of Object.entries(values)) {
+      const number = Number(text);
+      if (text.trim() !== '' && Number.isFinite(number) && number >= 0) metrics[key] = number;
+    }
+    if (!Object.keys(metrics).length) {
+      toast('Enter at least one number', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api<{ nodes: { name: string; credited?: number; multiplier?: number; newInfo?: boolean; error?: string }[] }>(
+        '/api/claim',
+        { body: { id: view.id, source, metrics, publishedAt: publishedAt || undefined } }
+      );
+      const earned = result.nodes.reduce((sum, node) => sum + (node.credited ?? 0), 0);
+      const multiplier = result.nodes.find((node) => node.multiplier !== undefined)?.multiplier;
       toast(
-        result.status === 'accepted'
-          ? 'Accepted — thanks! Credits were added to your account.'
-          : `Sent for review (${result.agreeing} agreeing so far).`,
-        'success'
+        earned > 0
+          ? `+${earned} credits for the report${multiplier !== undefined ? ` (multiplier ×${multiplier.toFixed(2)})` : ''}`
+          : result.nodes.some((node) => node.newInfo === false)
+            ? 'Your nodes already had these numbers — only new information is rewarded.'
+            : 'Nothing earned.',
+        earned > 0 ? 'success' : 'info'
       );
       onClose();
     } catch (error) {
@@ -341,12 +445,12 @@ function SuggestDialog({
 
   return (
     <Modal
-      title="Suggest a change"
+      title="Report platform stats"
       onClose={onClose}
       actions={
         <>
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={submit} disabled={busy || reason.trim().length < 3 || (kind !== 'report' && !value)}>
+          <button className="primary" onClick={submit} disabled={busy}>
             {busy && <Spinner />} Send
           </button>
         </>
@@ -354,18 +458,201 @@ function SuggestDialog({
     >
       <div className="form-stack">
         <p className="small muted">
-          Algorithm nodes reward accepted suggestions with credits. Say why, and point to the moment that shows it.
+          Your algorithm nodes reward what they did not know yet: the numbers of the platform the content lives on multiply the reward,
+          and posts that are newer earn more. Numbers grow over time — reporting again later, when they grew, earns again.
         </p>
         <label className="field">
-          What
-          <select value={kind} onChange={(e) => (setKind(e.target.value as SuggestionKind), setValue(''))}>
-            {SUGGESTION_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {KIND_LABELS[k]}
+          Platform
+          <select
+            value={source}
+            onChange={(e) => {
+              setSource(e.target.value);
+              setValues({});
+            }}
+          >
+            {SOURCE_CATALOG.map((entry) => (
+              <option key={entry.key} value={entry.key}>
+                {entry.name}
               </option>
             ))}
           </select>
         </label>
+        <div className="form-grid">
+          {defs.map((def) => (
+            <label key={def.key} className="field">
+              {def.label}
+              <input
+                type="number"
+                min={0}
+                placeholder="0"
+                value={values[def.key] ?? ''}
+                onChange={(e) => setValues({ ...values, [def.key]: e.target.value })}
+              />
+            </label>
+          ))}
+          <label className="field">
+            Posted on
+            <input type="date" value={publishedAt} onChange={(e) => setPublishedAt(e.target.value)} />
+            <span className="hint">The newer the post, the more it earns.</span>
+          </label>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function SuggestDialog({
+  view,
+  nodeId,
+  mediaRef,
+  onClose,
+}: {
+  view: ContentView;
+  nodeId: string;
+  mediaRef: React.RefObject<HTMLMediaElement | null>;
+  onClose: () => void;
+}) {
+  const { providers, algorithms, toast } = useApp();
+  const [tab, setTab] = useState<'provider' | 'algorithm'>(view.decidedBy ? 'algorithm' : 'provider');
+  const [providerId, setProviderId] = useState(providers.find((node) => node.enabled)?.id ?? providers[0]?.id ?? '');
+  const [algorithmId, setAlgorithmId] = useState(nodeId || algorithms.find((node) => node.enabled)?.id || algorithms[0]?.id || '');
+  const [rows, setRows] = useState<SourceRow[]>([{ platform: 'youtube', url: '' }]);
+  const [duplicateOf, setDuplicateOf] = useState('');
+  const [note, setNote] = useState('');
+  const [kind, setKind] = useState<SuggestionKind>('tag');
+  const [value, setValue] = useState('');
+  const [reason, setReason] = useState('');
+  const media = mediaRef.current;
+  const [atTime, setAtTime] = useState(Boolean(media && media.currentTime > 0));
+  const time = media?.currentTime ?? 0;
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const sources = rows.filter((row) => row.url.trim());
+      if (tab === 'provider') {
+        if (sources.length) {
+          await api('/api/suggest/provider', { body: { nodeId: providerId, id: view.id, kind: 'source', sources, note: note || undefined } });
+        }
+        if (duplicateOf.trim()) {
+          await api('/api/suggest/provider', {
+            body: { nodeId: providerId, id: view.id, kind: 'duplicate', duplicateOf: duplicateOf.trim(), note: note || undefined },
+          });
+        }
+        if (!sources.length && !duplicateOf.trim()) {
+          if (note.trim().length < 3) throw new Error('Say what is missing');
+          await api('/api/suggest/provider', { body: { nodeId: providerId, id: view.id, kind: 'missing', note: note.trim() } });
+        }
+        toast('Sent to the content provider node — thank you!', 'success');
+      } else {
+        if (reason.trim().length < 3) throw new Error('Say why (at least a few words)');
+        const statuses: string[] = [];
+        const suggest = async (body: Record<string, unknown>) => {
+          const result = await api<{ status: string; agreeing: number }>('/api/suggest', {
+            body: { nodeId: algorithmId, id: view.id, reason, ...body },
+          });
+          statuses.push(result.status);
+        };
+        for (const row of sources) await suggest({ kind: 'source', value: row.url.trim(), platform: row.platform });
+        if (duplicateOf.trim()) await suggest({ kind: 'duplicate', value: duplicateOf.trim() });
+        if (value.trim()) {
+          await suggest({
+            kind,
+            value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
+            timestamp: atTime ? time : undefined,
+          });
+        }
+        if (!statuses.length) throw new Error('Add a source, a duplicate id, or a correction');
+        toast(
+          statuses.includes('accepted') ? 'Accepted — thanks! Credits were added to your account.' : 'Sent for review.',
+          'success'
+        );
+      }
+      onClose();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Suggest missing data"
+      onClose={onClose}
+      wide
+      actions={
+        <>
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={submit} disabled={busy}>
+            {busy && <Spinner />} Send
+          </button>
+        </>
+      }
+    >
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        <button className={`tab ${tab === 'provider' ? 'on' : ''}`} onClick={() => setTab('provider')}>
+          Content provider nodes
+        </button>
+        <button className={`tab ${tab === 'algorithm' ? 'on' : ''}`} onClick={() => setTab('algorithm')}>
+          Algorithm search nodes
+        </button>
+      </div>
+      <div className="form-stack">
+        <label className="field">
+          {tab === 'provider' ? 'Content provider node' : 'Algorithm search node'}
+          <select
+            value={tab === 'provider' ? providerId : algorithmId}
+            onChange={(e) => (tab === 'provider' ? setProviderId(e.target.value) : setAlgorithmId(e.target.value))}
+          >
+            {(tab === 'provider' ? providers : algorithms).map((node) => (
+              <option key={node.id} value={node.id}>
+                {node.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <h3>Missing sources</h3>
+        <p className="small muted">
+          Links to this content on other platforms — one content id can carry several sources. Pick the platform and paste the link.
+        </p>
+        <SourceRows rows={rows} onChange={setRows} />
+
+        <h3>Duplicate content</h3>
+        <p className="small muted">
+          If this is the same content as some other id, say which: it helps the content provider node compress or dedupe its store.
+        </p>
+        <label className="field">
+          The other content id
+          <input type="text" className="mono" placeholder="vs1… or yt:…" value={duplicateOf} onChange={(e) => setDuplicateOf(e.target.value)} />
+        </label>
+
+        <h3>Missing content data</h3>
+        <p className="small muted">If no node has the data of this content id, upload it here.</p>
+        <UploadSection
+          providers={tab === 'provider' && providerId ? [providerId] : providers.filter((node) => node.enabled).map((node) => node.id)}
+          algorithms={tab === 'algorithm' && algorithmId ? [algorithmId] : []}
+          sources={rows.filter((row) => row.url.trim()).map((row) => row.url.trim())}
+        />
+
+        {tab === 'algorithm' ? (
+          <>
+            <h3>Correct the metadata</h3>
+            <p className="small muted">
+              Algorithm nodes reward accepted suggestions with credits. Say why, and point to the moment that shows it.
+            </p>
+            <label className="field">
+              What
+              <select value={kind} onChange={(e) => (setKind(e.target.value as SuggestionKind), setValue(''))}>
+                {SUGGESTION_KINDS.filter((k) => k !== 'source' && k !== 'duplicate').map((k) => (
+                  <option key={k} value={k}>
+                    {KIND_LABELS[k]}
+                  </option>
+                ))}
+              </select>
+            </label>
         {kind === 'format' ? (
           <label className="field">
             Format
@@ -437,6 +724,13 @@ function SuggestDialog({
             <input type="checkbox" checked={atTime} onChange={(e) => setAtTime(e.target.checked)} /> Evidence at {formatDuration(time)}
           </label>
         )}
+          </>
+        ) : (
+          <label className="field">
+            Note for the operator (optional)
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything else the operator should know." />
+          </label>
+        )}
       </div>
     </Modal>
   );
@@ -452,6 +746,7 @@ export function WatchPage() {
   const [vote, setVote] = useState(0);
   const [stats, setStats] = useState({ likes: 0, dislikes: 0 });
   const [suggesting, setSuggesting] = useState(false);
+  const [claiming, setClaiming] = useState(false);
   const mediaRef = useRef<HTMLMediaElement | null>(null);
 
   const load = useCallback(async () => {
@@ -612,11 +907,12 @@ export function WatchPage() {
                 </button>
               </div>
             )}
-            {view.decidedBy && (
-              <button onClick={() => setSuggesting(true)}>
-                <Flag size={16} /> Suggest
-              </button>
-            )}
+            <button onClick={() => setSuggesting(true)}>
+              <Flag size={16} /> Suggest
+            </button>
+            <button onClick={() => setClaiming(true)} title="Report the numbers you see on its platform (views, likes, comments…)">
+              <BarChart3 size={16} /> Report stats
+            </button>
             {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
             <ShareButton target={{ id: view.id, title }} className="" label="Share" />
             <CopyButton text={view.id} label="Copy id" small={false} />
@@ -719,9 +1015,10 @@ export function WatchPage() {
           )}
         </aside>
       </div>
-      {suggesting && view.decidedBy && (
-        <SuggestDialog view={view} nodeId={view.decidedBy.id} mediaRef={mediaRef} onClose={() => setSuggesting(false)} />
+      {suggesting && (
+        <SuggestDialog view={view} nodeId={view.decidedBy?.id ?? ''} mediaRef={mediaRef} onClose={() => setSuggesting(false)} />
       )}
+      {claiming && <ClaimDialog view={view} onClose={() => setClaiming(false)} />}
     </div>
   );
 }
