@@ -16,6 +16,7 @@ import { formatDuration, splitList, timeAgo } from '../util';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
 import { Claims } from './ClaimsTab';
+import { Peers } from './PeersTab';
 import { ApiKeys, Sources } from './SourcesTabs';
 
 interface Submission {
@@ -207,7 +208,7 @@ interface Entry {
   id: string;
   sources: string[];
   status: 'listed' | 'blocked' | 'pending';
-  origin?: 'operator' | 'submission' | 'crawler' | 'report';
+  origin?: 'operator' | 'submission' | 'crawler' | 'report' | 'peer';
   adapter?: string;
   pageUrl?: string;
   reason?: string;
@@ -222,11 +223,107 @@ interface Entry {
   likes: number;
   dislikes: number;
   updatedAt: string;
+  addedAt?: string;
+  publishedAt?: string;
+  durationSeconds?: number;
+  notes?: { kind: string; value: string; reason: string; timestamp?: number }[];
   /** Preview image: a /v1/thumbnails/… path on this node, or a remote image. */
   thumbnail?: string;
   /** Platform numbers clients claimed (views, likes, comments…). */
   platformStats?: Record<string, number>;
-  publishedAt?: string;
+}
+
+/** Everything the node knows about one entry, opened by clicking it in the catalog. */
+function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () => void; onEdit: () => void }) {
+  const fullId = [entry.id, ...entry.sources].join('~');
+  return (
+    <Modal
+      title="Content details"
+      onClose={onClose}
+      wide
+      actions={
+        <>
+          <button onClick={onClose}>Close</button>
+          <button className="primary" onClick={onEdit}>
+            Edit
+          </button>
+        </>
+      }
+    >
+      <div className="form-stack">
+        {entry.thumbnail && <img src={entry.thumbnail} alt="Preview image" className="admin-thumb-large" />}
+        <div>
+          <h3>{entry.title}</h3>
+          <div className="mono tiny faint">{fullId}</div>
+        </div>
+        <dl className="kv">
+          <dt>Status</dt>
+          <dd>
+            <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
+            {entry.origin && <span className="tiny faint"> · from {entry.origin}{entry.adapter ? ` (${entry.adapter})` : ''}</span>}
+            {entry.reason && <div className="tiny" style={{ color: 'var(--danger)' }}>{entry.reason}</div>}
+          </dd>
+          <dt>Format</dt>
+          <dd>
+            {FORMAT_LABELS[entry.format]} · {RATING_LABELS[entry.rating]}
+            {entry.durationSeconds ? ` · ${formatDuration(entry.durationSeconds)}` : ''}
+            {entry.language ? ` · ${entry.language}` : ''}
+          </dd>
+          <dt>Topics</dt>
+          <dd>{entry.topics.length ? entry.topics.join(', ') : '—'}</dd>
+          <dt>Tags</dt>
+          <dd>{entry.tags.length ? entry.tags.map((tag) => `#${tag}`).join(' ') : '—'}</dd>
+          <dt>Creator</dt>
+          <dd className="mono tiny">{entry.creatorId ?? '—'}</dd>
+          <dt>Published</dt>
+          <dd>{timeAgo(entry.publishedAt) || '—'}</dd>
+          <dt>Votes</dt>
+          <dd>
+            👍 {entry.likes} · 👎 {entry.dislikes}
+          </dd>
+          <dt>Platform numbers</dt>
+          <dd>
+            {entry.platformStats && Object.keys(entry.platformStats).length
+              ? Object.entries(entry.platformStats)
+                  .map(([key, value]) => `${key} ${value}`)
+                  .join(' · ')
+              : 'None reported'}
+          </dd>
+          <dt>Content id</dt>
+          <dd className="mono tiny">{entry.sources.length ? entry.sources.join(' · ') : 'No fallback sources'}</dd>
+          {entry.pageUrl && (
+            <>
+              <dt>Page</dt>
+              <dd>
+                <a className="link" href={entry.pageUrl} target="_blank" rel="noreferrer">
+                  {entry.pageUrl}
+                </a>
+              </dd>
+            </>
+          )}
+          <dt>Added</dt>
+          <dd>
+            {timeAgo(entry.addedAt) || '—'}
+            {entry.updatedAt ? ` · updated ${timeAgo(entry.updatedAt)}` : ''}
+          </dd>
+        </dl>
+        {entry.description && <p className="small">{entry.description}</p>}
+        {entry.notes && entry.notes.length > 0 && (
+          <div>
+            <h3>Why it is tagged</h3>
+            {entry.notes.map((note) => (
+              <div key={note.kind + note.value} className="note small">
+                <strong>
+                  {note.kind}: {note.value}
+                </strong>
+                <div className="muted">{note.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
 }
 
 const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', rating: 'all', topics: [], tags: [], status: 'listed' });
@@ -352,6 +449,7 @@ function Catalog() {
   const [status, setStatus] = useState('');
   const [page, setPage] = useState<{ items: Entry[]; cursor?: string } | null>(null);
   const [editing, setEditing] = useState<Partial<Entry> | null>(null);
+  const [details, setDetails] = useState<Entry | null>(null);
   const [provider, setProvider] = useState('');
   const [toast, show] = useToast();
 
@@ -416,7 +514,7 @@ function Catalog() {
             <tbody>
               {page.items.map((entry) => (
                 <tr key={entry.id}>
-                  <td>
+                  <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(entry)}>
                     <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
                       {entry.thumbnail ? (
                         <img src={entry.thumbnail} alt="" className="admin-thumb" loading="lazy" />
@@ -509,6 +607,16 @@ function Catalog() {
             </tbody>
           </table>
         </div>
+      )}
+      {details && (
+        <EntryDetails
+          entry={details}
+          onClose={() => setDetails(null)}
+          onEdit={() => {
+            setEditing(details);
+            setDetails(null);
+          }}
+        />
       )}
       {editing && (
         <EntryEditor
@@ -892,6 +1000,7 @@ export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'apis') return <ApiKeys />;
   if (tab === 'sources') return <Sources />;
   if (tab === 'claims') return <Claims />;
+  if (tab === 'peers') return <Peers />;
   if (tab === 'review') return <Review />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;

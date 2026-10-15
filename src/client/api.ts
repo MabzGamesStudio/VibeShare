@@ -146,6 +146,14 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // Publishing (uploads arrive through a route of each host: files or browser memory)
   on('POST', '/api/publish', async (request) => core.publisher.publish(await request.json<PublishRequest>(2 * MiB)));
+  // The content id an upload will have, computed before publishing (fills the suggest form).
+  on('POST', '/api/publish/preview', async (request) => core.previewPublish(await request.json<PublishRequest>(2 * MiB)));
+  // Pulls the data behind a URL into this client as a file to publish (the id is computed here).
+  on('POST', '/api/upload/url', async (request) => {
+    const body = await request.json<{ url?: string }>();
+    if (!body.url) throw badRequest('url is required');
+    return core.uploadFromUrl(String(body.url));
+  });
   on('POST', '/api/publish/external', async (request) => core.publisher.publishExternal(await request.json<ExternalPublishRequest>(2 * MiB)));
   on('GET', '/api/jobs', () => ({ jobs: [...core.publisher.jobs.values()].reverse() }));
   on('GET', '/api/jobs/:id', (request) => {
@@ -164,6 +172,8 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   // Profiles (each keeps its own nodes, settings, history and client id)
   on('GET', '/api/profiles', () => ({ profiles: core.profileSummaries(), active: core.store.data.data.activeProfile }));
   on('POST', '/api/profiles', async (request) => ({ profiles: await core.createProfile(await request.json()) }));
+  // Opens a hidden profile: the only way to one is its username and password.
+  on('POST', '/api/profiles/unlock', async (request) => core.unlockHidden(await request.json()));
   on('PATCH', '/api/profiles/:id', async (request) => ({ profiles: await core.updateProfile({ ...(await request.json()), id: request.params.id }) }));
   on('DELETE', '/api/profiles/:id', (request) => ({ profiles: core.deleteProfile(request.params.id) }));
   on('POST', '/api/profiles/:id/switch', async (request) => core.switchProfile({ ...(await request.json()), id: request.params.id }));

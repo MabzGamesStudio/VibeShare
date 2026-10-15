@@ -387,6 +387,8 @@ function ProfilesCard() {
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [hidden, setHidden] = useState(false);
+  const [unlockingHidden, setUnlockingHidden] = useState(false);
   const [unlocking, setUnlocking] = useState<ProfileSummary | null>(null);
   const [unlockUser, setUnlockUser] = useState('');
   const [unlockPassword, setUnlockPassword] = useState('');
@@ -394,14 +396,22 @@ function ProfilesCard() {
   const [protectUser, setProtectUser] = useState('');
   const [protectPassword, setProtectPassword] = useState('');
 
+  // A hidden profile that is active but sealed: the client is locked until it opens.
+  useEffect(() => {
+    if (state?.locked) setUnlockingHidden(true);
+  }, [state?.locked]);
+
   const create = async () => {
     try {
-      await api('/api/profiles', { body: { name, username: username || undefined, password: password || undefined } });
+      await api('/api/profiles', {
+        body: { name, username: username || undefined, password: password || undefined, hidden: hidden || undefined },
+      });
       setCreating(false);
       setName('');
       setUsername('');
       setPassword('');
-      toast('Profile created', 'success');
+      setHidden(false);
+      toast(hidden ? 'Hidden profile created — unlock it with its username and password' : 'Profile created', 'success');
       await refresh();
     } catch (error) {
       toast(errorMessage(error), 'error');
@@ -442,10 +452,23 @@ function ProfilesCard() {
           <UserRound size={20} />
           <h2>Profiles</h2>
         </div>
-        <button className="primary small" onClick={() => setCreating(true)}>
-          <Plus size={15} /> New profile
-        </button>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="small" title="Open a hidden profile with its username and password" onClick={() => setUnlockingHidden(true)}>
+            <Lock size={14} /> Unlock hidden
+          </button>
+          <button className="primary small" onClick={() => setCreating(true)}>
+            <Plus size={15} /> New profile
+          </button>
+        </div>
       </div>
+      {state?.locked && (
+        <div className="banner warn small">
+          <Lock size={16} />
+          <div>
+            <strong>A hidden profile is locked.</strong> Its data is encrypted on this device — unlock it with its username and password.
+          </div>
+        </div>
+      )}
       <p className="small muted">
         Each profile has its own nodes, settings, history and client id — like a separate account on this device. Public profiles open for
         anyone; protected ones need their username and password to switch to.
@@ -482,33 +505,37 @@ function ProfilesCard() {
                   Switch
                 </button>
               )}
-              <button
-                className="small"
-                title="Rename"
-                onClick={async () => {
-                  const next = window.prompt('Profile name', profile.name);
-                  if (next === null || !next.trim()) return;
-                  try {
-                    await api(`/api/profiles/${encodeURIComponent(profile.id)}`, { method: 'PATCH', body: { name: next.trim() } });
-                    await refresh();
-                  } catch (error) {
-                    toast(errorMessage(error), 'error');
-                  }
-                }}
-              >
-                <Pencil size={14} />
-              </button>
-              <button
-                className="small"
-                title={profile.access === 'protected' ? 'Change password or make public' : 'Protect with a username and password'}
-                onClick={() => {
-                  setProtecting(profile);
-                  setProtectUser(profile.username ?? '');
-                  setProtectPassword('');
-                }}
-              >
-                <Lock size={14} />
-              </button>
+              {!profile.hidden && (
+                <>
+                  <button
+                    className="small"
+                    title="Rename"
+                    onClick={async () => {
+                      const next = window.prompt('Profile name', profile.name);
+                      if (next === null || !next.trim()) return;
+                      try {
+                        await api(`/api/profiles/${encodeURIComponent(profile.id)}`, { method: 'PATCH', body: { name: next.trim() } });
+                        await refresh();
+                      } catch (error) {
+                        toast(errorMessage(error), 'error');
+                      }
+                    }}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    className="small"
+                    title={profile.access === 'protected' ? 'Change password or make public' : 'Protect with a username and password'}
+                    onClick={() => {
+                      setProtecting(profile);
+                      setProtectUser(profile.username ?? '');
+                      setProtectPassword('');
+                    }}
+                  >
+                    <Lock size={14} />
+                  </button>
+                </>
+              )}
               {!profile.active && (
                 <button
                   className="small danger"
@@ -537,7 +564,7 @@ function ProfilesCard() {
           actions={
             <>
               <button onClick={() => setCreating(false)}>Cancel</button>
-              <button className="primary" disabled={!name.trim()} onClick={create}>
+              <button className="primary" disabled={!name.trim() || (hidden && (!username.trim() || !password))} onClick={create}>
                 Create
               </button>
             </>
@@ -548,12 +575,19 @@ function ProfilesCard() {
               Name
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Work, Family, Anonymous…" autoFocus />
             </label>
+            <Switch
+              checked={hidden}
+              onChange={setHidden}
+              label="Hidden"
+            />
             <p className="small muted">
-              Leave the username and password empty for a public profile. A protected profile only opens with its username and password.
+              {hidden
+                ? 'A hidden profile does not appear anywhere — not even that it exists. Its name, client id and all of its data are encrypted with the password, and it only opens with its username and password.'
+                : 'Leave the username and password empty for a public profile. A protected profile only opens with its username and password.'}
             </p>
             <div className="form-grid">
               <label className="field">
-                Username (for a protected profile)
+                Username{hidden ? '' : ' (for a protected profile)'}
                 <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" />
               </label>
               <label className="field">
@@ -561,6 +595,50 @@ function ProfilesCard() {
                 <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
               </label>
             </div>
+          </div>
+        </Modal>
+      )}
+      {unlockingHidden && (
+        <Modal
+          title="Unlock a hidden profile"
+          onClose={() => setUnlockingHidden(false)}
+          actions={
+            <>
+              <button onClick={() => setUnlockingHidden(false)}>Cancel</button>
+              <button
+                className="primary"
+                disabled={!unlockUser.trim() || !unlockPassword}
+                onClick={async () => {
+                  try {
+                    await api('/api/profiles/unlock', { body: { username: unlockUser.trim(), password: unlockPassword } });
+                    setUnlockingHidden(false);
+                    setUnlockUser('');
+                    setUnlockPassword('');
+                    toast('Hidden profile unlocked', 'success');
+                    await refresh();
+                  } catch (error) {
+                    toast(errorMessage(error), 'error');
+                  }
+                }}
+              >
+                Unlock
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            <p className="small muted">
+              Hidden profiles do not appear anywhere — not even that they exist. Their data is encrypted on this device and only opens
+              with its username and password.
+            </p>
+            <label className="field">
+              Username
+              <input type="text" value={unlockUser} onChange={(e) => setUnlockUser(e.target.value)} autoFocus />
+            </label>
+            <label className="field">
+              Password
+              <input type="password" value={unlockPassword} onChange={(e) => setUnlockPassword(e.target.value)} autoComplete="current-password" />
+            </label>
           </div>
         </Modal>
       )}

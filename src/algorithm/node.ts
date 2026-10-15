@@ -6,6 +6,7 @@ import { contentIdOf, validateManifest } from '../shared/content.js';
 import { badRequest, forbidden, HttpError, notFound, readJson, requestJson, type Ctx } from '../shared/http.js';
 import { log } from '../shared/log.js';
 import { parseNodeRef } from '../shared/noderef.js';
+import { NodeClient } from '../shared/nodeclient.js';
 import {
   claimSigningPayload,
   SUGGESTION_KINDS,
@@ -16,6 +17,8 @@ import {
   type ClaimResponse,
   type FeedRequest,
   type Page,
+  type PeerDiscoverCriteria,
+  type PeerEntry,
   type Preferences,
   type ReportRequest,
   type ReportResponse,
@@ -62,6 +65,14 @@ export interface AlgorithmConfig extends BaseConfig {
    * never shown). Sources not listed are at 5, except VibeShare's own content at 10.
    */
   sources: { priorities: Record<string, number> };
+  /** Exchanging content metadata and discoveries with other nodes. */
+  peering: {
+    /**
+     * Other nodes (usually other algorithm nodes). `fetch`: this node may ask the peer
+     * for metadata and discoveries; `serve`: the peer may ask this node.
+     */
+    peers: { ref: string; fetch: boolean; serve: boolean }[];
+  };
 }
 
 export function algorithmDefaults(): AlgorithmConfig {
@@ -89,6 +100,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     pageSize: 24,
     crawler: crawlerDefaults(),
     sources: { priorities: { vibeshare: 10 } },
+    peering: { peers: [] },
   };
 }
 
@@ -397,6 +409,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     this.contributionRoutes();
+    this.peerRoutes();
     this.adminRoutes();
   }
 
@@ -815,6 +828,145 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Peering: nodes ask each other for content metadata (of a cid or a link) and
+  // for new ids and links matching some criteria.
+
+  /** The peer the caller is, when this node serves it. */
+  private requirePeer(ctx: Ctx): { ref: string; url: string; id: string } {
+    const account = this.auth.require(ctx);
+    for (const peer of this.config.peering.peers) {
+      if (!peer.serve) continue;
+      const ref = parseNodeRef(peer.ref);
+      if (ref?.id === account.id) return { ref: peer.ref, url: ref.url, id: ref.id };
+    }
+    throw forbidden('Not a peer of this node');
+  }
+
+  /** A client talking to one configured peer as this node. */
+  private peerClient(peer: { ref: string }): NodeClient {
+    const ref = parseNodeRef(peer.ref)!;
+    return new NodeClient({
+      url: ref.url,
+      expectedId: ref.id,
+      expectedType: ref.type ?? 'algorithm',
+      auth: 'identity',
+      identity: this.identity,
+      transport: () => this.transport(ref.url),
+    });
+  }
+
+  /** The peers this node may ask, optionally only one of them. */
+  private peersToFetch(only?: string): { ref: string }[] {
+    return this.config.peering.peers.filter((peer) => peer.fetch && (!only || peer.ref === only));
+  }
+
+  /** What peers see of an entry: more than the public catalog, less than the operator. */
+  private peerView(entry: Entry): PeerEntry {
+    const item = this.registry.view(entry);
+    return {
+      ...item,
+      sources: entry.sources,
+      status: entry.status,
+      platformStats: entry.platformStats && Object.keys(entry.platformStats).length ? entry.platformStats : undefined,
+    };
+  }
+
+  /** Entries matching what a peer asked for, by its criteria. */
+  discover(criteria: PeerDiscoverCriteria): PeerEntry[] {
+    const filters = criteria.filters ?? {};
+    const wantedRating = filters.maxRating ? RATINGS.indexOf(filters.maxRating) : RATINGS.length - 1;
+    const formats = filters.formats?.length ? new Set(filters.formats) : null;
+    const topics = filters.topics?.length ? new Set(filters.topics.map(normalizeTag)) : null;
+    const tags = filters.tags?.length ? new Set(filters.tags.map(normalizeTag)) : null;
+    const metrics = criteria.metrics ?? [];
+    const wanted = this.registry.all().filter((entry) => {
+      if (entry.status === 'blocked') return false;
+      if (criteria.platform && sourceKeyOf(entry) !== criteria.platform) return false;
+      const has = criteria.has ?? 'any';
+      if (has === 'cid' && !entry.contentId) return false;
+      if (has === 'link' && !entry.link) return false;
+      if (has === 'both' && !(entry.contentId && entry.link)) return false;
+      if (formats && !formats.has(entry.format)) return false;
+      if (RATINGS.indexOf(entry.rating) > wantedRating) return false;
+      if (topics && !entry.topics.some((topic) => topics.has(normalizeTag(topic)))) return false;
+      if (tags && !entry.tags.some((tag) => tags.has(normalizeTag(tag)))) return false;
+      for (const metric of metrics) {
+        const value = entry.platformStats?.[metric.key];
+        if (value === undefined) return false;
+        if (metric.min !== undefined && value < metric.min) return false;
+        if (metric.max !== undefined && value > metric.max) return false;
+      }
+      return true;
+    });
+    const score = (entry: Entry) => Object.values(entry.platformStats ?? {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
+    const algorithm = criteria.algorithm ?? 'new';
+    if (algorithm === 'random') {
+      for (let i = wanted.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [wanted[i], wanted[j]] = [wanted[j], wanted[i]];
+      }
+    } else if (algorithm === 'popular') {
+      wanted.sort((a, b) => score(b) - score(a) || b.publishedAt.localeCompare(a.publishedAt));
+    } else {
+      wanted.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+    }
+    return wanted
+      .slice(0, Math.min(200, Math.max(1, Number(criteria.limit) || 50)))
+      .map((entry) => this.peerView(entry));
+  }
+
+  /** Takes a peer's entry into the catalog as pending (the operator decides after). */
+  private adoptPeerEntry(item: PeerEntry): void {
+    const key = baseId(item.id);
+    const existing = this.registry.get(key);
+    if (!existing) {
+      this.registry.upsert({
+        id: key,
+        status: 'pending',
+        origin: 'peer',
+        title: item.title,
+        description: item.description,
+        format: item.format,
+        rating: item.rating,
+        topics: item.topics,
+        tags: item.tags,
+        language: item.language,
+        durationSeconds: item.durationSeconds,
+        publishedAt: item.publishedAt,
+        pageUrl: item.pageUrl,
+        thumbnailUrl: /^https?:/.test(item.thumbnail ?? '') ? item.thumbnail : undefined,
+      });
+    }
+    const entry = this.registry.get(key);
+    if (entry && item.platformStats) {
+      const stats = entry.platformStats ?? {};
+      for (const [name, value] of Object.entries(item.platformStats)) stats[name] = Math.max(stats[name] ?? -1, value);
+      entry.platformStats = stats;
+      this.registry.changed();
+    }
+  }
+
+  private peerRoutes(): void {
+    const router = this.router;
+    const peer = (ctx: Ctx) => this.requirePeer(ctx);
+
+    router.post('/v1/peers/metadata', async (ctx) => {
+      peer(ctx);
+      const body = await readJson<{ id?: string; link?: string }>(ctx.req);
+      const ref = String(body.id ?? body.link ?? '').trim();
+      if (!ref) throw badRequest('id or link is required');
+      const entry = this.registry.findByRef(ref);
+      return { entry: entry ? this.peerView(entry) : null };
+    });
+
+    router.post('/v1/peers/discover', async (ctx) => {
+      peer(ctx);
+      const body = await readJson<{ criteria?: PeerDiscoverCriteria }>(ctx.req);
+      return { items: this.discover(body.criteria ?? {}) };
+    });
+  }
+
   private adminRoutes(): void {
     const router = this.router;
     const admin = (ctx: Ctx) => this.requireAdmin(ctx);
@@ -988,6 +1140,65 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       admin(ctx);
       const body = await readJson<{ provider?: string; limit?: number }>(ctx.req);
       return this.importCatalog(String(body.provider ?? ''), Math.min(1000, Number(body.limit ?? 200)));
+    });
+    // Peering with other nodes: metadata of a cid or a link, and discoveries by criteria.
+    router.get('/v1/admin/peers', (ctx) => {
+      admin(ctx);
+      return { peers: this.config.peering.peers };
+    });
+    router.put('/v1/admin/peers', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ peers?: { ref: string; fetch?: boolean; serve?: boolean }[] }>(ctx.req);
+      const peers = (body.peers ?? []).slice(0, 100).map((entry) => {
+        const ref = parseNodeRef(String(entry.ref ?? ''));
+        if (!ref) throw badRequest('Every peer must be a node reference');
+        return { ref: String(entry.ref).trim(), fetch: entry.fetch !== false, serve: entry.serve !== false };
+      });
+      this.configFile.data.peering = { peers };
+      this.configFile.changed();
+      return { peers };
+    });
+    router.post('/v1/admin/peers/metadata', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ peer?: string; id?: string; link?: string; adopt?: boolean }>(ctx.req);
+      const peers = this.peersToFetch(body.peer);
+      if (!peers.length) throw badRequest('No peer set to fetch from');
+      const ref = String(body.id ?? body.link ?? '').trim();
+      if (!ref) throw badRequest('id or link is required');
+      const results: { peer: string; entry?: PeerEntry; error?: string }[] = [];
+      for (const entry of peers) {
+        try {
+          const answer = await this.peerClient(entry).json<{ entry: PeerEntry | null }>('/v1/peers/metadata', {
+            body: { id: body.id, link: body.link },
+            timeoutMs: 30000,
+          });
+          if (answer.entry && body.adopt) this.adoptPeerEntry(answer.entry);
+          results.push({ peer: entry.ref, entry: answer.entry ?? undefined });
+        } catch (error) {
+          results.push({ peer: entry.ref, error: (error as Error).message });
+        }
+      }
+      return { results };
+    });
+    router.post('/v1/admin/peers/discover', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ peer?: string; criteria?: PeerDiscoverCriteria; adopt?: boolean }>(ctx.req);
+      const peers = this.peersToFetch(body.peer);
+      if (!peers.length) throw badRequest('No peer set to fetch from');
+      const results: { peer: string; items: PeerEntry[]; error?: string }[] = [];
+      for (const entry of peers) {
+        try {
+          const answer = await this.peerClient(entry).json<{ items: PeerEntry[] }>('/v1/peers/discover', {
+            body: { criteria: body.criteria ?? {} },
+            timeoutMs: 60000,
+          });
+          if (body.adopt) for (const item of answer.items) this.adoptPeerEntry(item);
+          results.push({ peer: entry.ref, items: answer.items });
+        } catch (error) {
+          results.push({ peer: entry.ref, items: [], error: (error as Error).message });
+        }
+      }
+      return { results };
     });
   }
 

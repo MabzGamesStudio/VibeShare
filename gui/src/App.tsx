@@ -1,4 +1,4 @@
-import { Coins, Columns2, Compass, History, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
+import { Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry } from '../../src/shared/clientapi';
@@ -188,7 +188,23 @@ export function App() {
               </div>
             </div>
           ) : (
-            <Routes>
+            <>
+              {state?.locked && (
+                <div className="banner warn" style={{ margin: '12px 16px 0' }}>
+                  <Lock size={18} />
+                  <div>
+                    <strong>A hidden profile is locked.</strong>{' '}
+                    <span className="small">
+                      Its data is encrypted on this device — unlock it in{' '}
+                      <Link className="link" to="/settings#profiles">
+                        Settings → Profiles
+                      </Link>{' '}
+                      with its username and password.
+                    </span>
+                  </div>
+                </div>
+              )}
+              <Routes>
               <Route path="/" element={<PageRoute id="videos" />} />
               <Route path="/p/:id" element={<PageRoute />} />
               <Route path="/dual" element={<DualPage />} />
@@ -204,6 +220,7 @@ export function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<PageRoute id="videos" />} />
             </Routes>
+            </>
           )}
         </div>
         {creating && (

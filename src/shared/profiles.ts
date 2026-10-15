@@ -15,6 +15,8 @@ export interface ProfileAccessPassword {
   salt: string;
   /** Iterated SHA-256 of `salt:username:password` (PROFILE_HASH_ROUNDS rounds). */
   hash: string;
+  /** Hex salt of the encryption key of a hidden profile's sealed data. */
+  keySalt?: string;
 }
 
 export type ProfileAccess = ProfileAccessPublic | ProfileAccessPassword;
@@ -29,6 +31,55 @@ export function randomProfileSalt(): string {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   return toHex(bytes);
+}
+
+function fromHex(text: string): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(new ArrayBuffer(text.length / 2));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(text.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Sealed (encrypted) profile data: hidden profiles keep everything — their name,
+// their client id, their nodes, settings and history — in one AES-GCM blob that
+// only opens with the profile's password.
+
+/** A WebCrypto AES-GCM key (typed from the platform's own subtle crypto). */
+export type SealKey = Awaited<ReturnType<(typeof globalThis)['crypto']['subtle']['deriveKey']>>;
+
+export interface SealedBlob {
+  v: 1;
+  /** Hex initialisation vector of AES-GCM. */
+  iv: string;
+  /** Hex ciphertext. */
+  data: string;
+}
+
+/** The encryption key of a hidden profile, derived from its password (PBKDF2). */
+export function profileSealKey(password: string, keySalt: string): Promise<SealKey> {
+  return globalThis.crypto.subtle
+    .importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
+    .then((material) =>
+      globalThis.crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: fromHex(keySalt), iterations: 100_000, hash: 'SHA-256' },
+        material,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      )
+    );
+}
+
+export async function sealProfile(payload: unknown, key: SealKey): Promise<SealedBlob> {
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const data = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payload)));
+  return { v: 1, iv: toHex(iv), data: toHex(new Uint8Array(data)) };
+}
+
+/** Opens a sealed profile. Throws when the password (and so the key) is wrong. */
+export async function unsealProfile<T>(blob: SealedBlob, key: SealKey): Promise<T> {
+  const plain = await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromHex(blob.iv) }, key, fromHex(blob.data));
+  return JSON.parse(new TextDecoder().decode(plain)) as T;
 }
 
 export async function hashProfilePassword(password: string, salt: string, username = '', rounds = PROFILE_HASH_ROUNDS): Promise<string> {

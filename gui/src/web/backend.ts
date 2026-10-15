@@ -158,7 +158,7 @@ export async function createBackend(options: BackendOptions): Promise<Backend> {
     const method = request.method === 'HEAD' ? 'GET' : request.method;
     try {
       if (path.startsWith('/stream/') && method === 'GET') return await stream(request, decodeURIComponent(path.slice(8)), url);
-      if (path === '/api/upload' && method === 'POST') return json(200, uploads.put(await request.blob()));
+      if (path === '/api/upload' && method === 'POST') return json(200, uploads.putBlob(await request.blob()));
       if (path === '/api/services' && method === 'GET') return json(200, UNAVAILABLE_SERVICE);
       if (path === '/api/services/sync' && method === 'POST') return json(200, UNAVAILABLE_SERVICE);
       if (path === '/api/nodes' && method === 'POST') {

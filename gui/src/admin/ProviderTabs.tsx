@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CopyButton, Loading, Modal, StatusDot } from '../components/ui';
+import { CopyButton, Loading, Modal, StatusDot, Switch } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
@@ -228,6 +228,7 @@ interface ContentDetailsData {
 function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) {
   const [data, setData] = useState<ContentDetailsData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toast, show] = useToast();
   useEffect(() => {
     admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`).then(setData).catch((e) => setError(message(e)));
   }, [cid]);
@@ -289,6 +290,37 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             <dd>{data.record.duplicates?.length ? data.record.duplicates.join(' · ') : 'None reported'}</dd>
           </dl>
           {meta.description && <p className="small">{meta.description}</p>}
+          <div className="row">
+            <button
+              className="small"
+              onClick={async () => {
+                try {
+                  const result = await admin<{ fetched: number; missing: number }>('/v1/admin/peers/fetch', { body: { cid: data.record.cid } });
+                  show(`Pulled ${result.fetched} missing chunk${result.fetched === 1 ? '' : 's'} from peers${result.missing ? ` (${result.missing} still missing)` : ''}`);
+                } catch (e) {
+                  show(message(e));
+                }
+              }}
+            >
+              Fetch missing chunks from peers
+            </button>
+            <button
+              className="small"
+              onClick={async () => {
+                try {
+                  const result = await admin<{ results: { peer: string; sent: number; error?: string }[] }>('/v1/admin/peers/push', {
+                    body: { cid: data.record.cid },
+                  });
+                  show(result.results.map((r) => `${r.peer.slice(0, 24)}: ${r.sent} sent${r.error ? ` (${r.error})` : ''}`).join(' · ') || 'No peer sent to');
+                } catch (e) {
+                  show(message(e));
+                }
+              }}
+            >
+              Send content to peers
+            </button>
+            {toast && <span className="small">{toast}</span>}
+          </div>
           {data.suggestions && data.suggestions.length > 0 && (
             <div>
               <h3>Client suggestions</h3>
@@ -550,8 +582,112 @@ function Storage() {
   );
 }
 
+interface PeerRow {
+  ref: string;
+  send: boolean;
+  receive: boolean;
+}
+
+/** Other content providers this node exchanges content bytes (chunks) with. */
+function Peering() {
+  const [peers, setPeers] = useState<PeerRow[] | null>(null);
+  const [acceptPush, setAcceptPush] = useState(true);
+  const [ref, setRef] = useState('');
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ peers: PeerRow[]; acceptPush: boolean }>('/v1/admin/peers')
+      .then((r) => {
+        setPeers(r.peers);
+        setAcceptPush(r.acceptPush);
+      })
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const save = async (next: PeerRow[], push = acceptPush) => {
+    setPeers(next);
+    setAcceptPush(push);
+    try {
+      await admin('/v1/admin/peers', { method: 'PUT', body: { peers: next, acceptPush: push } });
+    } catch (e) {
+      show(message(e));
+      load();
+    }
+  };
+
+  return (
+    <div className="card form-stack">
+      <h3>Peering with other providers</h3>
+      <p className="small muted">
+        Peer content providers exchange content bytes: every chunk is addressed by the hash of its bytes, so a peer can fetch what it is
+        missing and send what the others lack. <strong>Send</strong> lets this node serve and push chunks to the peer; <strong>Receive</strong>{' '}
+        lets it fetch missing chunks from the peer and accept the peer's pushes.
+      </p>
+      {!peers ? (
+        <Loading />
+      ) : (
+        <>
+          {peers.map((peer, index) => (
+            <div key={peer.ref} className="row between small">
+              <code className="tiny">{peer.ref.length > 60 ? peer.ref.slice(0, 60) + '…' : peer.ref}</code>
+              <div className="row" style={{ gap: 10 }}>
+                <label className="row small" style={{ gap: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={peer.send}
+                    onChange={(e) => void save(peers.map((p, i) => (i === index ? { ...p, send: e.target.checked } : p)))}
+                  />
+                  Send
+                </label>
+                <label className="row small" style={{ gap: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={peer.receive}
+                    onChange={(e) => void save(peers.map((p, i) => (i === index ? { ...p, receive: e.target.checked } : p)))}
+                  />
+                  Receive
+                </label>
+                <button className="small danger" onClick={() => void save(peers.filter((_, i) => i !== index))}>
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="row">
+            <input
+              type="text"
+              className="mono"
+              placeholder="vs:provider:vk1…@https://other.example.org"
+              value={ref}
+              onChange={(e) => setRef(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button
+              disabled={!ref.trim()}
+              onClick={async () => {
+                await save([...peers, { ref: ref.trim(), send: true, receive: true }]);
+                setRef('');
+              }}
+            >
+              Add peer
+            </button>
+          </div>
+          <Switch checked={acceptPush} onChange={(push) => void save(peers, push)} label="Accept chunks peers push to this node" />
+        </>
+      )}
+      {toast && <div className="banner info small">{toast}</div>}
+    </div>
+  );
+}
+
 export function ProviderTabs({ tab }: { tab: string }) {
   if (tab === 'content') return <Content />;
-  if (tab === 'storage') return <Storage />;
+  if (tab === 'storage')
+    return (
+      <>
+        <Storage />
+        <Peering />
+      </>
+    );
   return null;
 }

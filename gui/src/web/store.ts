@@ -59,6 +59,8 @@ export function memoryKeyValue(): KeyValue {
 class SavedDoc<T> implements Doc<T> {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pending: Promise<void> = Promise.resolve();
+  /** Applied to the copy that is written out (e.g. to seal hidden profiles at rest). */
+  prepare?: (data: T) => T;
 
   constructor(
     private readonly kv: KeyValue,
@@ -75,7 +77,7 @@ class SavedDoc<T> implements Doc<T> {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     // JSON round trip: the data is plain JSON, and this drops anything that is not.
-    const snapshot = JSON.parse(JSON.stringify(this.data));
+    const snapshot = JSON.parse(JSON.stringify(this.prepare ? this.prepare(this.data) : this.data));
     this.pending = this.pending.then(() => this.kv.set(this.key, snapshot)).catch((error) => console.error('Could not save', error));
     return this.pending;
   }
@@ -118,6 +120,11 @@ export class WebStore implements ClientStoreLike {
     this.identity = identityFromSeed(seed);
     void this.kv.set('identity', { seed: formatSeed(this.identity.seed), id: this.identity.id });
     return this.identity;
+  }
+
+  /** While a hidden profile is active, its identity is not kept in the clear at rest. */
+  hideIdentity(): void {
+    void this.kv.set('identity', { sealed: true });
   }
 
   /** Resolves once every change so far is stored. */
@@ -195,10 +202,15 @@ export class WebChunkCache implements ChunkStore {
 export class MemoryUploads implements UploadStore {
   private files = new Map<string, Blob>();
 
-  put(file: Blob): { fileId: string; size: number } {
+  putBlob(file: Blob): { fileId: string; size: number } {
     const fileId = randomId('f', 10);
     this.files.set(fileId, file);
     return { fileId, size: file.size };
+  }
+
+  /** Takes bytes (e.g. pulled from a URL by the client) as a file to publish. */
+  async put(data: Uint8Array): Promise<{ fileId: string; size: number }> {
+    return this.putBlob(new Blob([data as BlobPart]));
   }
 
   async get(fileId: string): Promise<UploadedFile> {

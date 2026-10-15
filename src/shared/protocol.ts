@@ -293,7 +293,7 @@ export interface ContentItem {
   link?: string;
 }
 
-export type ContentOrigin = 'operator' | 'submission' | 'crawler' | 'report';
+export type ContentOrigin = 'operator' | 'submission' | 'crawler' | 'report' | 'peer';
 
 export interface ContentMedia {
   url: string;
@@ -458,6 +458,48 @@ export interface ProviderSuggestionResponse {
   /** True when the node did not already have this suggestion (the only case that pays). */
   newInfo: boolean;
   credited: number;
+}
+
+// ---------------------------------------------------------------------------
+// Peering between search algorithm nodes: metadata by id or link, and discoveries.
+
+/** Metadata about one content, as nodes share it with their peers. */
+export interface PeerEntry {
+  id: string;
+  contentId?: string;
+  link?: string;
+  sources: string[];
+  status: 'listed' | 'blocked' | 'pending';
+  title: string;
+  description?: string;
+  format: Format;
+  rating: Rating;
+  topics: string[];
+  tags: string[];
+  language?: string;
+  durationSeconds?: number;
+  creator?: CreatorInfo;
+  thumbnail?: string;
+  pageUrl?: string;
+  origin?: ContentOrigin;
+  publishedAt: string;
+  platformStats?: Record<string, number>;
+  providers?: string[];
+}
+
+/** What a node asks a peer for: content matching some criteria. */
+export interface PeerDiscoverCriteria {
+  /** Only content of this source (youtube, reddit…). */
+  platform?: string;
+  /** Only content that has a content id, a link, or both. */
+  has?: 'any' | 'cid' | 'link' | 'both';
+  /** Only content whose platform numbers (views, likes, comments…) are in these ranges. */
+  metrics?: { key: string; min?: number; max?: number }[];
+  /** Content filters: formats, a rating ceiling, topics and tags. */
+  filters?: { formats?: Format[]; maxRating?: Rating; topics?: string[]; tags?: string[] };
+  /** How the peer picks from what matches: its newest, its most popular, or at random. */
+  algorithm?: 'new' | 'popular' | 'random';
+  limit?: number;
 }
 
 export interface SubmissionRequest {

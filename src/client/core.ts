@@ -11,6 +11,8 @@ import type {
   PageFilters,
   PageSource,
   ProfileSummary,
+  PublishPreview,
+  PublishRequest,
   Settings,
 } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
@@ -24,15 +26,20 @@ import {
   encodeProfileSeed,
   hashProfilePassword,
   newProfileSeed,
+  profileSealKey,
   randomProfileSalt,
+  sealProfile,
+  unsealProfile,
   verifyProfilePassword,
   type ProfileAccess,
+  type SealKey,
 } from '../shared/profiles.js';
 import { SOFTWARE, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
-import type { ChunkStore, ClientStoreLike, ProfileRecord, UploadStore } from './model.js';
+import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
+import { prepareClientSave } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
 
@@ -77,13 +84,22 @@ export class ClientCore {
   readonly fetcher: Fetcher;
   readonly publisher: Publisher;
   readonly cache: ChunkStore;
+  readonly uploads: UploadStore;
 
   constructor(readonly options: ClientCoreOptions) {
     this.store = options.store;
     this.cache = options.cache;
+    this.uploads = options.uploads;
     this.nodes = new NodeManager(this.store, options.transport);
     this.fetcher = new Fetcher(this.nodes, this.cache);
     this.publisher = new Publisher(this.store, this.nodes, options.uploads);
+    // Hidden profiles are encrypted at rest: what is written out is the sealed form.
+    this.store.data.prepare = prepareClientSave;
+    const storeChanged = this.store.changed.bind(this.store);
+    this.store.changed = () => {
+      storeChanged();
+      this.scheduleSeal();
+    };
   }
 
   get settings(): Settings {
@@ -99,6 +115,7 @@ export class ClientCore {
       subscriptions: this.store.data.data.subscriptions,
       profiles: this.profileSummaries(),
       activeProfile: this.store.data.data.activeProfile ?? 'main',
+      locked: this.isLocked(),
     };
   }
 
@@ -341,61 +358,195 @@ export class ClientCore {
   }
 
   /** Saves the live data and client id into the active profile's slot. */
-  private snapshotProfile(): void {
+  private async snapshotProfile(): Promise<void> {
     const data = this.store.data.data;
     this.ensureProfiles();
     const record = data.profiles.find((profile) => profile.id === data.activeProfile);
     if (!record) return;
-    record.nodes = data.nodes;
-    record.settings = data.settings;
-    record.subscriptions = data.subscriptions;
-    record.library = data.library;
-    record.history = data.history;
-    record.identitySeed = encodeProfileSeed(this.store.identity.seed);
+    const payload: ProfilePayload = {
+      name: record.name,
+      identitySeed: encodeProfileSeed(this.store.identity.seed),
+      nodes: data.nodes,
+      settings: data.settings,
+      subscriptions: data.subscriptions,
+      library: data.library,
+      history: data.history,
+    };
+    if (record.hidden) {
+      // A hidden profile is only ever stored sealed; the plaintext fields are emptied.
+      const key = this.sealKeys.get(record.id);
+      if (key) record.sealed = await sealProfile(payload, key);
+      record.name = '';
+      record.identitySeed = '';
+      record.nodes = [];
+      record.settings = defaultSettings();
+      record.subscriptions = [];
+      record.library = [];
+      record.history = [];
+      void this.store.hideIdentity?.();
+    } else {
+      record.identitySeed = payload.identitySeed;
+      record.nodes = payload.nodes;
+      record.settings = payload.settings;
+      record.subscriptions = payload.subscriptions;
+      record.library = payload.library;
+      record.history = payload.history;
+    }
+  }
+
+  /** The payload of a profile: from its fields, or from its sealed blob when hidden. */
+  private payloadOf(record: ProfileRecord): ProfilePayload {
+    return {
+      name: record.name,
+      identitySeed: record.identitySeed,
+      nodes: record.nodes,
+      settings: record.settings,
+      subscriptions: record.subscriptions,
+      library: record.library,
+      history: record.history,
+    };
+  }
+
+  /** Loads a profile's payload into the live fields and takes its client id. */
+  private loadProfile(record: ProfileRecord, payload: ProfilePayload, previousSettings: Settings): void {
+    const data = this.store.data.data;
+    record.name = payload.name;
+    record.identitySeed = payload.identitySeed;
+    record.nodes = payload.nodes;
+    record.settings = payload.settings;
+    record.subscriptions = payload.subscriptions;
+    record.library = payload.library;
+    record.history = payload.history;
+    data.nodes = payload.nodes;
+    data.settings = normalizeSettings(payload.settings);
+    data.subscriptions = payload.subscriptions;
+    data.library = payload.library;
+    data.history = payload.history;
+    data.activeProfile = record.id;
+    this.store.replaceIdentity(decodeProfileSeed(payload.identitySeed));
+    this.store.changed();
+    this.options.onSettings?.(previousSettings, data.settings);
+    void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
+  }
+
+  /** Keys of hidden profiles opened in this session (kept in memory only). */
+  private sealKeys = new Map<string, SealKey>();
+  private sealTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Keeps the sealed blob of an active hidden profile current on every change. */
+  private scheduleSeal(): void {
+    const data = this.store.data.data;
+    const record = data.profiles?.find((profile) => profile.id === data.activeProfile && profile.hidden);
+    if (!record || !this.sealKeys.has(record.id) || this.sealTimer) return;
+    this.sealTimer = setTimeout(() => {
+      this.sealTimer = null;
+      void this.sealActive(record).catch((error) => log.debug(`Could not seal the hidden profile: ${errorText(error)}`));
+    }, 25);
+  }
+
+  private async sealActive(record: ProfileRecord): Promise<void> {
+    const key = this.sealKeys.get(record.id);
+    if (!key) return;
+    const data = this.store.data.data;
+    record.sealed = await sealProfile(
+      {
+        name: record.name,
+        identitySeed: encodeProfileSeed(this.store.identity.seed),
+        nodes: data.nodes,
+        settings: data.settings,
+        subscriptions: data.subscriptions,
+        library: data.library,
+        history: data.history,
+      },
+      key
+    );
+    void this.store.hideIdentity?.();
+  }
+
+  /** True while a hidden profile is active but still sealed (locked). */
+  private isLocked(): boolean {
+    const data = this.store.data.data;
+    const record = (data.profiles ?? []).find((profile) => profile.id === data.activeProfile && profile.hidden);
+    return Boolean(record && (record.sealed || record.hidden) && !this.sealKeys.has(record.id));
   }
 
   profileSummaries(): ProfileSummary[] {
     const data = this.store.data.data;
-    if (!data.profiles?.length) {
+    const profiles = data.profiles ?? [];
+    if (!profiles.length) {
       return [{ id: data.activeProfile || 'main', name: this.settings.profile.name || 'Main', access: 'public', active: true }];
     }
-    return data.profiles.map((profile) => ({
-      id: profile.id,
-      name: profile.name,
-      access: profile.access.mode === 'password' ? 'protected' : 'public',
-      username: profile.access.mode === 'password' ? profile.access.username : undefined,
-      active: profile.id === data.activeProfile,
-    }));
+    const out: ProfileSummary[] = [];
+    for (const profile of profiles) {
+      const active = profile.id === data.activeProfile;
+      if (profile.hidden) {
+        // Hidden profiles do not appear in the list at all. When one is active the
+        // client shows only that it is inside one, never its name.
+        if (active) out.push({ id: profile.id, name: 'Hidden profile', access: 'protected', hidden: true, active: true });
+        continue;
+      }
+      out.push({
+        id: profile.id,
+        name: profile.name,
+        access: profile.access.mode === 'password' ? 'protected' : 'public',
+        username: profile.access.mode === 'password' ? profile.access.username : undefined,
+        active,
+      });
+    }
+    return out;
   }
 
   /** Creates a fresh profile (default settings, no nodes, its own client id). */
-  async createProfile(body: { name?: string; username?: string; password?: string }): Promise<ProfileSummary[]> {
+  async createProfile(body: { name?: string; username?: string; password?: string; hidden?: boolean }): Promise<ProfileSummary[]> {
     const data = this.store.data.data;
-    this.snapshotProfile();
+    await this.snapshotProfile();
     const name = String(body.name ?? '').trim().slice(0, 60);
     if (!name) throw badRequest('A profile name is required');
-    if (data.profiles.some((profile) => profile.name.toLowerCase() === name.toLowerCase())) {
+    const hidden = Boolean(body.hidden);
+    const username = String(body.username ?? '').trim().slice(0, 60);
+    const password = String(body.password ?? '');
+    if (hidden && (!username || !password)) throw badRequest('A hidden profile needs a username and a password');
+    if (!hidden && data.profiles.some((profile) => !profile.hidden && profile.name.toLowerCase() === name.toLowerCase())) {
       throw badRequest('There is already a profile with that name');
     }
-    const password = String(body.password ?? '');
     let access: ProfileAccess = { mode: 'public' };
     if (password) {
-      const username = String(body.username ?? '').trim().slice(0, 60);
       if (!username) throw badRequest('A username is needed with a password');
       const salt = randomProfileSalt();
       access = { mode: 'password', username, salt, hash: await hashProfilePassword(password, salt, username) };
     }
-    data.profiles.push({
-      id: `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const payload: ProfilePayload = {
       name,
-      access,
       identitySeed: encodeProfileSeed(newProfileSeed()),
       nodes: [],
       settings: defaultSettings(),
       subscriptions: [],
       library: [],
       history: [],
-    });
+    };
+    if (hidden) {
+      // A hidden profile is created sealed: its name, client id and data are encrypted
+      // with a key derived from the password, and it never appears in the profile list.
+      const keySalt = randomProfileSalt();
+      const key = await profileSealKey(password, keySalt);
+      (access as { keySalt?: string }).keySalt = keySalt;
+      data.profiles.push({
+        id,
+        name: '',
+        access,
+        hidden: true,
+        sealed: await sealProfile(payload, key),
+        identitySeed: '',
+        nodes: [],
+        settings: defaultSettings(),
+        subscriptions: [],
+        library: [],
+        history: [],
+      });
+    } else {
+      data.profiles.push({ ...payload, id, name, access });
+    }
     this.store.changed();
     return this.profileSummaries();
   }
@@ -406,26 +557,45 @@ export class ClientCore {
     this.ensureProfiles();
     const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
     if (!target) throw notFound('No such profile');
-    if (target.id !== data.activeProfile) {
+    // A hidden profile that is active but still sealed is opened in place.
+    if (target.id !== data.activeProfile || (target.hidden && !this.sealKeys.has(target.id))) {
+      const password = String(body.password ?? '');
       if (target.access.mode === 'password') {
-        const ok = await verifyProfilePassword(target.access, String(body.username ?? ''), String(body.password ?? ''));
+        const ok = await verifyProfilePassword(target.access, String(body.username ?? ''), password);
         if (!ok) throw badRequest('Wrong username or password for this profile');
       }
-      this.snapshotProfile();
-      const previousSettings = data.settings;
-      data.nodes = target.nodes;
-      data.settings = normalizeSettings(target.settings);
-      data.subscriptions = target.subscriptions;
-      data.library = target.library;
-      data.history = target.history;
-      data.activeProfile = target.id;
-      this.store.replaceIdentity(decodeProfileSeed(target.identitySeed));
-      this.nodes.resetSessions();
-      this.store.changed();
-      this.options.onSettings?.(previousSettings, data.settings);
-      void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
+      let payload: ProfilePayload;
+      if (target.hidden) {
+        // A hidden profile opens only with its username and password: the key derived
+        // from the password decrypts its data (nothing else can read it).
+        if (target.access.mode !== 'password' || !target.sealed) throw badRequest('This hidden profile cannot be opened');
+        const key = await profileSealKey(password, target.access.keySalt ?? target.access.salt);
+        try {
+          payload = await unsealProfile<ProfilePayload>(target.sealed, key);
+        } catch {
+          throw badRequest('Wrong username or password for this profile');
+        }
+        await this.snapshotProfile();
+        this.sealKeys.set(target.id, key);
+      } else {
+        await this.snapshotProfile();
+        payload = this.payloadOf(target);
+      }
+      for (const id of [...this.sealKeys.keys()]) if (id !== target.id) this.sealKeys.delete(id);
+      this.loadProfile(target, payload, data.settings);
     }
     return this.state();
+  }
+
+  /** Opens a hidden profile: the only way in is its username and password. */
+  async unlockHidden(body: { username?: string; password?: string }): Promise<ClientState> {
+    const data = this.store.data.data;
+    const username = String(body.username ?? '');
+    const target = (data.profiles ?? []).find(
+      (profile) => profile.hidden && profile.access.mode === 'password' && profile.access.username === username
+    );
+    if (!target) throw badRequest('Wrong username or password for a hidden profile');
+    return this.switchProfile({ id: target.id, username, password: String(body.password ?? '') });
   }
 
   /** Renames a profile and changes or clears its username/password protection. */
@@ -434,6 +604,7 @@ export class ClientCore {
     this.ensureProfiles();
     const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
     if (!target) throw notFound('No such profile');
+    if (target.hidden) throw badRequest('A hidden profile is managed only through its unlock dialog');
     if (body.name !== undefined) {
       const name = String(body.name).trim().slice(0, 60);
       if (!name) throw badRequest('A profile name is required');
@@ -524,6 +695,35 @@ export class ClientCore {
       })
     );
     return { nodes: results };
+  }
+
+  /** The content id an upload will have, computed on this client before publishing. */
+  async previewPublish(request: PublishRequest): Promise<PublishPreview> {
+    return this.publisher.preview(request);
+  }
+
+  /**
+   * Pulls the data behind a URL into this client as a file to publish, e.g. when
+   * suggesting missing content: the content id is then computed here and the bytes are
+   * uploaded from this device.
+   */
+  async uploadFromUrl(rawUrl: string): Promise<{ fileId: string; size: number; name: string; mime: string }> {
+    let url: URL;
+    try {
+      url = new URL(String(rawUrl ?? ''));
+    } catch {
+      throw badRequest('Not a URL');
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw badRequest('Only http(s) URLs can be pulled');
+    const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(300_000) });
+    if (!response.ok) throw badRequest(`The URL answered ${response.status}`);
+    const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim() || 'application/octet-stream';
+    const name = (decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() ?? '') || 'file').slice(0, 255);
+    const stream = response.body;
+    const stored = stream && this.uploads.putStream
+      ? await this.uploads.putStream(stream)
+      : await this.uploads.put(new Uint8Array(await response.arrayBuffer()));
+    return { ...stored, name, mime };
   }
 
   async contributions() {

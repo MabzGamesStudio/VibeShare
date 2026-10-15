@@ -1,6 +1,6 @@
 import { randomId, signData } from '../shared/crypto.js';
 import { buildManifest, contentIdOf, DEFAULT_CHUNK_SIZE, signManifest, validateManifest, type Manifest } from '../shared/content.js';
-import type { ExternalPublishRequest, Job, JobStep, LibraryItem, NodeEntry, PublishRequest } from '../shared/clientapi.js';
+import type { ExternalPublishRequest, Job, JobStep, LibraryItem, NodeEntry, PublishPreview, PublishRequest } from '../shared/clientapi.js';
 import { badRequest } from '../shared/errors.js';
 import { claimSigningPayload, type SubmissionRequest } from '../shared/protocol.js';
 import { formatSource, sourceFromUrl, withSources, parseSource } from '../shared/sources.js';
@@ -71,6 +71,51 @@ export class Publisher {
     return job;
   }
 
+  /**
+   * The manifest (and so the content id) an upload will have, computed here on the
+   * client before anything is published. `publish` with the same request and this
+   * manifest uploads exactly these chunks under exactly this id.
+   */
+  async preview(request: PublishRequest): Promise<PublishPreview> {
+    if (!/^f[a-z2-7]{16}$/.test(String(request.fileId))) throw badRequest('Bad file id');
+    const file = await this.uploads.get(request.fileId);
+    if (!request.title?.trim()) throw badRequest('A title is required');
+    const sources = this.parseSources(request.sources);
+    const manifest = await this.buildManifest(file, request, sources);
+    return {
+      cid: contentIdOf(manifest),
+      id: withSources(contentIdOf(manifest), sources.map((text) => parseSource(text)!)),
+      manifest,
+      size: manifest.size,
+    };
+  }
+
+  /** Builds (and signs, when asked) the manifest of a file, exactly as publishing does. */
+  private async buildManifest(file: UploadedFile, request: PublishRequest, sources: string[]): Promise<Manifest> {
+    const format = FORMATS.includes(request.format as Format) ? (request.format as Format) : undefined;
+    const rating = RATINGS.includes(request.rating as Rating) ? (request.rating as Rating) : undefined;
+    let manifest: Manifest = await buildManifest(readChunks(file, DEFAULT_CHUNK_SIZE), {
+      name: request.name || 'file',
+      mime: request.mime || 'application/octet-stream',
+      meta: {
+        title: request.title.trim(),
+        description: request.description?.trim() || undefined,
+        format,
+        rating,
+        topics: request.topics?.length ? request.topics : undefined,
+        tags: request.tags?.length ? request.tags : undefined,
+        language: request.language || undefined,
+        durationSeconds: request.durationSeconds,
+      },
+      sources,
+      createdAt: request.createdAt,
+    });
+    const profile = this.store.data.data.settings.profile;
+    if (request.sign) manifest = signManifest(manifest, this.store.identity, { name: profile.name || undefined, kind: profile.kind });
+    validateManifest(manifest);
+    return manifest;
+  }
+
   private track(job: Job, task: Promise<void>): void {
     const done = task.finally(() => this.running.delete(job.id));
     this.running.set(job.id, done);
@@ -92,24 +137,11 @@ export class Publisher {
       step(0, 'running');
       const format = FORMATS.includes(request.format as Format) ? (request.format as Format) : undefined;
       const rating = RATINGS.includes(request.rating as Rating) ? (request.rating as Rating) : undefined;
-      let manifest: Manifest = await buildManifest(readChunks(file, DEFAULT_CHUNK_SIZE), {
-        name: request.name || 'file',
-        mime: request.mime || 'application/octet-stream',
-        meta: {
-          title: request.title.trim(),
-          description: request.description?.trim() || undefined,
-          format,
-          rating,
-          topics: request.topics?.length ? request.topics : undefined,
-          tags: request.tags?.length ? request.tags : undefined,
-          language: request.language || undefined,
-          durationSeconds: request.durationSeconds,
-        },
-        sources,
-      });
+      // The manifest from the client's own preview is published as it is, so the content
+      // id shown before the upload is exactly the id the content gets.
+      let manifest: Manifest = request.manifest ? validateManifest(request.manifest) : await this.buildManifest(file, request, sources);
+      if (manifest.size !== file.size) throw badRequest('The manifest does not match the uploaded file');
       const profile = this.store.data.data.settings.profile;
-      if (request.sign) manifest = signManifest(manifest, this.store.identity, { name: profile.name || undefined, kind: profile.kind });
-      validateManifest(manifest);
       const cid = contentIdOf(manifest);
       step(0, 'done', `${manifest.chunks.length} chunks`);
       const total = manifest.chunks.length * providers.length + algorithms.length || 1;

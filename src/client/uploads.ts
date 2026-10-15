@@ -51,4 +51,23 @@ export class FileUploads implements UploadStore {
   async remove(fileId: string): Promise<void> {
     if (/^f[a-z2-7]{16}$/.test(fileId)) await rm(join(this.dir, fileId), { force: true });
   }
+
+  /** Takes bytes (e.g. pulled from a URL by the client) as a file to publish. */
+  async put(data: Uint8Array): Promise<{ fileId: string; size: number }> {
+    if (data.length > MAX_UPLOAD) throw new HttpError(413, 'too_large', 'File too large');
+    const fileId = randomId('f', 10);
+    const path = join(this.dir, fileId);
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(path, data);
+    return { fileId, size: data.length };
+  }
+
+  /** Streams bytes in (large downloads from a URL) without holding the file in memory. */
+  async putStream(stream: ReadableStream<Uint8Array>): Promise<{ fileId: string; size: number }> {
+    const fileId = randomId('f', 10);
+    const path = join(this.dir, fileId);
+    const { Readable } = await import('node:stream');
+    await pipeline(Readable.fromWeb(stream as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(path));
+    return { fileId, size: (await stat(path)).size };
+  }
 }

@@ -1,6 +1,8 @@
 // Profiles: several users of one client, each with their own nodes, settings, history
 // and client id. Public profiles switch freely; protected ones need username + password.
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { ClientState, ProfileSummary } from '../src/shared/clientapi.js';
 import { startClient, tempDir } from './helpers.js';
@@ -84,5 +86,63 @@ describe('client profiles', async () => {
 
     // The active profile cannot be deleted.
     await assert.rejects(api(`/api/profiles/${main.id}`, { method: 'DELETE' }), /Switch to another profile/);
+  });
+});
+
+describe('hidden profiles', async () => {
+  const { dir, cleanup } = tempDir();
+  let started = await startClient(dir);
+  after(async () => {
+    await started.client.stop();
+    cleanup();
+  });
+
+  it('does not appear anywhere and keeps its data encrypted', async () => {
+    let { api } = started;
+    await assert.rejects(api('/api/profiles', { body: { name: 'No name', hidden: true } }), /username and a password/);
+    await api('/api/profiles', { body: { name: 'Secret', username: 'kim', password: 'pw123', hidden: true } });
+    const listed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.deepEqual(listed.profiles.map((profile) => profile.name), ['Main'], 'the hidden profile does not even appear to exist');
+
+    // Its username and password are the only way in.
+    await assert.rejects(api('/api/profiles/unlock', { body: { username: 'kim', password: 'wrong' } }), /Wrong username or password/);
+    await assert.rejects(api('/api/profiles/unlock', { body: { username: 'kim', password: '' } }), /Wrong username or password/);
+    const opened = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    assert.equal(opened.locked, false);
+    const open = opened.profiles.find((profile) => profile.hidden)!;
+    assert.equal(open.hidden, true, 'while it is open, only a generic label shows');
+    assert.equal(open.name, 'Hidden profile');
+    assert.equal(open.active, true);
+
+    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark' } });
+    await api('/api/history', { body: { id: 'yt:watched-in-secret', title: 'Watched in secret' } });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await started.client.stop();
+
+    // On disk there is no trace of its name or its data — only the sealed blob.
+    const saved = await readFile(join(dir, 'client.json'), 'utf8');
+    assert.ok(!saved.includes('Secret'), 'the profile name is encrypted');
+    assert.ok(!saved.includes('Watched in secret'), 'its history is encrypted');
+    assert.ok(!saved.includes('yt:watched-in-secret'));
+    assert.ok(saved.includes('"hidden":true'));
+
+    // After a restart the client is locked until the profile opens again.
+    started = await startClient(dir);
+    api = started.api;
+    const locked = await api<ClientState>('/api/state');
+    assert.equal(locked.locked, true);
+    assert.equal(locked.settings.theme, 'system', 'the live data is not readable while locked');
+    const emptyHistory = await api<{ history: { id: string }[] }>('/api/library');
+    assert.equal(emptyHistory.history.length, 0);
+
+    const again = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    assert.equal(again.locked, false);
+    assert.equal(again.settings.theme, 'dark', 'its data comes back with its password');
+    const back = await api<{ history: { id: string }[] }>('/api/library');
+    assert.deepEqual(back.history.map((item) => item.id), ['yt:watched-in-secret']);
+
+    // Switching to the visible profile hides the hidden one again.
+    const main = await api<ClientState>('/api/profiles/main/switch', { method: 'POST', body: {} });
+    assert.deepEqual(main.profiles.map((profile) => profile.name), ['Main']);
   });
 });

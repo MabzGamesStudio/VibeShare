@@ -80,6 +80,8 @@ export interface StoreOptions {
   cacheBytes: number;
   /** Last resort for chunks no backend has: ask client nodes that store them as a service. */
   peerFallback?: (chunkId: string) => Promise<Buffer | null>;
+  /** Other content providers to ask for chunks no backend (or client) has. */
+  chunkPeers?: (chunkId: string) => Promise<Buffer | null>;
   /** Write chunks fetched from peers or read-only backends back into writable backends. */
   cacheFetched?: () => boolean;
 }
@@ -159,6 +161,15 @@ export class ContentStore {
     }
     if (this.options.peerFallback && options.peers !== false) {
       const data = await this.options.peerFallback(id);
+      if (data && chunkIdOf(data) === id) {
+        this.cache.set(id, data);
+        if (record) await this.remember(id, data);
+        return data;
+      }
+    }
+    // Peer content providers: chunks addressed by their hash, fetched from a peer.
+    if (this.options.chunkPeers && options.peers !== false) {
+      const data = await this.options.chunkPeers(id);
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
         if (record) await this.remember(id, data);

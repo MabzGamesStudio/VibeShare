@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import type { Account } from '../commerce/ledger.js';
-import { contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { chunkIdOf, contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import { buildManifestFromFile } from '../shared/contentfile.js';
 import {
   badRequest,
@@ -69,6 +69,16 @@ export interface ProviderConfig extends BaseConfig {
   /** Publish the list of hosted content at /v1/catalog (lets algorithm nodes discover it). */
   catalog: boolean;
   storageService: StorageServiceConfig;
+  /** Exchanging content bytes with other content provider nodes. */
+  peering: {
+    /**
+     * Peer content providers. `send`: this node serves or pushes chunks to the peer.
+     * `receive`: this node fetches missing chunks from the peer and accepts its pushes.
+     */
+    peers: { ref: string; send: boolean; receive: boolean }[];
+    /** Accept chunks a peer pushes here. */
+    acceptPush: boolean;
+  };
 }
 
 export function providerDefaults(): ProviderConfig {
@@ -91,6 +101,7 @@ export function providerDefaults(): ProviderConfig {
       overrides: {},
     },
     rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
+    peering: { peers: [], acceptPush: true },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -162,6 +173,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       replication: () => this.config.storage.replication,
       cacheBytes: this.config.storage.cacheMiB * MiB,
       peerFallback: (id) => (this.config.storage.usePeers ? this.service.retrieve(id) : Promise.resolve(null)),
+      chunkPeers: (id) => this.fetchFromPeers(id),
       cacheFetched: () => this.config.storage.cacheFetched,
     });
     this.gcTimer = setInterval(() => void this.collectGarbage(), 15 * 60_000);
@@ -318,6 +330,49 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     return recovered;
   }
 
+  // -------------------------------------------------------------------------
+  // Peering: content providers exchange content bytes with their peers,
+  // addressed by the hash of the bytes (a chunk id).
+
+  /** The peer the caller is, when it is configured for this direction. */
+  private requirePeer(ctx: Ctx, direction: 'send' | 'receive'): { ref: string; url: string; id: string } {
+    const account = this.auth.require(ctx);
+    for (const peer of this.config.peering.peers) {
+      if (direction === 'send' ? !peer.send : !peer.receive) continue;
+      const ref = parseNodeRef(peer.ref);
+      if (ref?.id === account.id) return { ref: peer.ref, url: ref.url, id: ref.id };
+    }
+    throw forbidden('Not a peer of this node in that direction');
+  }
+
+  /** A client talking to one configured peer as this node. */
+  private peerClient(peer: { ref: string }): NodeClient {
+    const ref = parseNodeRef(peer.ref)!;
+    return new NodeClient({
+      url: ref.url,
+      expectedId: ref.id,
+      expectedType: 'provider',
+      auth: 'identity',
+      identity: this.identity,
+      transport: () => this.transport(ref.url),
+    });
+  }
+
+  /** Asks the peers set to receive from for a chunk no backend here has. */
+  private async fetchFromPeers(id: string, only?: string): Promise<Buffer | null> {
+    for (const peer of this.config.peering.peers) {
+      if (!peer.receive || (only && peer.ref !== only)) continue;
+      try {
+        const response = await this.peerClient(peer).fetch(`/v1/peers/chunks/${encodeURIComponent(id)}`, { timeoutMs: 30_000 });
+        const data = Buffer.from(await response.arrayBuffer());
+        if (chunkIdOf(data) === id) return data;
+      } catch (error) {
+        log.debug(`Peer has no chunk ${id.slice(0, 12)}: ${(error as Error).message}`);
+      }
+    }
+    return null;
+  }
+
   /**
    * Records a client's suggestion of missing data about content. What the node already
    * had pays nothing; a new suggestion earns `rewards.suggestion` (daily capped).
@@ -451,6 +506,41 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .slice(0, 200),
       };
+    });
+
+    // Peering: content providers exchange content bytes with each other, addressed by
+    // the hash of the bytes (the chunk id).
+    router.post('/v1/peers/has', async (ctx) => {
+      this.requirePeer(ctx, 'send');
+      const body = await readJson<{ ids?: string[] }>(ctx.req);
+      const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
+      return { has: Object.fromEntries(ids.map((id) => [String(id), this.store.hasChunk(String(id))])) };
+    });
+
+    router.get('/v1/peers/chunks/:id', async (ctx) => {
+      this.requirePeer(ctx, 'send');
+      const id = ctx.params.id;
+      if (!isChunkId(id)) throw badRequest('Not a chunk id');
+      const data = await this.store.getChunk(id, { peers: false });
+      if (!data) throw notFound('This node does not have the chunk');
+      ctx.res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': data.length,
+        'cache-control': 'private, max-age=31536000, immutable',
+        'x-content-type-options': 'nosniff',
+      });
+      ctx.res.end(data);
+    });
+
+    router.put('/v1/peers/chunks/:id', async (ctx) => {
+      this.requirePeer(ctx, 'receive');
+      if (!this.config.peering.acceptPush) throw forbidden('This node does not accept pushed chunks');
+      const id = ctx.params.id;
+      if (!isChunkId(id)) throw badRequest('Not a chunk id');
+      const data = await readBody(ctx.req, 9 * MiB);
+      if (chunkIdOf(data) !== id) throw badRequest('The bytes do not match the chunk id');
+      await this.store.putChunk(id, data);
+      return { ok: true };
     });
 
     router.get('/v1/quote/:cid', (ctx) => {
@@ -700,6 +790,73 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         this.suggestions.changed();
       } else throw notFound();
       return { ok: true };
+    });
+    // Peering: other content providers this node exchanges content bytes with.
+    router.get('/v1/admin/peers', (ctx) => {
+      this.requireAdmin(ctx);
+      return { peers: this.config.peering.peers, acceptPush: this.config.peering.acceptPush };
+    });
+    router.put('/v1/admin/peers', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ peers?: { ref: string; send?: boolean; receive?: boolean }[]; acceptPush?: boolean }>(ctx.req);
+      const peers = (body.peers ?? []).slice(0, 100).map((peer) => {
+        const ref = parseNodeRef(String(peer.ref ?? ''));
+        if (!ref || ref.type !== 'provider') throw badRequest('Every peer must be a content provider node reference');
+        return { ref: String(peer.ref).trim(), send: peer.send !== false, receive: peer.receive !== false };
+      });
+      this.configFile.data.peering = { peers, acceptPush: body.acceptPush !== false };
+      this.configFile.changed();
+      return { peers, acceptPush: body.acceptPush !== false };
+    });
+    router.post('/v1/admin/peers/push', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ peer?: string; cid?: string }>(ctx.req);
+      const manifest = this.store.getManifest(String(body.cid ?? ''));
+      if (!manifest) throw notFound('No such content on this node');
+      const targets = this.config.peering.peers.filter((peer) => peer.send && (!body.peer || peer.ref === body.peer));
+      if (!targets.length) throw badRequest('No peer set to send to');
+      const results: { peer: string; sent: number; skipped: number; error?: string }[] = [];
+      for (const peer of targets) {
+        let sent = 0;
+        let skipped = 0;
+        try {
+          const client = this.peerClient(peer);
+          const answer = await client.json<{ has: Record<string, boolean> }>('/v1/peers/has', {
+            body: { ids: manifest.chunks.map((chunk) => chunk.id) },
+            timeoutMs: 30000,
+          });
+          for (const chunk of manifest.chunks) {
+            const data = answer.has[chunk.id] ? null : await this.store.getChunk(chunk.id, { peers: false });
+            if (!data) {
+              skipped++;
+              continue;
+            }
+            await client.fetch(`/v1/peers/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120000 });
+            sent++;
+          }
+          results.push({ peer: peer.ref, sent, skipped });
+        } catch (error) {
+          results.push({ peer: peer.ref, sent, skipped, error: (error as Error).message });
+        }
+      }
+      return { results };
+    });
+    router.post('/v1/admin/peers/fetch', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ peer?: string; cid?: string }>(ctx.req);
+      const manifest = this.store.getManifest(String(body.cid ?? ''));
+      if (!manifest) throw notFound('No such content on this node');
+      let fetched = 0;
+      let missing = 0;
+      for (const chunk of manifest.chunks) {
+        if (this.store.hasChunk(chunk.id)) continue;
+        const data = await this.fetchFromPeers(chunk.id, body.peer);
+        if (data) {
+          await this.store.putChunk(chunk.id, data);
+          fetched++;
+        } else missing++;
+      }
+      return { fetched, missing };
     });
     router.delete('/v1/admin/content/:cid', async (ctx) => {
       this.requireAdmin(ctx);

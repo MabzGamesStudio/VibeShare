@@ -1,5 +1,6 @@
 // Types of the client daemon's local API (GUI ⇄ daemon). Browser-safe: no Node imports.
 import type { NodeType } from './noderef.js';
+import type { Manifest } from './content.js';
 import type { ContentItem, CreatorInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
 import type { CreatorKind, Format, Rating } from './taxonomy.js';
@@ -234,6 +235,8 @@ export interface ProfileSummary {
   /** public: anyone using this client can switch to it; protected: username + password. */
   access: 'public' | 'protected';
   username?: string;
+  /** Hidden profiles appear only while active, and then only as "Hidden profile". */
+  hidden?: boolean;
   active: boolean;
 }
 
@@ -246,6 +249,8 @@ export interface ClientState {
   /** The profiles of this client and the one that is active. */
   profiles: ProfileSummary[];
   activeProfile: string;
+  /** True while the active hidden profile is still sealed (it opens with its password). */
+  locked: boolean;
 }
 
 /** A content item from an algorithm node, with where it came from. */
@@ -343,6 +348,23 @@ export interface PublishRequest {
   thumbnail?: string;
   /** Sign as the creator (your public key) — off publishes without a creator identity. */
   sign: boolean;
+  /**
+   * The exact manifest to publish, from `POST /api/publish/preview`: the content id is
+   * then known and shown before anything is uploaded. Missing: it is built during the
+   * upload (with `createdAt`, when given, so the id can still be predicted).
+   */
+  manifest?: Manifest;
+  createdAt?: string;
+}
+
+/** The content id an upload will have, computed by the client before publishing. */
+export interface PublishPreview {
+  /** The content id (vs1…) of the manifest. */
+  cid: string;
+  /** The full id with the fallback sources. */
+  id: string;
+  manifest: Manifest;
+  size: number;
 }
 
 export interface ExternalPublishRequest {

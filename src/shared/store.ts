@@ -10,6 +10,8 @@ import { log } from './log.js';
 export class JsonFile<T> {
   data: T;
   private timer: NodeJS.Timeout | null = null;
+  /** Applied to the copy that is written out (e.g. to seal hidden profiles at rest). */
+  prepare?: (data: T) => T;
 
   constructor(
     private readonly path: string | null,
@@ -49,7 +51,7 @@ export class JsonFile<T> {
     if (!this.path) return;
     mkdirSync(dirname(this.path), { recursive: true });
     const temp = `${this.path}.tmp`;
-    writeFileSync(temp, JSON.stringify(this.data));
+    writeFileSync(temp, JSON.stringify(this.prepare ? this.prepare(this.data) : this.data));
     renameSync(temp, this.path);
   }
 }

@@ -30,8 +30,12 @@ export class ClientStore implements ClientStoreLike {
   private loadIdentity(): Identity {
     const file = this.path('identity.json');
     if (file && existsSync(file)) {
-      const saved = JSON.parse(readFileSync(file, 'utf8')) as { seed: string };
-      return identityFromSeed(parseSeed(saved.seed));
+      try {
+        const saved = JSON.parse(readFileSync(file, 'utf8')) as { seed?: string };
+        if (saved.seed) return identityFromSeed(parseSeed(saved.seed));
+      } catch {
+        // fall through to a fresh identity
+      }
     }
     const identity = generateIdentity();
     this.saveIdentity(identity);
@@ -48,6 +52,12 @@ export class ClientStore implements ClientStoreLike {
     this.saveIdentity(this.identity);
     // Anonymous tokens stay valid; key-based sessions are re-opened with the new key.
     return this.identity;
+  }
+
+  /** While a hidden profile is active, its identity is not kept in the clear at rest. */
+  hideIdentity(): void {
+    const file = this.path('identity.json');
+    if (file) writeFileSync(file, JSON.stringify({ sealed: true }), { mode: 0o600 });
   }
 
   changed(): void {

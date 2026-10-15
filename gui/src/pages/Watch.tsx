@@ -17,7 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { claimSourceMetrics } from '../../../src/algorithm/metrics';
 import { SOURCE_CATALOG, sourceKeyOf } from '../../../src/algorithm/sources';
-import type { ContentView, Job, NodeEntry } from '../../../src/shared/clientapi';
+import type { ContentView, Job, NodeEntry, PublishPreview } from '../../../src/shared/clientapi';
 import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
 import { baseId } from '../../../src/shared/sources';
@@ -331,30 +331,94 @@ function SourceRows({ rows, onChange }: { rows: SourceRow[]; onChange: (rows: So
   );
 }
 
-/** Uploads the content data when the providers do not have a content id yet. */
+/**
+ * Uploads the content data when the providers do not have a content id yet. The content
+ * id is the hash of the data: the client computes it here and fills the field, before
+ * anything is uploaded — from a file picked here, or pulled from a URL.
+ */
 function UploadSection({ providers, algorithms, sources }: { providers: string[]; algorithms: string[]; sources: string[] }) {
   const { toast } = useApp();
-  const [file, setFile] = useState<File | null>(null);
-  const [expectedCid, setExpectedCid] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState<{ fileId: string; name: string; mime: string; from: string } | null>(null);
+  const [preview, setPreview] = useState<PublishPreview | null>(null);
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState<'pull' | 'hash' | 'upload' | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const sourceKey = sources.join('\n');
 
-  const upload = async () => {
-    if (!file) return;
-    setBusy(true);
-    setResult(null);
-    try {
-      const { fileId } = await uploadFile(file, () => undefined);
-      let job = await api<Job>('/api/publish', {
-        body: {
-          fileId,
-          name: file.name,
-          mime: file.type || 'application/octet-stream',
-          title: file.name,
-          providers,
-          algorithms,
+  // (Re)computes the content id: it covers the data and the sources named with it.
+  const prepare = useCallback(
+    async (held: { fileId: string; name: string; mime: string }) => {
+      setBusy('hash');
+      setResult(null);
+      try {
+        const request = {
+          fileId: held.fileId,
+          name: held.name,
+          mime: held.mime,
+          title: held.name,
           sources,
           sign: false,
+        };
+        setPreview(await api<PublishPreview>('/api/publish/preview', { body: request }));
+      } catch (error) {
+        setPreview(null);
+        toast(errorMessage(error), 'error');
+      } finally {
+        setBusy(null);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sourceKey]
+  );
+
+  useEffect(() => {
+    if (info) void prepare(info);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info?.fileId, sourceKey]);
+
+  const pickFile = async (chosen: File) => {
+    setBusy('hash');
+    try {
+      const { fileId } = await uploadFile(chosen, () => undefined);
+      const held = { fileId, name: chosen.name, mime: chosen.type || 'application/octet-stream', from: chosen.name };
+      setInfo(held);
+      setUrl('');
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const pullUrl = async () => {
+    if (!url.trim()) return;
+    setBusy('pull');
+    try {
+      const held = await api<{ fileId: string; size: number; name: string; mime: string }>('/api/upload/url', { body: { url: url.trim() } });
+      setInfo({ fileId: held.fileId, name: held.name, mime: held.mime, from: url.trim() });
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const upload = async () => {
+    if (!preview || !info) return;
+    setBusy('upload');
+    setResult(null);
+    try {
+      let job = await api<Job>('/api/publish', {
+        body: {
+          fileId: info.fileId,
+          name: info.name,
+          mime: info.mime,
+          title: info.name,
+          sources,
+          sign: false,
+          manifest: preview.manifest,
+          providers,
+          algorithms,
         },
       });
       for (let attempt = 0; attempt < 240 && job.status === 'running'; attempt++) {
@@ -362,37 +426,53 @@ function UploadSection({ providers, algorithms, sources }: { providers: string[]
         job = await api<Job>(`/api/jobs/${job.id}`);
       }
       if (job.status === 'done' && job.result?.id) {
-        const expected = expectedCid.trim().split('~')[0];
         setResult(
-          expected && expected !== job.result.id.split('~')[0]
-            ? `Uploaded as ${job.result.id} — this is NOT the id you expected (${expectedCid.trim()}).`
+          job.result.id.split('~')[0] === preview.cid
+            ? `Uploaded as ${job.result.id} — the id above is now on your nodes.`
             : `Uploaded as ${job.result.id}.`
         );
       } else if (job.status !== 'running') setResult(job.error ?? 'The upload failed.');
     } catch (error) {
       toast(errorMessage(error), 'error');
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   return (
     <div className="form-stack" style={{ gap: 8 }}>
       <p className="small muted">
-        The content id is the hash of the data, so uploading the data creates the id. If you already know the id, the upload is checked
-        against it.
+        The content id is the hash of the data: pick a file or pull one from a URL, and the client calculates the id here before anything
+        is uploaded.
       </p>
-      <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-      <input
-        type="text"
-        className="mono"
-        placeholder="Content id, if you know it (optional)"
-        value={expectedCid}
-        onChange={(e) => setExpectedCid(e.target.value)}
-      />
+      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+        <input type="file" onChange={(e) => e.target.files?.[0] && void pickFile(e.target.files[0])} style={{ flex: 1 }} />
+      </div>
+      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+        <input
+          type="url"
+          placeholder="…or pull the data from a URL"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          style={{ flex: 1 }}
+        />
+        <button className="small" disabled={!url.trim() || busy !== null} onClick={pullUrl}>
+          {busy === 'pull' && <Spinner />} Pull
+        </button>
+      </div>
+      <label className="field">
+        Content id (calculated on this device)
+        <input type="text" className="mono" readOnly value={preview?.cid ?? ''} placeholder={busy === 'hash' ? 'Calculating…' : 'Pick a file or URL first'} />
+        {preview && (
+          <span className="hint">
+            {preview.id} · {formatBytes(preview.size)}
+            {info ? ` · from ${info.from}` : ''}
+          </span>
+        )}
+      </label>
       <div className="row">
-        <button className="primary small" disabled={!file || busy} onClick={upload}>
-          {busy && <Spinner />} Upload content data
+        <button className="primary small" disabled={!preview || busy !== null} onClick={upload}>
+          {busy === 'upload' && <Spinner />} Upload content data
         </button>
         {result && <span className="small">{result}</span>}
       </div>
