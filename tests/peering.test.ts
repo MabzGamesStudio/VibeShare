@@ -130,4 +130,53 @@ describe('algorithm nodes peering', async () => {
     const stranger = clientFor(a.url());
     await assert.rejects(stranger.json('/v1/peers/discover', { body: { criteria: {} } }), /peer/);
   });
+
+  it('runs a continuous peer-search job and answers peers at its own pace', async () => {
+    // The operator sets how often the job requests from peers and how often the node
+    // responds to them.
+    const job = await admin<{ peering: { job: { enabled: boolean; intervalMs: number }; respondIntervalMs: number } }>(
+      a.url(),
+      '/v1/admin/peers/job',
+      { body: { enabled: true, intervalMs: 5000, adopt: true, limit: 10, respondIntervalMs: 0 } }
+    );
+    assert.equal(job.peering.job.enabled, true);
+    assert.equal(job.peering.job.intervalMs, 5000);
+
+    // With no throttle the node answers and records when it answered.
+    await admin(b.url(), '/v1/admin/peers/discover', { body: { criteria: {} } });
+
+    // Turn the respond interval up: the same peer asking again right away is turned away.
+    await admin(a.url(), '/v1/admin/peers/job', { body: { respondIntervalMs: 3600_000 } });
+    const throttled = await admin<{ results: { peer: string; items: unknown[]; error?: string }[] }>(b.url(), '/v1/admin/peers/discover', {
+      body: { criteria: {} },
+    });
+    assert.ok(
+      throttled.results.some((r) => /at most once every/.test(r.error ?? '')),
+      'the node turned the too-frequent peer away'
+    );
+
+    // The job can run a round on demand and reports what it took from each peer.
+    await admin(a.url(), '/v1/admin/peers/job', { body: { respondIntervalMs: 0 } });
+    const round = await admin<{ results: { peer: string }[] }>(a.url(), '/v1/admin/peers/search', { method: 'POST', body: {} });
+    assert.ok(Array.isArray(round.results));
+  });
+
+  it('lets a new node bootstrap into a wide, unclustered peer set', async () => {
+    // Anyone can see a wide sample of who a node peers with, to bootstrap from.
+    const directory = await admin<{ self: string; peers: string[] }>(a.url(), '/v1/peers/peers');
+    assert.equal(directory.self, a.reference());
+    assert.ok(directory.peers.includes(b.reference()));
+
+    // A brand-new node with one bootstrap seed learns peers and keeps a small, wide set.
+    const c = await startAlgorithm({ peering: { bootstrap: [a.reference()], maxPeers: 2 } });
+    try {
+      await admin(c.url(), '/v1/admin/peers/bootstrap', { method: 'POST', body: {} });
+      const got = await admin<{ peers: { ref: string }[] }>(c.url(), '/v1/admin/peers');
+      const refs = got.peers.map((peer) => peer.ref);
+      assert.ok(refs.length >= 1 && refs.length <= 2, `keeps a small, wide set (got ${refs.length})`);
+      assert.ok(refs.includes(a.reference()), 'learned the seed it bootstrapped from');
+    } finally {
+      await c.stop();
+    }
+  });
 });

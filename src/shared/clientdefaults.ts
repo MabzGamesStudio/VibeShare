@@ -76,6 +76,7 @@ export function defaultSettings(): Settings {
     preferences: { maxRating: '16+', formats: [], topics: [], blockedTags: [], blockedCreators: [], creatorKinds: [], languages: ['en'] },
     feedMode: 'blend',
     unknownContent: 'warn',
+    blockExternalEmbeds: false,
     defaultAuth: 'pseudonym',
     autoplay: true,
     loadPauseMs: 1500,
@@ -119,7 +120,7 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
 export function normalizePage(page: Partial<PageConfig> & { id: string }): PageConfig {
   const preset = page.preset as string | undefined;
   const template = preset && preset !== 'home' ? presetPage(preset as PagePreset) : presetPage('videos');
-  return {
+  const normalized = {
     ...template,
     ...page,
     preset: page.preset,
@@ -127,6 +128,9 @@ export function normalizePage(page: Partial<PageConfig> & { id: string }): PageC
     options: { ...template.options, ...page.options },
     fields: Array.isArray(page.fields) ? page.fields : template.fields,
   } as PageConfig;
+  // The 2D canvas layout is gone: pages that used it fall back to the grid.
+  if ((normalized.layout as string) === 'canvas') normalized.layout = 'grid';
+  return normalized;
 }
 
 function lowerRating(a: Rating | undefined, b: Rating | undefined): Rating | undefined {
@@ -164,7 +168,7 @@ export function newPageId(): string {
   return `p-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const LAYOUTS = ['canvas', 'grid', 'list', 'shorts', 'stream', 'masonry'];
+const LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'];
 const SOURCES = ['feed', 'search', 'subscriptions'];
 
 /**
@@ -188,6 +192,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   }
   if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
   if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
+  next.blockExternalEmbeds = Boolean(next.blockExternalEmbeds);
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
   const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];

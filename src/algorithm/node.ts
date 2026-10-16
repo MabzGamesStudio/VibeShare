@@ -72,6 +72,31 @@ export interface AlgorithmConfig extends BaseConfig {
      * for metadata and discoveries; `serve`: the peer may ask this node.
      */
     peers: { ref: string; fetch: boolean; serve: boolean }[];
+    /** The continuous peer-search job: ask peers for discoveries on a timer. */
+    job: {
+      /** Run the job at all (otherwise peers are only asked from the dashboard). */
+      enabled: boolean;
+      /** How often it asks each peer for new content (ms). */
+      intervalMs: number;
+      /** Take what it finds into the catalog as pending (the operator reviews after). */
+      adopt: boolean;
+      /** How many finds to take from each peer per round. */
+      limit: number;
+    };
+    /**
+     * How often this node answers one peer's metadata/discover requests, at the least
+     * (ms). A peer asking more often is turned away, so the operator sets how often it
+     * responds to peers and keeps its own load bounded.
+     */
+    respondIntervalMs: number;
+    /**
+     * Seed node references a new node bootstraps from when it has no peers yet, and to
+     * widen its reach over time (peer exchange). Kept small and diverse on purpose, so
+     * the network spreads out instead of clustering.
+     */
+    bootstrap: string[];
+    /** The most peers to keep (the widest reach this node holds at once). */
+    maxPeers: number;
   };
 }
 
@@ -100,7 +125,13 @@ export function algorithmDefaults(): AlgorithmConfig {
     pageSize: 24,
     crawler: crawlerDefaults(),
     sources: { priorities: { vibeshare: 10 } },
-    peering: { peers: [] },
+    peering: {
+      peers: [],
+      job: { enabled: false, intervalMs: 3_600_000, adopt: true, limit: 50 },
+      respondIntervalMs: 0,
+      bootstrap: [],
+      maxPeers: 32,
+    },
   };
 }
 
@@ -220,9 +251,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   async start(): Promise<void> {
     await super.start();
     this.crawler.start();
+    this.startPeering();
   }
 
   async stop(): Promise<void> {
+    this.stopPeering();
     this.crawler.stop();
     await super.stop();
   }
@@ -947,9 +980,163 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // A continuous peer-search job (keep asking peers for discoveries on a timer),
+  // and the cadence at which this node answers peers.
+
+  private peeringTimer: ReturnType<typeof setInterval> | null = null;
+  /** When each peer was last answered, so the node responds at its own pace. */
+  private respondTimes = new Map<string, number>();
+
+  /** Requires a peer and turns away one asking more often than the node responds. */
+  private respondGate(ctx: Ctx): { ref: string; url: string; id: string } {
+    const peer = this.requirePeer(ctx);
+    const gap = Math.max(0, Math.round(Number(this.config.peering.respondIntervalMs) || 0));
+    const now = Date.now();
+    const last = this.respondTimes.get(peer.id) ?? 0;
+    if (gap && now - last < gap) {
+      throw new HttpError(429, 'too_many', `This node answers a peer at most once every ${gap} ms`);
+    }
+    this.respondTimes.set(peer.id, now);
+    return peer;
+  }
+
+  /** One round of the continuous job: ask each peer for discoveries and take them in. */
+  async runPeerSearch(): Promise<{ peer: string; items: number; adopted: number; error?: string }[]> {
+    const job = this.config.peering.job;
+    const results: { peer: string; items: number; adopted: number; error?: string }[] = [];
+    for (const entry of this.peersToFetch()) {
+      try {
+        const answer = await this.peerClient(entry).json<{ items: PeerEntry[] }>('/v1/peers/discover', {
+          body: { criteria: { algorithm: 'new', limit: job.limit } },
+          timeoutMs: 60_000,
+        });
+        const items = answer.items ?? [];
+        let adopted = 0;
+        if (job.adopt) for (const item of items) (this.adoptPeerEntry(item), adopted++);
+        results.push({ peer: entry.ref, items: items.length, adopted });
+      } catch (error) {
+        results.push({ peer: entry.ref, items: 0, adopted: 0, error: (error as Error).message });
+      }
+    }
+    return results;
+  }
+
+  /** Starts (or restarts) the continuous peer-search job at the configured cadence. */
+  private startPeering(): void {
+    this.stopPeering();
+    // A new node with bootstrap seeds finds its first peers right away.
+    if (this.config.peering.bootstrap?.length) {
+      void this.bootstrapPeers().catch((error) => log.debug(`Peer bootstrap: ${(error as Error).message}`));
+    }
+    const job = this.config.peering.job;
+    if (!job.enabled) return;
+    const interval = Math.max(5_000, Math.round(Number(job.intervalMs) || 3_600_000));
+    this.peeringTimer = setInterval(() => {
+      void this.runPeerSearch().catch((error) => log.debug(`Peer-search job: ${(error as Error).message}`));
+      // Keep widening the peer set over time (peer exchange), so reach stays broad.
+      void this.bootstrapPeers().catch((error) => log.debug(`Peer bootstrap: ${(error as Error).message}`));
+    }, interval);
+    this.peeringTimer.unref?.();
+  }
+
+  private stopPeering(): void {
+    if (this.peeringTimer) clearInterval(this.peeringTimer);
+    this.peeringTimer = null;
+  }
+
+  /**
+   * Picks up to `count` references spread across key-id space and hosts, so the peer set
+   * stays wide and does not cluster around a few nodes.
+   */
+  private diversify(refs: string[], count: number): string[] {
+    if (count <= 0) return [];
+    const hostOf = (ref: string): string => {
+      try {
+        return new URL(parseNodeRef(ref)?.url ?? '').host;
+      } catch {
+        return ref;
+      }
+    };
+    const parsed = refs
+      .map((ref) => ({ ref, id: parseNodeRef(ref)?.id ?? '', host: hostOf(ref) }))
+      .filter((r) => r.id && r.id !== this.identity?.id);
+    const buckets = new Map<string, typeof parsed>();
+    for (const r of parsed) {
+      const key = r.id.slice(0, 2).toLowerCase();
+      const list = buckets.get(key);
+      if (list) list.push(r);
+      else buckets.set(key, [r]);
+    }
+    const chosen: string[] = [];
+    const perHost = new Map<string, number>();
+    const order = [...buckets.keys()];
+    for (let round = 0; chosen.length < count; round++) {
+      let added = false;
+      for (const key of order) {
+        const pick = buckets.get(key)![round];
+        if (!pick) continue;
+        const used = perHost.get(pick.host) ?? 0;
+        if (used >= 2) continue; // at most a couple of peers per host keeps it spread out
+        perHost.set(pick.host, used + 1);
+        chosen.push(pick.ref);
+        added = true;
+        if (chosen.length >= count) break;
+      }
+      if (!added) break;
+    }
+    return chosen;
+  }
+
+  /**
+   * Bootstrapping: a new node learns peers from its bootstrap seeds and from the peers it
+   * already has (peer exchange), and keeps a wide, unclustered set of them up to `maxPeers`.
+   */
+  async bootstrapPeers(): Promise<string[]> {
+    const peering = this.config.peering;
+    const max = Math.max(1, peering.maxPeers || 32);
+    const room = Math.max(0, max - peering.peers.length);
+    if (!room) return [];
+    const known = new Set(peering.peers.map((peer) => peer.ref));
+    const sources = [...(peering.bootstrap ?? []), ...peering.peers.slice(0, 3).map((peer) => peer.ref)];
+    const learned: string[] = [];
+    for (const ref of sources) {
+      if (learned.length > max * 3) break;
+      try {
+        const answer = await this.peerClient({ ref }).json<{ self?: string; peers?: string[] }>('/v1/peers/peers', { timeoutMs: 15_000 });
+        for (const candidate of [answer.self, ...(answer.peers ?? [])]) {
+          const ref2 = String(candidate ?? '').trim();
+          if (!ref2 || known.has(ref2) || learned.includes(ref2)) continue;
+          if (parseNodeRef(ref2)) learned.push(ref2);
+        }
+      } catch {
+        // The seed or peer is offline; try the next one.
+      }
+    }
+    const chosen = this.diversify(learned, room);
+    const added: string[] = [];
+    for (const ref of chosen) {
+      if (peering.peers.some((peer) => peer.ref === ref)) continue;
+      peering.peers.push({ ref, fetch: true, serve: true });
+      added.push(ref);
+    }
+    if (added.length) this.configFile.changed();
+    return added;
+  }
+
   private peerRoutes(): void {
     const router = this.router;
-    const peer = (ctx: Ctx) => this.requirePeer(ctx);
+    const peer = (ctx: Ctx) => this.respondGate(ctx);
+
+    // A public bootstrap directory: a wide, unclustered sample of who this node peers
+    // with (and itself), so a new node can find peers without being one yet.
+    router.get('/v1/peers/peers', () => ({
+      self: this.reference(),
+      peers: this.diversify(
+        this.config.peering.peers.map((entry) => entry.ref),
+        Math.min(16, Math.max(1, this.config.peering.maxPeers || 16))
+      ),
+    }));
 
     router.post('/v1/peers/metadata', async (ctx) => {
       peer(ctx);
@@ -970,6 +1157,31 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private adminRoutes(): void {
     const router = this.router;
     const admin = (ctx: Ctx) => this.requireAdmin(ctx);
+
+    // The continuous peer-search job: run a round now, or change how often it runs and
+    // how often this node answers peers.
+    router.post('/v1/admin/peers/search', async (ctx) => {
+      admin(ctx);
+      return { results: await this.runPeerSearch() };
+    });
+    router.post('/v1/admin/peers/job', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ enabled?: boolean; intervalMs?: number; adopt?: boolean; limit?: number; respondIntervalMs?: number }>(ctx.req);
+      const peering = this.config.peering;
+      if (body.enabled !== undefined) peering.job.enabled = Boolean(body.enabled);
+      if (body.intervalMs !== undefined) peering.job.intervalMs = Math.max(5_000, Math.round(Number(body.intervalMs) || 0));
+      if (body.adopt !== undefined) peering.job.adopt = Boolean(body.adopt);
+      if (body.limit !== undefined) peering.job.limit = Math.max(1, Math.min(200, Math.round(Number(body.limit) || 50)));
+      if (body.respondIntervalMs !== undefined) peering.respondIntervalMs = Math.max(0, Math.round(Number(body.respondIntervalMs) || 0));
+      this.configFile.changed();
+      this.startPeering();
+      return { peering };
+    });
+    router.post('/v1/admin/peers/bootstrap', async (ctx) => {
+      admin(ctx);
+      const added = await this.bootstrapPeers();
+      return { added, peers: this.config.peering.peers };
+    });
 
     router.get('/v1/admin/content', (ctx) => {
       admin(ctx);
@@ -1154,7 +1366,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         if (!ref) throw badRequest('Every peer must be a node reference');
         return { ref: String(entry.ref).trim(), fetch: entry.fetch !== false, serve: entry.serve !== false };
       });
-      this.configFile.data.peering = { peers };
+      this.configFile.data.peering = { ...this.configFile.data.peering, peers };
       this.configFile.changed();
       return { peers };
     });

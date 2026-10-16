@@ -175,7 +175,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   // Opens a hidden profile: the only way to one is its username and password.
   on('POST', '/api/profiles/unlock', async (request) => core.unlockHidden(await request.json()));
   on('PATCH', '/api/profiles/:id', async (request) => ({ profiles: await core.updateProfile({ ...(await request.json()), id: request.params.id }) }));
-  on('DELETE', '/api/profiles/:id', (request) => ({ profiles: core.deleteProfile(request.params.id) }));
+  on('DELETE', '/api/profiles/:id', async (request) => ({ profiles: await core.deleteProfile(request.params.id, await request.json()) }));
   on('POST', '/api/profiles/:id/switch', async (request) => core.switchProfile({ ...(await request.json()), id: request.params.id }));
   on('GET', '/api/identity/export', () => ({ seed: formatSeed(core.store.identity.seed), id: core.store.identity.id }));
   on('POST', '/api/identity/import', async (request) => {

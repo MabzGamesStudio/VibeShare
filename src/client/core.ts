@@ -301,6 +301,12 @@ export class ClientCore {
     if (media && all[0] && /^https?:\/\//.test(media.url)) {
       view.embeds.unshift({ kind: media.type, src: media.url, page: view.item?.pageUrl ?? view.embeds[0]?.page ?? media.url, label: platformOf(view.id).name, source: all[0] });
     }
+    // The user disabled every external embed: only cid content and its metadata show,
+    // with a placeholder standing in for the platform's picture or player.
+    if (this.settings.blockExternalEmbeds) {
+      view.embeds = [];
+      view.embedsDisabled = true;
+    }
     return view;
   }
 
@@ -621,10 +627,25 @@ export class ClientCore {
     return this.profileSummaries();
   }
 
-  deleteProfile(id: string): ProfileSummary[] {
+  /** Deletes a profile, but only with its username and password (typed confirmation for a public profile). */
+  async deleteProfile(id: string, credentials: { username?: string; password?: string }): Promise<ProfileSummary[]> {
     const data = this.store.data.data;
     this.ensureProfiles();
     if (id === data.activeProfile) throw badRequest('Switch to another profile before deleting this one');
+    const target = data.profiles.find((profile) => profile.id === id);
+    if (!target) throw notFound('No such profile');
+    const username = String(credentials.username ?? '');
+    const password = String(credentials.password ?? '');
+    if (!username || !password) throw badRequest('Enter the profile username and password to delete it');
+    if (target.access.mode === 'password') {
+      // A protected (or hidden) profile is deleted only with its own username and password.
+      const ok = await verifyProfilePassword(target.access, username, password);
+      if (!ok) throw badRequest('Wrong username or password for this profile');
+    } else if (username !== target.name) {
+      // A public profile has no password of its own: its name is typed as the username
+      // and the password field confirms the intent to delete.
+      throw badRequest('Type the profile name as the username to confirm deletion');
+    }
     const before = data.profiles.length;
     data.profiles = data.profiles.filter((profile) => profile.id !== id);
     if (data.profiles.length === before) throw notFound('No such profile');

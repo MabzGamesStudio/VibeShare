@@ -23,7 +23,24 @@ export interface PlayOptions {
 
 const AUDIO_FORMATS = new Set(['music', 'audio', 'podcast']);
 
+/**
+ * When on, no external content is embedded or previewed: only content hosted on the
+ * network (its cid) plays and only its metadata shows, with a lovely placeholder in
+ * place of the platform's picture or player.
+ */
+let blockExternal = false;
+
+export function setBlockExternalEmbeds(blocked: boolean): void {
+  blockExternal = blocked;
+}
+
+/** True when this item is external (no cid) and external content is disabled. */
+export function placeholderFor(item: Pick<FeedItem, 'id'>): boolean {
+  return blockExternal && !parseContentId(item.id)?.native;
+}
+
 export function embedPlayable(item: Pick<FeedItem, 'id'>, options: PlayOptions = {}): Playable {
+  if (blockExternal) return { kind: 'none', src: '' };
   const source = parseContentId(item.id)?.sources[0];
   if (!source) return { kind: 'none', src: '' };
   const embed = embedFor(source, { ...options, parentHost: location.hostname });
@@ -38,6 +55,7 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
     const kind = item.format === 'image' ? 'image' : AUDIO_FORMATS.has(item.format) ? 'audio' : 'video';
     return { kind, src: streamUrl(parsed.base), fallback: embed.kind !== 'none' ? embed : undefined };
   }
+  if (blockExternal) return { kind: 'none', src: '', page: item.pageUrl };
   if (item.media && /^https?:\/\//.test(item.media.url)) {
     return { kind: item.media.type, src: item.media.url, page: item.pageUrl ?? embed.page, fallback: embed.kind !== 'none' ? embed : undefined };
   }
@@ -47,6 +65,7 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
 /** The best still image of an item: the image itself for images, otherwise its thumbnail. */
 export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnailUrl'>): string | undefined {
   const parsed = parseContentId(item.id);
+  if (placeholderFor(item)) return undefined;
   if (item.format === 'image') {
     if (parsed?.native) return streamUrl(parsed.base);
     if (item.media?.type === 'image') return item.media.url;

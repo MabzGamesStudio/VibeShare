@@ -1525,6 +1525,21 @@ a.field-platform:hover {
   color: rgba(255, 255, 255, 0.9);
 }
 
+button.thumb-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* An inline player fills the card it plays in (the dual view plays videos in place). */
+.thumb-link > .media-view {
+  position: absolute;
+  inset: 0;
+}
+
 .poster {
   display: block;
   width: 100%;
@@ -1540,9 +1555,49 @@ img.poster-contain {
 }
 
 .poster-empty {
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   color: rgba(255, 255, 255, 0.9);
+  text-align: center;
+  padding: 12px;
+}
+
+/* A lovely placeholder standing in for a hidden external preview: the format's icon
+   over a gradient, with the content's own title and creator. */
+.poster-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 92%;
+}
+
+.poster-placeholder-title {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.poster-placeholder-creator {
+  font-size: 11.5px;
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.poster-placeholder-note {
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
 }
 
 .thumb-actions {
@@ -2479,156 +2534,6 @@ button.layout-option.on {
 
   .credit-chip {
     padding: 8px 10px;
-  }
-}
-
-/* ---------------------------------------------------------------- 2D canvas */
-
-/* A dark stage in both themes: cards far from the middle fade into it. */
-.canvas-wrap {
-  position: relative;
-  overflow: hidden;
-  background: radial-gradient(ellipse at center, #1a1d2b 0%, #08090d 75%);
-  color-scheme: dark;
-  user-select: none;
-}
-
-.canvas-plane {
-  position: absolute;
-  inset: 0;
-  touch-action: none;
-  cursor: grab;
-  outline: none;
-}
-
-.canvas-plane:active {
-  cursor: grabbing;
-}
-
-.canvas-card {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform-origin: center center;
-  will-change: transform;
-  border-radius: 14px;
-  background: #151821;
-  color: #e8eaf2;
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.35);
-  overflow: hidden;
-  --dim: 0.8;
-}
-
-.canvas-media {
-  position: relative;
-  background: var(--bg-elev-2);
-  overflow: hidden;
-}
-
-.canvas-media .poster {
-  object-fit: cover;
-  pointer-events: none;
-}
-
-.canvas-info {
-  padding: 7px 9px 9px;
-  line-height: 1.25;
-}
-
-.canvas-title {
-  font-weight: 600;
-  font-size: 12.5px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.canvas-creator {
-  margin-top: 2px;
-  font-size: 11px;
-  color: #9aa1b5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Far from the middle a card fades into black; in the middle it is clear. */
-.canvas-dim {
-  position: absolute;
-  inset: 0;
-  background: #000;
-  opacity: var(--dim);
-  pointer-events: none;
-}
-
-.canvas-card-empty {
-  width: 220px;
-  height: 160px;
-  background: #1c2030;
-  box-shadow: none;
-}
-
-.canvas-header {
-  position: absolute;
-  top: 14px;
-  left: 22px;
-  z-index: 20000;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px 6px 12px;
-  border-radius: 999px;
-  background: rgba(13, 15, 20, 0.72);
-  color: #e8eaf2;
-  backdrop-filter: blur(8px);
-}
-
-.canvas-header button {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.14);
-  color: #e8eaf2;
-}
-
-.canvas-header button.ghost {
-  background: transparent;
-  border-color: transparent;
-}
-
-.canvas-header h1 {
-  font-size: 18px;
-}
-
-.canvas-hint,
-.canvas-loading {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
-  z-index: 20000;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 14px;
-  border-radius: 999px;
-  background: rgba(13, 15, 20, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-size: 13px;
-  color: #c4c9d6;
-  pointer-events: none;
-}
-
-.canvas-message {
-  position: absolute;
-  inset: 0;
-  z-index: 20000;
-  display: grid;
-  place-items: center;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .canvas-card {
-    will-change: auto;
   }
 }
 

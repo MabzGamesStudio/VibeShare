@@ -80,12 +80,16 @@ describe('client profiles', async () => {
     await api('/api/profiles', { body: { name: 'Temp' } });
     const withTemp = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
     const temp = withTemp.profiles.find((profile) => profile.name === 'Temp')!;
-    await api(`/api/profiles/${temp.id}`, { method: 'DELETE' });
+    // Deleting a profile now requires its username and password (a public profile is
+    // confirmed by typing its name as the username).
+    await assert.rejects(api(`/api/profiles/${temp.id}`, { method: 'DELETE' }), /username and password/);
+    await assert.rejects(api(`/api/profiles/${temp.id}`, { method: 'DELETE', body: { username: 'Wrong', password: 'x' } }), /Type the profile name/);
+    await api(`/api/profiles/${temp.id}`, { method: 'DELETE', body: { username: 'Temp', password: 'confirm' } });
     const afterDelete = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
     assert.equal(afterDelete.profiles.length, 2);
 
     // The active profile cannot be deleted.
-    await assert.rejects(api(`/api/profiles/${main.id}`, { method: 'DELETE' }), /Switch to another profile/);
+    await assert.rejects(api(`/api/profiles/${main.id}`, { method: 'DELETE', body: { username: main.name, password: 'x' } }), /Switch to another profile/);
   });
 });
 

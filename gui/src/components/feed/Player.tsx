@@ -2,18 +2,26 @@ import { ExternalLink, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FeedItem } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
-import { controlEmbed, playableFor, useMediaSrc, type Playable } from '../../media';
+import { controlEmbed, placeholderFor, playableFor, useMediaSrc, type Playable } from '../../media';
 import { gradientFor } from '../../util';
 import { FormatIcon } from '../ContentCard';
 
-/** A still preview: the thumbnail, or a gradient with the format's icon. */
+/** A still preview: the thumbnail, or a lovely gradient placeholder with the format's icon. */
 export function Poster({ item, src, fit = 'cover' }: { item: FeedItem; src?: string; fit?: 'cover' | 'contain' }) {
   const [failed, setFailed] = useState(false);
-  const image = useMediaSrc(src ?? item.thumbnailUrl);
+  const blocked = placeholderFor(item);
+  const image = useMediaSrc(blocked ? undefined : (src ?? item.thumbnailUrl));
   if (!image || failed) {
     return (
       <div className="poster poster-empty" style={{ background: gradientFor(item.id) }}>
         <FormatIcon format={item.format} size={46} />
+        {blocked && (
+          <div className="poster-placeholder">
+            <span className="poster-placeholder-title">{item.title}</span>
+            {item.creator && <span className="poster-placeholder-creator">{item.creator.name}</span>}
+            <span className="poster-placeholder-note">External preview hidden</span>
+          </div>
+        )}
       </div>
     );
   }

@@ -45,11 +45,10 @@ export interface StorageServiceSettings {
 }
 
 /** How a page shows its content. */
-export const PAGE_LAYOUTS = ['canvas', 'grid', 'list', 'shorts', 'stream', 'masonry'] as const;
+export const PAGE_LAYOUTS = ['grid', 'list', 'shorts', 'stream', 'masonry'] as const;
 export type PageLayout = (typeof PAGE_LAYOUTS)[number];
 
 export const PAGE_LAYOUT_LABELS: Record<PageLayout, string> = {
-  canvas: '2D canvas (move in any direction; the card in the middle comes forward)',
   grid: 'Grid of cards',
   list: 'List',
   shorts: 'Vertical swipe (one at a time, plays automatically)',
@@ -177,6 +176,12 @@ export interface Settings {
   feedMode: 'blend' | 'primary';
   /** What to do with content no algorithm node has reviewed. */
   unknownContent: 'warn' | 'hide' | 'allow';
+  /**
+   * Disable every external content embed (platform players and platform media files).
+   * Only content hosted on the network (its cid) and its metadata show then, with a
+   * placeholder standing in for the picture or player.
+   */
+  blockExternalEmbeds: boolean;
   /** Account mode for newly added nodes. */
   defaultAuth: AuthMode;
   autoplay: boolean;
@@ -295,6 +300,8 @@ export interface ContentView {
   downloadUrl?: string;
   /** External sources to embed when no provider has the content. */
   embeds: (Embed & { source: ExternalSource })[];
+  /** True when the user disabled every external embed (placeholders show instead). */
+  embedsDisabled?: boolean;
   /** Providers named by the algorithm node that the user has not added. */
   suggestedProviders: string[];
   providerErrors: { node: string; name: string; error: string }[];

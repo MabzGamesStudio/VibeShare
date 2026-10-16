@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
 import { useLocation } from 'react-router-dom';
 import { api, errorMessage, onNodesChanged } from './api';
+import { setBlockExternalEmbeds } from './media';
 
 interface Toast {
   id: number;
@@ -74,6 +75,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const theme = state?.settings.theme ?? 'system';
     document.documentElement.dataset.theme = theme === 'system' ? '' : theme;
   }, [state?.settings.theme]);
+
+  // Hide every external embed and preview when the user disabled them.
+  useEffect(() => {
+    setBlockExternalEmbeds(Boolean(state?.settings.blockExternalEmbeds));
+  }, [state?.settings.blockExternalEmbeds]);
 
   const value = useMemo<AppContext>(
     () => ({

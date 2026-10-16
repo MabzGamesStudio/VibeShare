@@ -954,6 +954,18 @@ export function WatchPage() {
             <NativePlayer view={view} autoplay={state.settings.autoplay && view.status === 'listed'} mediaRef={mediaRef} />
           ) : view.embeds.length ? (
             <ExternalPlayer view={view} index={embedIndex} setIndex={setEmbedIndex} />
+          ) : view.embedsDisabled && !view.native ? (
+            <div className="player file">
+              <div>
+                <FormatIcon format={view.item?.format ?? 'video'} size={54} />
+                <p style={{ marginTop: 12, fontWeight: 600 }}>{title}</p>
+                {creator && <p className="small muted">{creator.name}</p>}
+                <p className="small faint" style={{ marginTop: 8, maxWidth: 320 }}>
+                  External content is disabled — only content hosted on the network (its cid) and its metadata show here. A lovely
+                  placeholder stands in for the platform's player.
+                </p>
+              </div>
+            </div>
           ) : (
             <Unavailable view={view} onAdded={load} />
           )}

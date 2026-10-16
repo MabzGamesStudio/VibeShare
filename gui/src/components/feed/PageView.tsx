@@ -9,7 +9,6 @@ import { api } from '../../api';
 import { useApp } from '../../state';
 import { AddNodes } from '../AddNodes';
 import { Chips, Empty, Spinner } from '../ui';
-import { CanvasLayout } from './Canvas';
 import { GridLayout, ListLayout, MasonryLayout } from './Cards';
 import { PageIconView } from './icons';
 import { PageEditor } from './PageEditor';
@@ -86,13 +85,13 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
     key,
     settings?.loadPauseMs ?? 1500
   );
-  const sentinel = useSentinel(paged.loadMore, !paged.done && page.layout !== 'shorts' && page.layout !== 'canvas', paged.items.length);
+  const sentinel = useSentinel(paged.loadMore, !paged.done && page.layout !== 'shorts', paged.items.length);
 
   if (!state || !settings) return null;
   if (!algorithms.length) return <Welcome />;
 
   const ipfsGateway = settings.ipfsGateway;
-  const quick = page.filters.formats.length === 0 && page.layout !== 'shorts' && page.layout !== 'canvas';
+  const quick = page.filters.formats.length === 0 && page.layout !== 'shorts';
   const summary = describe(page, settings.preferences, enabled.length, settings.feedMode);
 
   const empty: ReactNode =
@@ -137,35 +136,6 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
     ) : null;
 
   const editor = editing && <PageEditor page={page} onClose={() => setEditing(false)} />;
-
-  if (page.layout === 'canvas') {
-    return (
-      <div className="page-shorts">
-        <CanvasLayout
-          paged={paged}
-          empty={empty}
-          header={
-            embedded ? null : (
-              <>
-                <h1 className="row" style={{ gap: 8 }}>
-                  <PageIconView icon={page.icon} size={20} /> {page.title}
-                </h1>
-                {page.source === 'feed' && (
-                  <button className="ghost icon small" title="New mix" aria-label="New mix" onClick={() => setSeed(Math.random().toString(36).slice(2))}>
-                    <RefreshCw size={15} />
-                  </button>
-                )}
-                <button className="small" onClick={() => setEditing(true)}>
-                  <Settings2 size={14} /> Customize
-                </button>
-              </>
-            )
-          }
-        />
-        {editor}
-      </div>
-    );
-  }
 
   if (page.layout === 'shorts') {
     return (
@@ -238,7 +208,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
       ) : paged.items.length === 0 && !paged.loading ? (
         empty
       ) : Layout ? (
-        <Layout items={paged.items} page={page} />
+        <Layout items={paged.items} page={page} inline={embedded} />
       ) : (
         <StreamLayout items={paged.items} page={page} ipfsGateway={ipfsGateway} />
       )}

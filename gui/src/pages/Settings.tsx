@@ -395,6 +395,9 @@ function ProfilesCard() {
   const [protecting, setProtecting] = useState<ProfileSummary | null>(null);
   const [protectUser, setProtectUser] = useState('');
   const [protectPassword, setProtectPassword] = useState('');
+  const [deleting, setDeleting] = useState<ProfileSummary | null>(null);
+  const [deleteUser, setDeleteUser] = useState('');
+  const [deletePassword, setDeletePassword] = useState('');
 
   // A hidden profile that is active but sealed: the client is locked until it opens.
   useEffect(() => {
@@ -439,6 +442,25 @@ function ProfilesCard() {
       setProtectUser('');
       setProtectPassword('');
       toast('Profile updated', 'success');
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
+
+  // Deleting a profile is destructive: it is confirmed with the profile's username and
+  // password (a public profile has none of its own, so its name is typed as the username).
+  const remove = async () => {
+    if (!deleting) return;
+    try {
+      await api(`/api/profiles/${encodeURIComponent(deleting.id)}`, {
+        method: 'DELETE',
+        body: { username: deleteUser.trim(), password: deletePassword },
+      });
+      setDeleting(null);
+      setDeleteUser('');
+      setDeletePassword('');
+      toast('Profile deleted', 'success');
       await refresh();
     } catch (error) {
       toast(errorMessage(error), 'error');
@@ -540,14 +562,10 @@ function ProfilesCard() {
                 <button
                   className="small danger"
                   title="Delete"
-                  onClick={async () => {
-                    if (!window.confirm(`Delete the profile “${profile.name}” and all of its data?`)) return;
-                    try {
-                      await api(`/api/profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
-                      await refresh();
-                    } catch (error) {
-                      toast(errorMessage(error), 'error');
-                    }
+                  onClick={() => {
+                    setDeleting(profile);
+                    setDeleteUser(profile.access === 'protected' ? (profile.username ?? '') : profile.name);
+                    setDeletePassword('');
                   }}
                 >
                   <Trash2 size={14} />
@@ -716,6 +734,38 @@ function ProfilesCard() {
           </div>
         </Modal>
       )}
+      {deleting && (
+        <Modal
+          title={`Delete ${deleting.name}`}
+          onClose={() => setDeleting(null)}
+          actions={
+            <>
+              <button onClick={() => setDeleting(null)}>Cancel</button>
+              <button className="danger" disabled={!deleteUser.trim() || !deletePassword} onClick={remove}>
+                Delete profile
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            <p className="small muted">
+              This permanently removes <strong>{deleting.name}</strong> and all of its data (nodes, settings, history and client id) from this
+              device. Confirm with the profile's username and password.
+              {deleting.access !== 'protected' && ' This profile is public and has no password of its own — type its name as the username.'}
+            </p>
+            <div className="form-grid">
+              <label className="field">
+                Username
+                <input type="text" value={deleteUser} onChange={(e) => setDeleteUser(e.target.value)} autoComplete="off" autoFocus />
+              </label>
+              <label className="field">
+                Password
+                <input type="password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} autoComplete="current-password" />
+              </label>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -851,6 +901,15 @@ export function SettingsPage() {
       <div className="card form-stack">
         <h2>Playback and storage</h2>
         <Switch checked={s.autoplay} onChange={(autoplay) => void updateSettings({ autoplay })} label="Start playing reviewed content automatically" />
+        <Switch
+          checked={s.blockExternalEmbeds}
+          onChange={(blockExternalEmbeds) => void updateSettings({ blockExternalEmbeds })}
+          label="Disable all external content embeds"
+        />
+        <span className="hint">
+          When on, only content hosted on the network (its cid) plays and only its metadata shows. External platform players and previews are
+          replaced by a placeholder.
+        </span>
         <div className="form-grid">
           <label className="field">
             Pause before loading more (seconds)
