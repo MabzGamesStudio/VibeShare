@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { PeerEntry } from '../../../src/shared/protocol';
 import { FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, type Format, type Rating } from '../../../src/shared/taxonomy';
-import { Loading } from '../components/ui';
+import { Loading, Switch } from '../components/ui';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
 
@@ -135,6 +135,87 @@ export function Peers() {
         )}
       </div>
       <PeersAsk peers={peers ?? []} />
+      <PeerSyncJob />
+    </div>
+  );
+}
+
+/** The continuous peer-sync job: how often this node requests discoveries from peers, and
+ *  the least often it responds to them (the rate at which it shares metadata). */
+function PeerSyncJob() {
+  type Job = { enabled: boolean; intervalMs: number; adopt: boolean; limit: number };
+  const [job, setJob] = useState<Job | null>(null);
+  const [respond, setRespond] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ job: Job; respondIntervalMs: number }>('/v1/admin/peers')
+      .then((r) => {
+        setJob(r.job);
+        setRespond(r.respondIntervalMs);
+      })
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const save = async (next: Job, respondIntervalMs: number) => {
+    setJob(next);
+    setRespond(respondIntervalMs);
+    try {
+      await admin('/v1/admin/peers/job', { method: 'POST', body: { ...next, respondIntervalMs } });
+    } catch (e) {
+      show(message(e));
+      load();
+    }
+  };
+
+  if (!job) return <Loading />;
+  return (
+    <div className="card form-stack">
+      <h3>Automatic peer sync</h3>
+      <p className="small muted">
+        Continuously ask peers for new content (discoveries) and take them in, on a schedule. Set how often it requests from peers, and the
+        least often this node responds to a peer (the rate at which it shares metadata).
+      </p>
+      <Switch checked={job.enabled} onChange={(enabled) => void save({ ...job, enabled }, respond)} label="Run automatically" />
+      <div className="form-grid">
+        <label className="field">
+          Request from peers (minutes)
+          <input
+            type="number"
+            min={1}
+            defaultValue={Math.round(job.intervalMs / 60000)}
+            onBlur={(e) => void save({ ...job, intervalMs: Math.round(Number(e.target.value) * 60000) }, respond)}
+          />
+        </label>
+        <label className="field">
+          Respond to a peer at most once per (ms)
+          <input type="number" min={0} defaultValue={respond} onBlur={(e) => void save(job, Number(e.target.value))} />
+        </label>
+        <label className="field">
+          Take per round
+          <input type="number" min={1} defaultValue={job.limit} onBlur={(e) => void save({ ...job, limit: Number(e.target.value) }, respond)} />
+        </label>
+      </div>
+      <div className="row">
+        <button
+          disabled={running}
+          onClick={async () => {
+            setRunning(true);
+            try {
+              const r = await admin<{ results: unknown[] }>('/v1/admin/peers/search', { method: 'POST', body: {} });
+              show(`Ran a round across ${r.results.length} peer${r.results.length === 1 ? '' : 's'}`);
+            } catch (e) {
+              show(message(e));
+            }
+            setRunning(false);
+          }}
+        >
+          {running ? 'Running…' : 'Run a round now'}
+        </button>
+        <span className="hint">It also runs on its own when enabled.</span>
+      </div>
+      {toast && <div className="banner info small">{toast}</div>}
     </div>
   );
 }

@@ -588,6 +588,75 @@ interface PeerRow {
   receive: boolean;
 }
 
+/** Automatic syncing of content bytes with peers: how often, and the share/receive rates. */
+function SyncJob() {
+  const [sync, setSync] = useState<{ enabled: boolean; intervalMs: number; sendRatePerMin: number; receiveRatePerMin: number } | null>(null);
+  const [running, setRunning] = useState(false);
+  const [toast, show] = useToast();
+  type Sync = { enabled: boolean; intervalMs: number; sendRatePerMin: number; receiveRatePerMin: number };
+  const load = useCallback(() => {
+    admin<{ sync: Sync }>('/v1/admin/peers')
+      .then((r) => setSync(r.sync))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const save = async (next: Sync) => {
+    setSync(next);
+    try {
+      await admin('/v1/admin/peers/sync/config', { method: 'POST', body: next });
+    } catch (e) {
+      show(message(e));
+      load();
+    }
+  };
+
+  if (!sync) return <Loading />;
+  return (
+    <div className="card form-stack">
+      <h3>Automatic content sync</h3>
+      <p className="small muted">
+        Periodically sync content bytes with peers: share chunks they are missing and pull chunks this node is missing. Set how often it runs
+        and the most chunks shared and received per minute.
+      </p>
+      <Switch checked={sync.enabled} onChange={(enabled) => void save({ ...sync, enabled })} label="Run automatically" />
+      <div className="form-grid">
+        <label className="field">
+          How often (minutes)
+          <input type="number" min={1} defaultValue={Math.round(sync.intervalMs / 60000)} onBlur={(e) => void save({ ...sync, intervalMs: Math.round(Number(e.target.value) * 60000) })} />
+        </label>
+        <label className="field">
+          Share rate (chunks/min)
+          <input type="number" min={0} defaultValue={sync.sendRatePerMin} onBlur={(e) => void save({ ...sync, sendRatePerMin: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          Receive rate (chunks/min)
+          <input type="number" min={0} defaultValue={sync.receiveRatePerMin} onBlur={(e) => void save({ ...sync, receiveRatePerMin: Number(e.target.value) })} />
+        </label>
+      </div>
+      <div className="row">
+        <button
+          disabled={running}
+          onClick={async () => {
+            setRunning(true);
+            try {
+              const r = await admin<{ sent: number; received: number }>('/v1/admin/peers/sync', { method: 'POST', body: {} });
+              show(`Synced: shared ${r.sent}, received ${r.received}`);
+            } catch (e) {
+              show(message(e));
+            }
+            setRunning(false);
+          }}
+        >
+          {running ? 'Syncing…' : 'Run sync now'}
+        </button>
+        <span className="hint">It also runs on its own when enabled.</span>
+      </div>
+      {toast && <div className="banner info small">{toast}</div>}
+    </div>
+  );
+}
+
 /** Other content providers this node exchanges content bytes (chunks) with. */
 function Peering() {
   const [peers, setPeers] = useState<PeerRow[] | null>(null);
@@ -687,6 +756,7 @@ export function ProviderTabs({ tab }: { tab: string }) {
       <>
         <Storage />
         <Peering />
+        <SyncJob />
       </>
     );
   return null;

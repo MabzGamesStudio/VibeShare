@@ -648,10 +648,26 @@ export class ClientCore {
     }
     if (id === data.activeProfile) {
       // Deleting the active profile (an anonymous account is deleted this way): switch to
-      // another one first. The last remaining profile cannot be deleted.
+      // another one first. When it is the only profile, wipe it and start clean instead of
+      // leaving the client with none.
       const other = data.profiles.find((profile) => profile.id !== id && !profile.hidden);
-      if (!other) throw badRequest('Create another profile before deleting this one');
-      this.loadProfile(other, this.payloadOf(other), data.settings);
+      if (other) {
+        this.loadProfile(other, this.payloadOf(other), data.settings);
+      } else {
+        const previousSettings = data.settings;
+        const freshSettings = defaultSettings();
+        const fresh: ProfilePayload = {
+          name: freshSettings.profile.name || 'Main',
+          identitySeed: encodeProfileSeed(newProfileSeed()),
+          nodes: [],
+          settings: freshSettings,
+          subscriptions: [],
+          library: [],
+          history: [],
+        };
+        this.loadProfile(target, fresh, previousSettings);
+        return this.profileSummaries();
+      }
     }
     const before = data.profiles.length;
     data.profiles = data.profiles.filter((profile) => profile.id !== id);

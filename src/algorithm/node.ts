@@ -1362,7 +1362,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     // Peering with other nodes: metadata of a cid or a link, and discoveries by criteria.
     router.get('/v1/admin/peers', (ctx) => {
       admin(ctx);
-      return { peers: this.config.peering.peers };
+      return {
+        peers: this.config.peering.peers,
+        job: this.config.peering.job,
+        respondIntervalMs: this.config.peering.respondIntervalMs,
+        maxPeers: this.config.peering.maxPeers,
+        bootstrap: this.config.peering.bootstrap,
+      };
     });
     router.put('/v1/admin/peers', async (ctx) => {
       admin(ctx);

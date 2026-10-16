@@ -5,6 +5,7 @@ import type { ServiceStatus } from '../../../src/shared/clientapi';
 import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
 import { api, IS_STATIC } from '../api';
 import { Chips, Loading, Switch, toggle } from '../components/ui';
+import { OfferLinksCard } from '../components/OfferLinks';
 import { useApp } from '../state';
 import { formatBytes, timeAgo, watchPath } from '../util';
 
@@ -261,6 +262,8 @@ export function EarnPage() {
         </div>
       </div>
       {IS_STATIC ? <StorageUnavailable /> : <StorageService />}
+      <div style={{ height: 16 }} />
+      <OfferLinksCard />
       <div style={{ height: 16 }} />
       <ContributionsCard />
     </div>

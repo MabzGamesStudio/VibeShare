@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, describe, it } from 'node:test';
 import { bytesCid, bytesMatchCid } from '../src/shared/content.js';
-import { clientFor, randomBytesOf, startProvider } from './helpers.js';
+import { clientFor, randomBytesOf, startClient, startProvider, tempDir } from './helpers.js';
 
 describe('downloadable content copies (URLs and base URLs)', async () => {
   // The client's own endpoint serving downloadable copies, at a single URL and at a base.
@@ -83,5 +83,28 @@ describe('downloadable content copies (URLs and base URLs)', async () => {
   it('caps how many content URLs and base URLs a client may add', async () => {
     await assert.rejects(client.json('/v1/content-urls', { body: { baseUrl: `${origin}/base` } }), /at most 1 base URLs/);
     await assert.rejects(client.json('/v1/content-urls', { body: { cid: bytesCid(randomBytesOf(16, 9)), url: `${origin}/x` } }), /at most 1 content URLs/);
+  });
+
+  it('lets a client node offer links through its own local API', async () => {
+    const { dir, cleanup } = tempDir();
+    const { client: node, api } = await startClient(dir);
+    try {
+      await api('/api/nodes', { body: { text: provider.reference() } });
+      const state = await api<{ nodes: { id: string; type: string }[] }>('/api/state');
+      const pid = state.nodes.find((n) => n.type === 'provider')!.id;
+      const data = randomBytesOf(512, 21);
+      files.set('client.bin', data);
+      const cid = bytesCid(data);
+      const result = await api<{ results: { record: { status: string } }[] }>(`/api/nodes/${pid}/content-urls`, {
+        method: 'POST',
+        body: { items: [{ cid, url: `${origin}/client.bin` }] },
+      });
+      assert.equal(result.results[0].record.status, 'accepted', 'submitted one URL + cid through the client API');
+      const mine = await api<{ items: { cid?: string }[] }>(`/api/nodes/${pid}/content-urls`);
+      assert.ok(mine.items.some((i) => i.cid === cid), 'and it shows among the client’s links');
+    } finally {
+      await node.stop();
+      cleanup();
+    }
   });
 });

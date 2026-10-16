@@ -63,6 +63,20 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     nodes.setBalance(entry.id, result.account.balance);
     return result;
   });
+  // Downloadable content copies: offer a provider download URLs (with their cid) or base
+  // URLs; it pays per download whose bytes hash to the cid exactly.
+  on('GET', '/api/nodes/:id/content-urls', (request) => nodes.client(node(request)).json('/v1/content-urls/mine'));
+  on('POST', '/api/nodes/:id/content-urls', async (request) => {
+    const entry = node(request);
+    const body = await request.json<{ items?: { cid?: string; url?: string; baseUrl?: string }[] }>();
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) throw badRequest('Add at least one content URL or base URL');
+    const results: unknown[] = [];
+    for (const item of items) {
+      results.push(await nodes.client(entry).json('/v1/content-urls', { body: item }));
+    }
+    return { results };
+  });
   on('GET', '/api/nodes/:id/payments', (request) => nodes.client(node(request)).json('/v1/payments', { auth: false }));
   on('POST', '/api/nodes/:id/invoices', async (request) => {
     const body = await request.json<{ method?: string; credits?: number }>();

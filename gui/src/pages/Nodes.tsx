@@ -7,6 +7,7 @@ import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
 import { api, errorMessage } from '../api';
 import { AddNodes } from '../components/AddNodes';
 import { CopyButton, Modal, StatusDot, Switch } from '../components/ui';
+import { OfferLinksCard } from '../components/OfferLinks';
 import { useApp } from '../state';
 import { formatBytes, shortId } from '../util';
 
@@ -381,6 +382,8 @@ export function NodesPage() {
         help="Decide what you see: they rank content, filter it by your preferences and mark it listed, blocked or unknown."
       />
       <NodeSection type="provider" title="Content providers" help="Send you the content (and charge their own credits for it)." />
+      <div style={{ height: 16 }} />
+      <OfferLinksCard />
       {exporting !== null && (
         <Modal title="Your node list" onClose={() => setExporting(null)} actions={<CopyButton text={exporting} label="Copy all" small={false} />}>
           <p className="small muted" style={{ marginBottom: 10 }}>

@@ -51,6 +51,34 @@ describe('content providers peering', async () => {
     assert.match(pushed.results[0].error ?? '', /peer|403|forbidden/i);
     await admin(b.url(), '/v1/admin/peers', { method: 'PUT', body: { peers: [{ ref: a.reference(), send: true, receive: true }] } });
   });
+
+  it('syncs content with peers at the configured rates', async () => {
+    // A knows B's content but lacks the bytes; the sync job pulls them.
+    const { manifest } = await b.importBuffer(randomBytesOf(3072, 11), { name: 'sync.bin', mime: 'application/octet-stream' });
+    a.store.adopt(JSON.parse(JSON.stringify(manifest)), 'operator');
+    for (const chunk of manifest.chunks) assert.equal(a.store.hasChunk(chunk.id), false);
+
+    // The operator sets how often a round runs and the share/receive rates.
+    const cfg = await admin<{ sync: { sendRatePerMin: number; receiveRatePerMin: number; enabled: boolean } }>(a.url(), '/v1/admin/peers/sync/config', {
+      method: 'POST',
+      body: { enabled: true, intervalMs: 60000, sendRatePerMin: 100, receiveRatePerMin: 100 },
+    });
+    assert.equal(cfg.sync.enabled, true);
+    assert.equal(cfg.sync.sendRatePerMin, 100);
+    assert.equal(cfg.sync.receiveRatePerMin, 100);
+
+    // A round now pulls the missing bytes from B.
+    const round = await admin<{ received: number }>(a.url(), '/v1/admin/peers/sync', { method: 'POST', body: {} });
+    assert.equal(round.received, manifest.chunks.length);
+    for (const chunk of manifest.chunks) assert.equal(a.store.hasChunk(chunk.id), true);
+
+    // The receive rate caps how much moves in one round.
+    const { manifest: second } = await b.importBuffer(randomBytesOf(4096, 12), { name: 'sync2.bin', mime: 'application/octet-stream' });
+    a.store.adopt(JSON.parse(JSON.stringify(second)), 'operator');
+    await admin(a.url(), '/v1/admin/peers/sync/config', { method: 'POST', body: { receiveRatePerMin: 1 } });
+    const capped = await admin<{ received: number }>(a.url(), '/v1/admin/peers/sync', { method: 'POST', body: {} });
+    assert.ok(capped.received <= 1, `the receive rate caps the round (got ${capped.received})`);
+  });
 });
 
 describe('algorithm nodes peering', async () => {

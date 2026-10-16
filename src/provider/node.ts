@@ -79,6 +79,17 @@ export interface ProviderConfig extends BaseConfig {
     peers: { ref: string; send: boolean; receive: boolean }[];
     /** Accept chunks a peer pushes here. */
     acceptPush: boolean;
+    /** Automatic syncing of content bytes (chunks) with peers. */
+    sync: {
+      /** Run the sync job at all (otherwise sync from the dashboard). */
+      enabled: boolean;
+      /** How often a sync round runs (ms). */
+      intervalMs: number;
+      /** Rate limit: the most chunks shared (sent to peers) per minute. */
+      sendRatePerMin: number;
+      /** Rate limit: the most chunks received (from peers) per minute. */
+      receiveRatePerMin: number;
+    };
   };
   /**
    * Downloadable content copies that clients point here: a client gives a download URL
@@ -117,7 +128,7 @@ export function providerDefaults(): ProviderConfig {
       overrides: {},
     },
     rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
-    peering: { peers: [], acceptPush: true },
+    peering: { peers: [], acceptPush: true, sync: { enabled: false, intervalMs: 3_600_000, sendRatePerMin: 120, receiveRatePerMin: 120 } },
     contentUrls: { autoAccept: true, maxUrlsPerClient: 16, maxBaseUrlsPerClient: 4, creditPerDownload: 2 },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
@@ -175,6 +186,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private suggestions: JsonFile<{ items: Record<string, ProviderSuggestion & { signature: string }> }>;
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
   private gcTimer: NodeJS.Timeout;
+  private syncTimer: NodeJS.Timeout | null = null;
 
   constructor(options: NodeOptions<ProviderConfig>) {
     super('provider', providerDefaults(), options);
@@ -404,6 +416,75 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (await this.pullContentUrl(record, cid, url)) return true;
     }
     return false;
+  }
+
+  /**
+   * One round of automatic syncing with peers: share chunks peers are missing and pull
+   * chunks this node is missing, each up to its configured per-minute rate for the time
+   * this round covers.
+   */
+  async syncPeers(): Promise<{ sent: number; received: number; errors: number }> {
+    const sync = this.config.peering.sync;
+    const minutes = Math.max(1 / 60, sync.intervalMs / 60_000);
+    const sendBudget = Math.max(0, Math.round(sync.sendRatePerMin * minutes));
+    const receiveBudget = Math.max(0, Math.round(sync.receiveRatePerMin * minutes));
+    let sent = 0;
+    let received = 0;
+    let errors = 0;
+    for (const record of this.store.list(0, 50)) {
+      const manifest = this.store.getManifest(record.cid);
+      if (!manifest) continue;
+      // Share: send chunks a peer lacks, up to the send budget.
+      for (const peer of this.config.peering.peers) {
+        if (!peer.send || sent >= sendBudget) continue;
+        try {
+          const client = this.peerClient(peer);
+          const answer = await client.json<{ has: Record<string, boolean> }>('/v1/peers/has', {
+            body: { ids: manifest.chunks.map((chunk) => chunk.id) },
+            timeoutMs: 30000,
+          });
+          for (const chunk of manifest.chunks) {
+            if (sent >= sendBudget) break;
+            if (answer.has[chunk.id]) continue;
+            const data = await this.store.getChunk(chunk.id, { peers: false });
+            if (!data) continue;
+            await client.fetch(`/v1/peers/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120000 });
+            sent++;
+          }
+        } catch {
+          errors++;
+        }
+      }
+      // Receive: pull chunks this node lacks, up to the receive budget.
+      for (const chunk of manifest.chunks) {
+        if (received >= receiveBudget) break;
+        if (this.store.hasChunk(chunk.id)) continue;
+        const data = await this.fetchFromPeers(chunk.id);
+        if (data) {
+          await this.store.putChunk(chunk.id, data);
+          received++;
+        }
+      }
+      if (sent >= sendBudget && received >= receiveBudget) break;
+    }
+    return { sent, received, errors };
+  }
+
+  /** Starts (or restarts) the automatic sync job at the configured cadence. */
+  private startSync(): void {
+    this.stopSync();
+    const sync = this.config.peering.sync;
+    if (!sync.enabled) return;
+    const interval = Math.max(5_000, Math.round(sync.intervalMs) || 3_600_000);
+    this.syncTimer = setInterval(() => {
+      void this.syncPeers().catch(() => undefined);
+    }, interval);
+    this.syncTimer.unref?.();
+  }
+
+  private stopSync(): void {
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    this.syncTimer = null;
   }
 
   // -------------------------------------------------------------------------
@@ -964,7 +1045,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     // Peering: other content providers this node exchanges content bytes with.
     router.get('/v1/admin/peers', (ctx) => {
       this.requireAdmin(ctx);
-      return { peers: this.config.peering.peers, acceptPush: this.config.peering.acceptPush };
+      return { peers: this.config.peering.peers, acceptPush: this.config.peering.acceptPush, sync: this.config.peering.sync };
     });
     router.put('/v1/admin/peers', async (ctx) => {
       this.requireAdmin(ctx);
@@ -974,7 +1055,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         if (!ref || ref.type !== 'provider') throw badRequest('Every peer must be a content provider node reference');
         return { ref: String(peer.ref).trim(), send: peer.send !== false, receive: peer.receive !== false };
       });
-      this.configFile.data.peering = { peers, acceptPush: body.acceptPush !== false };
+      this.configFile.data.peering = { ...this.configFile.data.peering, peers, acceptPush: body.acceptPush !== false };
       this.configFile.changed();
       return { peers, acceptPush: body.acceptPush !== false };
     });
@@ -1027,6 +1108,24 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         } else missing++;
       }
       return { fetched, missing };
+    });
+    // Automatic syncing of content bytes with peers: run a round now, or set how often it
+    // runs and the rate limits for sharing (sending) and receiving chunks.
+    router.post('/v1/admin/peers/sync', async (ctx) => {
+      this.requireAdmin(ctx);
+      return this.syncPeers();
+    });
+    router.post('/v1/admin/peers/sync/config', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ enabled?: boolean; intervalMs?: number; sendRatePerMin?: number; receiveRatePerMin?: number }>(ctx.req);
+      const sync = this.config.peering.sync;
+      if (body.enabled !== undefined) sync.enabled = Boolean(body.enabled);
+      if (body.intervalMs !== undefined) sync.intervalMs = Math.max(5_000, Math.round(Number(body.intervalMs) || 0));
+      if (body.sendRatePerMin !== undefined) sync.sendRatePerMin = Math.max(0, Math.round(Number(body.sendRatePerMin) || 0));
+      if (body.receiveRatePerMin !== undefined) sync.receiveRatePerMin = Math.max(0, Math.round(Number(body.receiveRatePerMin) || 0));
+      this.configFile.changed();
+      this.startSync();
+      return { sync };
     });
     router.delete('/v1/admin/content/:cid', async (ctx) => {
       this.requireAdmin(ctx);
@@ -1147,7 +1246,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     return { content: this.store.stats(), storageService: this.service.stats() };
   }
 
+  async start(): Promise<void> {
+    await super.start();
+    this.startSync();
+  }
+
   async stop(): Promise<void> {
+    this.stopSync();
     clearInterval(this.gcTimer);
     this.service.stop();
     await super.stop();

@@ -5,6 +5,7 @@ import type { AccountResponse, NodeEntry } from '../../../src/shared/clientapi';
 import type { Invoice, PaymentMethodInfo } from '../../../src/shared/protocol';
 import { api, errorMessage } from '../api';
 import { CodeBox, Empty, Loading, Spinner, StatusDot } from '../components/ui';
+import { OfferLinksCard } from '../components/OfferLinks';
 import { useApp } from '../state';
 import { timeAgo } from '../util';
 import { AUTH_LABELS } from './Nodes';
@@ -286,6 +287,8 @@ export function WalletPage() {
           {selected && <NodeWallet key={selected.id} node={selected} />}
         </div>
       )}
+      <div style={{ height: 16 }} />
+      <OfferLinksCard />
     </div>
   );
 }

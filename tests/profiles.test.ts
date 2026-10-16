@@ -94,11 +94,13 @@ describe('client profiles', async () => {
     assert.equal(afterMain.profiles[0].name, 'Main');
     assert.equal(afterMain.profiles[0].active, true);
 
-    // The last remaining profile cannot be deleted.
-    await assert.rejects(
-      api(`/api/profiles/${afterMain.profiles[0].id}`, { method: 'DELETE', body: { username: 'Main', password: 'confirm' } }),
-      /Create another profile/
-    );
+    // Deleting the only remaining account wipes it and starts clean.
+    const beforeReset = await api<{ identity: { id: string } }>('/api/state');
+    await api(`/api/profiles/${afterMain.profiles[0].id}`, { method: 'DELETE', body: { username: 'Main', password: 'confirm' } });
+    const afterReset = await api<{ profiles: ProfileSummary[]; identity: { id: string } }>('/api/state');
+    assert.equal(afterReset.profiles.length, 1, 'a fresh profile remains');
+    assert.equal(afterReset.profiles[0].active, true);
+    assert.notEqual(afterReset.identity.id, beforeReset.identity.id, 'the anonymous account was wiped and a new identity issued');
   });
 });
 
