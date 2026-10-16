@@ -29,7 +29,7 @@ export const SOURCE_CATALOG: SourceInfo[] = [
   { key: 'europeana', name: 'Europeana' },
   { key: 'reddit', name: 'Reddit' },
   { key: 'tumblr', name: 'Tumblr' },
-  { key: 'x', name: 'X' },
+  { key: 'x', name: 'Twitter (X)' },
   { key: 'instagram', name: 'Instagram' },
   { key: 'mastodon', name: 'Mastodon' },
   { key: 'bluesky', name: 'Bluesky' },

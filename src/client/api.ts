@@ -154,6 +154,12 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     if (!body.url) throw badRequest('url is required');
     return core.uploadFromUrl(String(body.url));
   });
+  // Fetch content from a link a provider offered; accepted only on an exact cid match.
+  on('POST', '/api/content-link', async (request) => {
+    const body = await request.json<{ url?: string; cid?: string }>();
+    if (!body.url || !body.cid) throw badRequest('url and cid are required');
+    return core.fetchContentLink(String(body.url), String(body.cid));
+  });
   on('POST', '/api/publish/external', async (request) => core.publisher.publishExternal(await request.json<ExternalPublishRequest>(2 * MiB)));
   on('GET', '/api/jobs', () => ({ jobs: [...core.publisher.jobs.values()].reverse() }));
   on('GET', '/api/jobs/:id', (request) => {

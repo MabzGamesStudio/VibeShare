@@ -68,7 +68,6 @@ describe('client profiles', async () => {
   it('renames, protects and deletes profiles', async () => {
     const listed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
     const work = listed.profiles.find((profile) => profile.name === 'Work')!;
-    const main = listed.profiles.find((profile) => profile.active)!;
 
     await api(`/api/profiles/${work.id}`, { method: 'PATCH', body: { name: 'Office' } });
     await api(`/api/profiles/${work.id}`, { method: 'PATCH', body: { makePublic: true } });
@@ -88,8 +87,18 @@ describe('client profiles', async () => {
     const afterDelete = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
     assert.equal(afterDelete.profiles.length, 2);
 
-    // The active profile cannot be deleted.
-    await assert.rejects(api(`/api/profiles/${main.id}`, { method: 'DELETE', body: { username: main.name, password: 'x' } }), /Switch to another profile/);
+    // Deleting the active (anonymous) account switches to the other profile first.
+    await api(`/api/profiles/${office.id}`, { method: 'DELETE', body: { username: 'Office', password: 'confirm' } });
+    const afterMain = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.equal(afterMain.profiles.length, 1);
+    assert.equal(afterMain.profiles[0].name, 'Main');
+    assert.equal(afterMain.profiles[0].active, true);
+
+    // The last remaining profile cannot be deleted.
+    await assert.rejects(
+      api(`/api/profiles/${afterMain.profiles[0].id}`, { method: 'DELETE', body: { username: 'Main', password: 'confirm' } }),
+      /Create another profile/
+    );
   });
 });
 

@@ -621,7 +621,7 @@ export const tumblr = apiAdapter({
 
 export const x = apiAdapter({
   id: 'x',
-  label: 'X',
+  label: 'Twitter (X)',
   description: 'Recent posts with photos or video matching the queries.',
   api: {
     signupUrl: 'https://developer.x.com/en/portal/dashboard',

@@ -558,7 +558,7 @@ function ProfilesCard() {
                   </button>
                 </>
               )}
-              {!profile.active && (
+              {!profile.hidden && (
                 <button
                   className="small danger"
                   title="Delete"

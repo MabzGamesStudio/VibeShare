@@ -58,6 +58,8 @@ export interface AlgorithmConfig extends BaseConfig {
   /** Topics offered to clients. */
   topics: string[];
   pageSize: number;
+  /** The most accounts a creator may link together (YouTube, TikTok, Twitter…). */
+  maxCreatorAccounts: number;
   /** Finding content on other platforms (YouTube, PeerTube, Mastodon, Flickr…) by itself. */
   crawler: CrawlerConfig;
   /**
@@ -123,6 +125,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     policy: { maxRating: 'nsfw', defaultMaxRating: '18+', autoListSubmissions: false },
     topics: [...TOPICS],
     pageSize: 24,
+    maxCreatorAccounts: 8,
     crawler: crawlerDefaults(),
     sources: { priorities: { vibeshare: 10 } },
     peering: {
@@ -1230,7 +1233,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
     router.put('/v1/admin/creators', async (ctx) => {
       admin(ctx);
-      const body = await readJson<{ id: string }>(ctx.req);
+      const body = await readJson<{ id: string; accounts?: { platform: string; handle: string; url?: string }[] }>(ctx.req);
+      if (Array.isArray(body.accounts) && body.accounts.length > Math.max(0, this.config.maxCreatorAccounts)) {
+        throw badRequest(`A creator may link at most ${this.config.maxCreatorAccounts} accounts`);
+      }
       return this.registry.upsertCreator(body);
     });
     router.get('/v1/admin/suggestions', (ctx) => {

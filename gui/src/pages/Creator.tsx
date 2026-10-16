@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
+import { SOURCE_LABELS } from '../../../src/shared/sources';
 import { api, errorMessage } from '../api';
 import { GridLayout } from '../components/feed/Cards';
 import { CARD_PAGE } from '../components/Feed';
@@ -48,6 +49,27 @@ export function CreatorPage() {
             <span>{view.items.length} item{view.items.length === 1 ? '' : 's'}</span>
           </div>
           {creator.description && <p className="muted" style={{ marginTop: 10 }}>{creator.description}</p>}
+          {creator.accounts && creator.accounts.length > 0 && (
+            <div className="row" style={{ marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
+              {creator.accounts.map((account) => {
+                const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+                const href = account.url ?? (/^https?:/.test(account.handle) ? account.handle : undefined);
+                const chip = (
+                  <span className="badge">
+                    {label}
+                    {!/^https?:/.test(account.handle) && <> · @{account.handle}</>}
+                  </span>
+                );
+                return href ? (
+                  <a key={`${account.platform}:${account.handle}`} className="link" href={href} target="_blank" rel="noreferrer">
+                    {chip}
+                  </a>
+                ) : (
+                  <span key={`${account.platform}:${account.handle}`}>{chip}</span>
+                );
+              })}
+            </div>
+          )}
           <div className="row" style={{ marginTop: 12 }}>
             <button className={subscribed ? '' : 'primary'} onClick={toggle}>
               {subscribed ? 'Subscribed' : 'Subscribe'}

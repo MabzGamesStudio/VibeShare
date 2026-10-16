@@ -42,7 +42,7 @@ export const SOURCE_LABELS: Record<SourceScheme, string> = {
   spotify: 'Spotify',
   tiktok: 'TikTok',
   ig: 'Instagram',
-  x: 'X (Twitter)',
+  x: 'Twitter (X)',
   bsky: 'Bluesky',
   masto: 'Mastodon',
   twitch: 'Twitch',
@@ -399,6 +399,8 @@ const HOST_NAMES: Record<string, string> = {
   'pexels.com': 'Pexels',
   'bandcamp.com': 'Bandcamp',
   'twitch.tv': 'Twitch',
+  'x.com': 'Twitter (X)',
+  'twitter.com': 'Twitter (X)',
 };
 
 export interface Platform {

@@ -58,6 +58,20 @@ export function chunkIdOf(data: Uint8Array): string {
   return CHUNK_PREFIX + base32Encode(sha256(data));
 }
 
+/**
+ * The content id of a downloadable copy: the hash of the bytes themselves. Used where a
+ * client hands a provider a direct download link for a cid, so the bytes can be checked
+ * against the cid exactly, without a manifest.
+ */
+export function bytesCid(data: Uint8Array): string {
+  return NATIVE_PREFIX + base32Encode(sha256(data));
+}
+
+/** True when these bytes hash to exactly this content id (a downloadable copy's cid). */
+export function bytesMatchCid(data: Uint8Array, cid: string): boolean {
+  return cid === bytesCid(data) || cid === chunkIdOf(data);
+}
+
 export function contentIdOf(manifest: Manifest): string {
   return NATIVE_PREFIX + base32Encode(sha256(canonicalJson(manifest)));
 }

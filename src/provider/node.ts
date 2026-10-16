@@ -1,8 +1,9 @@
 import { isAbsolute } from 'node:path';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import type { Account } from '../commerce/ledger.js';
-import { chunkIdOf, contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import { buildManifestFromFile } from '../shared/contentfile.js';
+import type { ContentLink, ContentUrlRecord, ContentUrlSubmission } from '../shared/protocol.js';
 import {
   badRequest,
   forbidden,
@@ -79,6 +80,21 @@ export interface ProviderConfig extends BaseConfig {
     /** Accept chunks a peer pushes here. */
     acceptPush: boolean;
   };
+  /**
+   * Downloadable content copies that clients point here: a client gives a download URL
+   * (and its cid) or a base URL, this node pulls content from it, and pays the client for
+   * every download whose bytes hash to the cid exactly.
+   */
+  contentUrls: {
+    /** Accept every URL a client submits (otherwise the operator reviews each one). */
+    autoAccept: boolean;
+    /** How many single content URLs to accept per client. */
+    maxUrlsPerClient: number;
+    /** How many base URLs to accept per client. */
+    maxBaseUrlsPerClient: number;
+    /** Credits to pay a client each time this node pulls content from their URL. */
+    creditPerDownload: number;
+  };
 }
 
 export function providerDefaults(): ProviderConfig {
@@ -102,6 +118,7 @@ export function providerDefaults(): ProviderConfig {
     },
     rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
     peering: { peers: [], acceptPush: true },
+    contentUrls: { autoAccept: true, maxUrlsPerClient: 16, maxBaseUrlsPerClient: 4, creditPerDownload: 2 },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -150,6 +167,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private uploads: JsonFile<{ uploads: Record<string, PendingUpload> }>;
   /** Content ids clients reported; the node learns what is out there from them. */
   private reports: JsonFile<{ ids: Record<string, { at: string; account: string }> }>;
+  /** Downloadable content copies clients point here (single URLs and base URLs). */
+  private contentUrls: JsonFile<{ items: Record<string, ContentUrlRecord> }>;
+  /** Verified bytes pulled from those links, keyed by their cid. */
+  private downloads: JsonFile<{ items: Record<string, { data: string; account: string; at: string }> }>;
   /** What clients suggest this node is missing (sources, duplicates, absent data). */
   private suggestions: JsonFile<{ items: Record<string, ProviderSuggestion & { signature: string }> }>;
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
@@ -159,6 +180,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     super('provider', providerDefaults(), options);
     this.uploads = new JsonFile(this.path('uploads.json'), () => ({ uploads: {} }));
     this.reports = new JsonFile(this.path('reports.json'), () => ({ ids: {} }));
+    this.contentUrls = new JsonFile(this.path('content-urls.json'), () => ({ items: {} }));
+    this.downloads = new JsonFile(this.path('downloads.json'), () => ({ items: {} }));
     this.suggestions = new JsonFile(this.path('suggestions.json'), () => ({ items: {} }));
     this.service = new StorageService(
       this.path('storage-service.json'),
@@ -331,6 +354,59 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   // -------------------------------------------------------------------------
+  // Downloadable content copies: a client points here at a download URL (with its cid)
+  // or a base URL; this node pulls content from it and pays the client for every download
+  // whose bytes hash to the cid exactly.
+
+  /** Accepted links that may serve a cid: its own URL, or a base URL to query. */
+  private linksFor(cid: string): ContentLink[] {
+    const out: ContentLink[] = [];
+    for (const record of Object.values(this.contentUrls.data.items)) {
+      if (record.status !== 'accepted') continue;
+      if (record.cid && record.cid === cid && record.url) out.push({ cid, url: record.url });
+      else if (record.baseUrl) out.push({ cid, url: `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` });
+    }
+    return out;
+  }
+
+  /**
+   * Pulls one content copy from a client's link, checks that its bytes hash to the cid
+   * exactly, keeps them and pays the client. True when the content was accepted.
+   */
+  private async pullContentUrl(record: ContentUrlRecord, cid: string, url: string): Promise<boolean> {
+    let data: Buffer;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) return false;
+      data = Buffer.from(await response.arrayBuffer());
+    } catch {
+      return false;
+    }
+    if (!bytesMatchCid(data, cid)) return false; // the content does not match the cid
+    this.downloads.data.items[cid] = { data: data.toString('base64'), account: record.account, at: new Date().toISOString() };
+    record.downloads++;
+    const reward = Math.max(0, Math.round(this.config.contentUrls.creditPerDownload));
+    if (reward > 0) {
+      this.ledger.credit(record.account, reward, 'content download', cid);
+      record.earned += reward;
+    }
+    this.contentUrls.changed();
+    this.downloads.changed();
+    return true;
+  }
+
+  /** Tries every accepted link for a cid, keeping the first whose content matches. */
+  private async fetchContentUrl(cid: string): Promise<boolean> {
+    for (const record of Object.values(this.contentUrls.data.items)) {
+      if (record.status !== 'accepted') continue;
+      const url = record.cid === cid && record.url ? record.url : record.baseUrl ? `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` : undefined;
+      if (!url) continue;
+      if (await this.pullContentUrl(record, cid, url)) return true;
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------------------
   // Peering: content providers exchange content bytes with their peers,
   // addressed by the hash of the bytes (a chunk id).
 
@@ -442,7 +518,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     router.get('/v1/content/:cid', async (ctx) => {
       const cid = ctx.params.cid;
       const manifest = await this.getManifest(cid);
-      if (!manifest) throw notFound('This node does not have the content');
+      if (!manifest) {
+        // Feature: this node does not hold the content, but a client's link may. Send the
+        // link instead so the client can fetch the bytes and check the cid itself.
+        const links = this.linksFor(cid);
+        if (links.length) return { missing: true, links };
+        throw notFound('This node does not have the content');
+      }
       if (ctx.req.method === 'HEAD') {
         ctx.res.writeHead(200, { 'content-type': 'application/json' }).end();
         return;
@@ -459,6 +541,94 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const body = await readJson<{ ids?: string[] }>(ctx.req);
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
       return { has: Object.fromEntries(ids.map((id) => [id, Boolean(this.store.getContent(String(id)))])) };
+    });
+
+    // Downloadable content copies (feature): a client registers a download URL and its
+    // cid, or a base URL. This node pulls content from it and pays the client per download
+    // whose bytes hash to the cid exactly. Caps and auto-accept are the operator's.
+    router.post('/v1/content-urls', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<ContentUrlSubmission>(ctx.req);
+      const settings = this.config.contentUrls;
+      const items = this.contentUrls.data.items;
+      const mine = Object.values(items).filter((r) => r.account === account.id);
+      const record: ContentUrlRecord = {
+        id: randomId('cu-', 8),
+        account: account.id,
+        status: settings.autoAccept ? 'accepted' : 'pending',
+        downloads: 0,
+        earned: 0,
+        createdAt: new Date().toISOString(),
+      };
+      const httpUrl = (value: unknown): string => {
+        let parsed: URL;
+        try {
+          parsed = new URL(String(value));
+        } catch {
+          throw badRequest('url must be an http(s) URL');
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw badRequest('url must be an http(s) URL');
+        return parsed.toString();
+      };
+      if (body.baseUrl) {
+        const used = mine.filter((r) => r.baseUrl).length;
+        if (used >= Math.max(0, settings.maxBaseUrlsPerClient)) {
+          throw badRequest(`This node accepts at most ${settings.maxBaseUrlsPerClient} base URLs per client`);
+        }
+        record.baseUrl = httpUrl(body.baseUrl).replace(/\/+$/, '');
+      } else if (body.cid && body.url) {
+        const used = mine.filter((r) => r.url).length;
+        if (used >= Math.max(0, settings.maxUrlsPerClient)) {
+          throw badRequest(`This node accepts at most ${settings.maxUrlsPerClient} content URLs per client`);
+        }
+        if (!isNativeId(String(body.cid))) throw badRequest('cid must be a content id');
+        record.cid = String(body.cid);
+        record.url = httpUrl(body.url);
+      } else {
+        throw badRequest('Provide a cid and a url, or a baseUrl');
+      }
+      items[record.id] = record;
+      this.contentUrls.changed();
+      return { record };
+    });
+
+    router.get('/v1/content-urls/mine', (ctx) => {
+      const account = this.auth.require(ctx);
+      return { items: Object.values(this.contentUrls.data.items).filter((r) => r.account === account.id) };
+    });
+
+    // Pull a content copy now: download it, check the cid, keep it and pay the client.
+    router.post('/v1/content-urls/fetch', async (ctx) => {
+      this.auth.require(ctx);
+      const body = await readJson<{ cid?: string }>(ctx.req);
+      const cid = String(body.cid ?? '').trim();
+      if (!cid) throw badRequest('cid is required');
+      const fetched = await this.fetchContentUrl(cid);
+      return { fetched, downloaded: Boolean(this.downloads.data.items[cid]) };
+    });
+
+    router.get('/v1/downloads/:cid', (ctx) => {
+      const item = this.downloads.data.items[ctx.params.cid];
+      if (!item) throw notFound('No downloaded copy of this content');
+      const data = Buffer.from(item.data, 'base64');
+      ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(data.length) });
+      if (ctx.req.method === 'HEAD') return ctx.res.end();
+      return ctx.res.end(data);
+    });
+
+    // Operator review of the URLs clients submitted (needed when auto-accept is off).
+    router.get('/v1/admin/content-urls', (ctx) => {
+      this.requireAdmin(ctx);
+      return { items: Object.values(this.contentUrls.data.items), config: this.config.contentUrls };
+    });
+    router.post('/v1/admin/content-urls/:id', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ status?: 'accepted' | 'rejected' }>(ctx.req);
+      const record = this.contentUrls.data.items[ctx.params.id];
+      if (!record) throw notFound('No such content URL');
+      if (body.status === 'accepted' || body.status === 'rejected') record.status = body.status;
+      this.contentUrls.changed();
+      return { record };
     });
 
     // A client that played content from outside the network reports its content id here;

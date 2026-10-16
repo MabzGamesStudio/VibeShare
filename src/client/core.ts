@@ -35,6 +35,7 @@ import {
   type SealKey,
 } from '../shared/profiles.js';
 import { SOFTWARE, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { bytesMatchCid } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -631,7 +632,6 @@ export class ClientCore {
   async deleteProfile(id: string, credentials: { username?: string; password?: string }): Promise<ProfileSummary[]> {
     const data = this.store.data.data;
     this.ensureProfiles();
-    if (id === data.activeProfile) throw badRequest('Switch to another profile before deleting this one');
     const target = data.profiles.find((profile) => profile.id === id);
     if (!target) throw notFound('No such profile');
     const username = String(credentials.username ?? '');
@@ -645,6 +645,13 @@ export class ClientCore {
       // A public profile has no password of its own: its name is typed as the username
       // and the password field confirms the intent to delete.
       throw badRequest('Type the profile name as the username to confirm deletion');
+    }
+    if (id === data.activeProfile) {
+      // Deleting the active profile (an anonymous account is deleted this way): switch to
+      // another one first. The last remaining profile cannot be deleted.
+      const other = data.profiles.find((profile) => profile.id !== id && !profile.hidden);
+      if (!other) throw badRequest('Create another profile before deleting this one');
+      this.loadProfile(other, this.payloadOf(other), data.settings);
     }
     const before = data.profiles.length;
     data.profiles = data.profiles.filter((profile) => profile.id !== id);
@@ -745,6 +752,24 @@ export class ClientCore {
       ? await this.uploads.putStream(stream)
       : await this.uploads.put(new Uint8Array(await response.arrayBuffer()));
     return { ...stored, name, mime };
+  }
+
+  /**
+   * Fetches content from a link a provider offered (a provider sends a link instead of
+   * the bytes when it does not hold them). The data is accepted only when the bytes hash
+   * to the requested cid exactly.
+   */
+  async fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number }> {
+    let data: Uint8Array;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) return { ok: false, size: 0 };
+      data = new Uint8Array(await response.arrayBuffer());
+    } catch {
+      return { ok: false, size: 0 };
+    }
+    if (!bytesMatchCid(data, cid)) return { ok: false, size: 0 }; // only accept an exact cid match
+    return { ok: true, size: data.length };
   }
 
   async contributions() {

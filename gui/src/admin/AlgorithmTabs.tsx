@@ -638,6 +638,7 @@ interface Creator {
   kind: CreatorKind;
   description?: string;
   keys?: string[];
+  accounts?: { platform: string; handle: string; url?: string }[];
   status: 'listed' | 'blocked';
 }
 
@@ -739,6 +740,24 @@ function Creators() {
             <label className="field">
               Description
               <textarea value={editing.description ?? ''} onChange={(e) => setEditing({ ...editing, description: e.target.value })} rows={3} />
+            </label>
+            <label className="field">
+              Linked accounts <span className="hint">One per line: platform handle [url] — e.g. yt @channel https://youtube.com/@channel</span>
+              <textarea
+                rows={3}
+                value={(editing.accounts ?? []).map((a) => [a.platform, a.handle, a.url].filter(Boolean).join(' ')).join('\n')}
+                onChange={(e) => {
+                  const accounts = e.target.value
+                    .split('\n')
+                    .map((line) => line.trim())
+                    .filter(Boolean)
+                    .map((line) => {
+                      const [platform, handle, url] = line.split(/\s+/);
+                      return { platform, handle, ...(url ? { url } : {}) };
+                    });
+                  setEditing({ ...editing, accounts: accounts.length ? accounts : undefined });
+                }}
+              />
             </label>
           </div>
         </Modal>

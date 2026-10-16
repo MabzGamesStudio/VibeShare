@@ -239,6 +239,16 @@ export interface StorageTask {
 // ---------------------------------------------------------------------------
 // Algorithm node: metadata, feeds, search
 
+/** One of a creator's linked accounts on another platform (YouTube, TikTok, Twitter…). */
+export interface CreatorAccount {
+  /** The platform, as a source scheme (`yt`, `tiktok`, `x`…) or a host. */
+  platform: string;
+  /** The handle or user name on that platform. */
+  handle: string;
+  /** A direct link to the account, when known. */
+  url?: string;
+}
+
 export interface CreatorInfo {
   id: string;
   name: string;
@@ -247,6 +257,8 @@ export interface CreatorInfo {
   /** Public keys (vk1…) that sign this creator's manifests. */
   keys?: string[];
   links?: string[];
+  /** The creator's accounts on other platforms, linked together (capped by the node). */
+  accounts?: CreatorAccount[];
 }
 
 export interface TagNote {
@@ -500,6 +512,39 @@ export interface PeerDiscoverCriteria {
   /** How the peer picks from what matches: its newest, its most popular, or at random. */
   algorithm?: 'new' | 'popular' | 'random';
   limit?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Downloadable content copies: a client hands a provider a download link (and its cid)
+// and is paid each time the provider pulls content from it. A link is a single content
+// URL, or a base URL at which any cid can be queried.
+
+/** What a client submits: one content download URL with its cid, or a base URL. */
+export interface ContentUrlSubmission {
+  /** A single content id this URL serves; its bytes must hash to exactly this. */
+  cid?: string;
+  /** The direct download URL for that one cid. */
+  url?: string;
+  /** Or a base URL: `<baseUrl>/<cid>` serves any cid at the client's endpoint. */
+  baseUrl?: string;
+}
+
+export interface ContentUrlRecord {
+  id: string;
+  account: string;
+  cid?: string;
+  url?: string;
+  baseUrl?: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  downloads: number;
+  earned: number;
+  createdAt: string;
+}
+
+/** A place a client can fetch a cid from, offered when this node does not hold the bytes. */
+export interface ContentLink {
+  cid: string;
+  url: string;
 }
 
 export interface SubmissionRequest {

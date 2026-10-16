@@ -684,9 +684,31 @@ table.table {
   border-bottom: 1px solid var(--border);
   margin-bottom: 20px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  /* Reserve a strip for the scrollbar so it never covers the tab labels or the active
+     indicator when the row is scrolled sideways. */
+  padding-bottom: 6px;
+}
+
+.tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.tabs::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.tabs::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 10px 16px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -1598,6 +1620,82 @@ img.poster-contain {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   opacity: 0.7;
+}
+
+/* A lovely, animated placeholder for hidden external content: a soft sheen sweeps the
+   gradient, the format icon floats, and the message rises into place. */
+@keyframes placeholderSheen {
+  0% {
+    transform: translateX(-130%) skewX(-18deg);
+  }
+  55%,
+  100% {
+    transform: translateX(230%) skewX(-18deg);
+  }
+}
+
+@keyframes placeholderFloat {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-5px) scale(1.06);
+  }
+}
+
+@keyframes placeholderFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.poster-empty {
+  position: relative;
+  overflow: hidden;
+}
+
+.poster-empty::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 25%, rgba(255, 255, 255, 0.18) 50%, transparent 75%);
+  transform: translateX(-130%) skewX(-18deg);
+  animation: placeholderSheen 3.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.poster-empty svg,
+.embed-placeholder-icon svg {
+  animation: placeholderFloat 3s ease-in-out infinite;
+}
+
+.poster-placeholder,
+.embed-placeholder-text {
+  animation: placeholderFadeUp 0.55s ease both;
+}
+
+.embed-placeholder-icon {
+  display: inline-flex;
+  padding: 16px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .poster-empty::after,
+  .poster-empty svg,
+  .embed-placeholder-icon svg,
+  .poster-placeholder,
+  .embed-placeholder-text {
+    animation: none;
+  }
 }
 
 .thumb-actions {

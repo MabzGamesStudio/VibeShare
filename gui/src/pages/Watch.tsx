@@ -957,12 +957,14 @@ export function WatchPage() {
           ) : view.embedsDisabled && !view.native ? (
             <div className="player file">
               <div>
-                <FormatIcon format={view.item?.format ?? 'video'} size={54} />
-                <p style={{ marginTop: 12, fontWeight: 600 }}>{title}</p>
+                <div className="embed-placeholder-icon">
+                  <FormatIcon format={view.item?.format ?? 'video'} size={54} />
+                </div>
+                <p style={{ marginTop: 14, fontWeight: 600 }}>{title}</p>
                 {creator && <p className="small muted">{creator.name}</p>}
-                <p className="small faint" style={{ marginTop: 8, maxWidth: 320 }}>
-                  External content is disabled — only content hosted on the network (its cid) and its metadata show here. A lovely
-                  placeholder stands in for the platform's player.
+                <p className="small faint embed-placeholder-text" style={{ marginTop: 10, maxWidth: 340 }}>
+                  External content is turned off. Only content hosted on the network plays here — this is a placeholder standing in for the
+                  platform's player.
                 </p>
               </div>
             </div>

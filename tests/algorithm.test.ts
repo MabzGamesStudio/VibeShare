@@ -42,6 +42,23 @@ describe('algorithm node', async () => {
     assert.equal((external as ContentItem).link, 'yt:music1');
   });
 
+  it('links a creator accounts, up to the node limit', async () => {
+    const accounts = [
+      { platform: 'yt', handle: '@science', url: 'https://youtube.com/@science' },
+      { platform: 'x', handle: '@science' },
+    ];
+    const saved = await admin<{ accounts?: { platform: string }[] }>(url, '/v1/admin/creators', {
+      method: 'PUT',
+      body: { id: 'name:linked', name: 'Linked Studio', kind: 'company', accounts },
+    });
+    assert.equal(saved.accounts?.length, 2, 'keeps the linked accounts');
+    const tooMany = Array.from({ length: 9 }, (_, i) => ({ platform: 'yt', handle: `@h${i}` }));
+    await assert.rejects(
+      admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:linked', name: 'Linked Studio', kind: 'company', accounts: tooMany } }),
+      /at most 8 accounts/
+    );
+  });
+
   it('filters the feed by preferences', async () => {
     const client = clientFor(url);
     const all = await client.json<Page<ContentItem>>('/v1/feed', { body: {}, auth: false });

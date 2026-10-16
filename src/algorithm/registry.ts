@@ -259,6 +259,7 @@ export class Registry {
       description: (input.description ?? existing?.description)?.slice(0, 2000),
       keys: [...new Set([...(existing?.keys ?? []), ...(input.keys ?? [])])],
       links: input.links ?? existing?.links,
+      accounts: input.accounts ?? existing?.accounts,
       status: input.status ?? existing?.status ?? 'listed',
       addedAt: existing?.addedAt ?? new Date().toISOString(),
     };
