@@ -7,6 +7,49 @@ import type { CreatorKind, Format, Rating } from './taxonomy.js';
 
 export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
 
+/** One bloom filter of content the user has seen, as the settings hold it. */
+export interface BloomFilterSettings {
+  /** Keep and use the filter at all. */
+  enabled: boolean;
+  /** Number of bits: 1, 10, 100, … 100,000,000 (powers of ten). */
+  bits: number;
+}
+
+/** Content previews the user has seen on screen (separate from content actually selected). */
+export interface PreviewBloomSettings extends BloomFilterSettings {
+  /** Completely hide previewed content again, or only push it down among other previews. */
+  mode: 'hide' | 'demote';
+}
+
+/**
+ * The seen-content filter the client sends to search algorithm nodes, who then stop
+ * suggesting anything that collides with it. More bits make the filter more precise —
+ * and tell the node more about what the user has seen.
+ */
+export interface NodeBloomSettings extends BloomFilterSettings {
+  /** Send the filter inside search requests when it is small enough for the node. */
+  inline: boolean;
+}
+
+/** What the GUI shows of one filter. */
+export interface BloomFilterStatus {
+  enabled: boolean;
+  bits: number;
+  /** The optimal number of hash functions for this size. */
+  hashes: number;
+  /** Bytes of the bit array (ceil(bits/8)). */
+  bytes: number;
+  /** How many keys were added (the filter is designed for 10,000 of them). */
+  added: number;
+}
+
+/** The state of all three seen-content filters (GET /api/bloom). */
+export interface BloomStatus {
+  selected: BloomFilterStatus;
+  preview: BloomFilterStatus & { mode: 'hide' | 'demote' };
+  node: BloomFilterStatus & { inline: boolean };
+}
+
 export interface NodeStatus {
   online: boolean;
   latencyMs?: number;
@@ -197,6 +240,12 @@ export interface Settings {
   theme: 'system' | 'dark' | 'light';
   /** Tor, for the desktop app and `vibeshare client` (in a browser, use Tor Browser). */
   tor: TorSettings;
+  /** Content you have selected (opened): a local bloom filter of what you have already seen. */
+  selectedBloom: BloomFilterSettings;
+  /** Content previews you have seen on screen, without selecting them. */
+  previewBloom: PreviewBloomSettings;
+  /** The seen-content filter sent to search algorithm nodes (they stop suggesting what collides). */
+  nodeBloom: NodeBloomSettings;
 }
 
 export interface TorSettings {
@@ -264,6 +313,8 @@ export interface FeedItem extends ContentItem {
   viaName: string;
   /** Local URL of the thumbnail (proxied through the daemon). */
   thumbnailUrl?: string;
+  /** True when a bloom filter says the user has seen this content before. */
+  seen?: boolean;
 }
 
 export interface FeedResponse {

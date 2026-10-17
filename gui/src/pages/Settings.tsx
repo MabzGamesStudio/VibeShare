@@ -18,6 +18,7 @@ import {
 import { api, errorMessage, IS_STATIC } from '../api';
 import { PageIconView } from '../components/feed/icons';
 import { PageEditor } from '../components/feed/PageEditor';
+import { SeenFiltersSection } from '../components/SeenFilters';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { useApp } from '../state';
 import { splitList } from '../util';
@@ -939,6 +940,8 @@ export function SettingsPage() {
           </label>
         </div>
       </div>
+
+      <SeenFiltersSection />
 
       <SharingCard />
 

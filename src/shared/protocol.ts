@@ -1,4 +1,5 @@
 // Wire types of the VibeShare protocol (HTTP + JSON). Browser-safe: no Node imports.
+import type { BloomFilterData } from './bloom.js';
 import type { NodeType } from './noderef.js';
 import type { CreatorKind, Format, Rating } from './taxonomy.js';
 
@@ -86,6 +87,38 @@ export interface AlgorithmPricing {
   submission: number;
 }
 
+/** One price for keeping a user's seen-content bloom filter on this node. */
+export interface BloomStorageTier {
+  id: string;
+  label?: string;
+  /** The biggest filter (in bits) this tier stores. */
+  maxBits: number;
+  /** How long the filter is kept for that price. */
+  durationSeconds: number;
+  /** Credits the user pays to store the filter for that long. */
+  price: number;
+}
+
+/** Seen-content bloom filters on an algorithm node (stored copies and request filters). */
+export interface BloomServiceInfo {
+  /** The biggest filter (in bits) that may travel inside a request. */
+  inlineMaxBits: number;
+  storage: { tiers: BloomStorageTier[] };
+}
+
+/** What a client sends to keep its seen-content filter on a node: a storage tier and the filter. */
+export interface BloomStorageRequest {
+  tier: string;
+  filter: BloomFilterData;
+}
+
+/** The calling user's stored filter on a node (when one is kept), and the tiers on offer. */
+export interface BloomStorageState {
+  filter?: BloomFilterData;
+  expiresAt?: string;
+  tiers: BloomStorageTier[];
+}
+
 export interface AlgorithmRewards {
   /** Credits for the first vote on a piece of content. */
   vote: number;
@@ -119,6 +152,8 @@ export interface AlgorithmInfo extends NodeInfoBase {
   stats: { listed: number; blocked: number; creators: number; discovered?: number };
   /** Whether the node finds content on other platforms by itself, and where. */
   discovery?: { crawling: boolean; searchesPlatforms: boolean; platforms: string[] };
+  /** Seen-content bloom filters this node accepts (it then stops suggesting what collides). */
+  bloom?: BloomServiceInfo;
 }
 
 export type NodeInfo = ProviderInfo | AlgorithmInfo;
@@ -346,6 +381,11 @@ export interface FeedRequest {
   limit?: number;
   /** Keeps a randomized ranking stable across pages. */
   seed?: string;
+  /**
+   * A small copy of the user's seen-content bloom filter: the node leaves out anything
+   * whose cid or links collide with it (see also the filters it stores for the account).
+   */
+  bloom?: BloomFilterData;
 }
 
 export type SearchSort = 'relevance' | 'new' | 'top';
@@ -356,6 +396,8 @@ export interface SearchRequest {
   sort?: SearchSort;
   cursor?: string;
   limit?: number;
+  /** A small seen-content bloom filter; anything that collides with it is not suggested. */
+  bloom?: BloomFilterData;
 }
 
 export interface Page<T> {

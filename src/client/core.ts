@@ -15,6 +15,7 @@ import type {
   PublishRequest,
   Settings,
 } from '../shared/clientapi.js';
+import type { BloomStatus } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
@@ -34,11 +35,13 @@ import {
   type ProfileAccess,
   type SealKey,
 } from '../shared/profiles.js';
-import { SOFTWARE, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { SOFTWARE, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { bytesMatchCid } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
+import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
+import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
 import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
 import { prepareClientSave } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
@@ -86,6 +89,8 @@ export class ClientCore {
   readonly publisher: Publisher;
   readonly cache: ChunkStore;
   readonly uploads: UploadStore;
+  /** The bloom filters of content the user has seen (selected, previewed, sent to nodes). */
+  readonly blooms: BloomBook;
 
   constructor(readonly options: ClientCoreOptions) {
     this.store = options.store;
@@ -94,6 +99,7 @@ export class ClientCore {
     this.nodes = new NodeManager(this.store, options.transport);
     this.fetcher = new Fetcher(this.nodes, this.cache);
     this.publisher = new Publisher(this.store, this.nodes, options.uploads);
+    this.blooms = new BloomBook(this.store);
     // Hidden profiles are encrypted at rest: what is written out is the sealed form.
     this.store.data.prepare = prepareClientSave;
     const storeChanged = this.store.changed.bind(this.store);
@@ -138,6 +144,39 @@ export class ClientCore {
   }
 
   /**
+   * The seen-content filter carried inside a request to an algorithm node: only when the
+   * user sends one at all, and only while it is small enough for that node to accept.
+   */
+  private bloomPayload(node: NodeEntry): { bloom?: BloomFilterData } {
+    const settings = this.settings.nodeBloom;
+    if (!settings.enabled || !settings.inline) return {};
+    const limit = (node.info as AlgorithmInfo | undefined)?.bloom?.inlineMaxBits ?? BLOOM_INLINE_MAX_BYTES * 8;
+    const payload = this.blooms.payload('node', limit);
+    return payload ? { bloom: payload } : {};
+  }
+
+  /**
+   * The local seen-content filters applied to a page: content the user has selected is
+   * never suggested again; previewed content is hidden again or only pushed down among
+   * the other previews, as the user chose. Colliding items are marked `seen`.
+   */
+  private applySeenFilters(items: FeedItem[]): FeedItem[] {
+    const shown: FeedItem[] = [];
+    const demoted: FeedItem[] = [];
+    for (const item of items) {
+      const identity = { id: item.id, contentId: item.contentId, link: item.link };
+      const seenSelected = this.blooms.sees('selected', identity);
+      const seenPreview = this.blooms.sees('preview', identity);
+      if (seenSelected) continue;
+      const marked = seenPreview ? { ...item, seen: true } : item;
+      if (seenPreview && this.settings.previewBloom.mode === 'hide') continue;
+      if (seenPreview && this.settings.previewBloom.mode === 'demote') demoted.push(marked);
+      else shown.push(marked);
+    }
+    return [...shown, ...demoted];
+  }
+
+  /**
    * Asks the algorithm nodes for a page. "blend" mixes every enabled node by priority
    * (round robin, without duplicates); "primary" uses the first node that answers.
    */
@@ -153,8 +192,15 @@ export class ClientCore {
     const wanted = (item: ContentItem) => matchesLanguages(item, languages);
     const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
       const price = this.nodes.algorithmPrice(node, priceKind);
-      // (Paid answers carry the new balance; nothing else is asked.)
-      return this.askJson<Page<ContentItem>>(node, path, { ...body, limit, cursor: cursors[node.id] ?? undefined }, price > 0);
+      // (Paid answers carry the new balance; nothing else is asked — except when the node
+      // keeps the user's seen-content filter, which it only applies to the account.)
+      const identify = price > 0 || this.settings.nodeBloom.enabled;
+      return this.askJson<Page<ContentItem>>(
+        node,
+        path,
+        { ...body, ...this.bloomPayload(node), limit, cursor: cursors[node.id] ?? undefined },
+        identify
+      );
     };
 
     if (this.settings.feedMode === 'primary') {
@@ -164,7 +210,7 @@ export class ClientCore {
         try {
           const page = await ask(node, 24);
           return {
-            items: page.items.filter(wanted).map((item) => this.feedItem(node, item)),
+            items: this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item))),
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
           };
@@ -203,7 +249,7 @@ export class ClientCore {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    return { items, cursor: more ? encodeCursor(next) : undefined, errors };
+    return { items: this.applySeenFilters(items), cursor: more ? encodeCursor(next) : undefined, errors };
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */
@@ -361,6 +407,7 @@ export class ClientCore {
       subscriptions: data.subscriptions,
       library: data.library,
       history: data.history,
+      blooms: data.blooms ?? {},
     });
   }
 
@@ -378,6 +425,7 @@ export class ClientCore {
       subscriptions: data.subscriptions,
       library: data.library,
       history: data.history,
+      blooms: data.blooms ?? {},
     };
     if (record.hidden) {
       // A hidden profile is only ever stored sealed; the plaintext fields are emptied.
@@ -390,6 +438,7 @@ export class ClientCore {
       record.subscriptions = [];
       record.library = [];
       record.history = [];
+      record.blooms = {};
       void this.store.hideIdentity?.();
     } else {
       record.identitySeed = payload.identitySeed;
@@ -398,6 +447,7 @@ export class ClientCore {
       record.subscriptions = payload.subscriptions;
       record.library = payload.library;
       record.history = payload.history;
+      record.blooms = payload.blooms;
     }
   }
 
@@ -411,6 +461,7 @@ export class ClientCore {
       subscriptions: record.subscriptions,
       library: record.library,
       history: record.history,
+      blooms: record.blooms ?? {},
     };
   }
 
@@ -424,12 +475,15 @@ export class ClientCore {
     record.subscriptions = payload.subscriptions;
     record.library = payload.library;
     record.history = payload.history;
+    record.blooms = payload.blooms ?? {};
     data.nodes = payload.nodes;
     data.settings = normalizeSettings(payload.settings);
     data.subscriptions = payload.subscriptions;
     data.library = payload.library;
     data.history = payload.history;
+    data.blooms = payload.blooms ?? {};
     data.activeProfile = record.id;
+    this.blooms.reloaded();
     this.store.replaceIdentity(decodeProfileSeed(payload.identitySeed));
     this.store.changed();
     this.options.onSettings?.(previousSettings, data.settings);
@@ -464,6 +518,7 @@ export class ClientCore {
         subscriptions: data.subscriptions,
         library: data.library,
         history: data.history,
+        blooms: data.blooms ?? {},
       },
       key
     );
@@ -531,6 +586,7 @@ export class ClientCore {
       subscriptions: [],
       library: [],
       history: [],
+      blooms: {},
     };
     if (hidden) {
       // A hidden profile is created sealed: its name, client id and data are encrypted
@@ -550,6 +606,7 @@ export class ClientCore {
         subscriptions: [],
         library: [],
         history: [],
+        blooms: {},
       });
     } else {
       data.profiles.push({ ...payload, id, name, access });
@@ -664,6 +721,7 @@ export class ClientCore {
           subscriptions: [],
           library: [],
           history: [],
+          blooms: {},
         };
         // The fresh start is an ordinary public profile (drop any hidden/locked state).
         target.hidden = undefined;
@@ -833,11 +891,14 @@ export class ClientCore {
     return { subscriptions: this.store.data.data.subscriptions };
   }
 
-  remember(body: { id?: string; title?: string }) {
+  remember(body: { id?: string; title?: string; contentId?: string; link?: string }) {
     if (!body.id) throw badRequest('id is required');
     const history = this.store.data.data.history.filter((h) => h.id !== body.id);
     history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
     this.store.data.data.history = history.slice(0, 200);
+    // Selected content: its cid and each link go into the bloom filters that remember
+    // what the user has seen (locally, and the copy sent to search algorithm nodes).
+    this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.selected);
     this.store.changed();
     return { ok: true };
   }
@@ -846,6 +907,48 @@ export class ClientCore {
     this.store.data.data.history = [];
     this.store.changed();
     return { ok: true };
+  }
+
+  /**
+   * A preview that came on screen: recorded by the preview filter (and the copy sent to
+   * search nodes) as content the user has seen without selecting it.
+   */
+  markPreviewed(body: { id?: string; contentId?: string; link?: string }): { added: number } {
+    if (!body.id) throw badRequest('id is required');
+    return { added: this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.preview) };
+  }
+
+  /** The state of the three seen-content filters (what the settings screen shows). */
+  bloomStatus(): BloomStatus {
+    return this.blooms.status();
+  }
+
+  /** Forgets one filter; the user is warned about this before it is called. */
+  resetBloom(scope: string): BloomStatus {
+    if (scope !== 'selected' && scope !== 'preview' && scope !== 'node') throw badRequest('scope is selected, preview or node');
+    this.blooms.reset(scope);
+    return this.blooms.status();
+  }
+
+  /** The storage a search node offers for seen-content filters, and the user's own there. */
+  bloomOffers(node: NodeEntry): Promise<BloomStorageState> {
+    return this.nodes.client(node).json<BloomStorageState>('/v1/bloom');
+  }
+
+  /** Pays a search node (its own price and duration) to keep the user's filter a while. */
+  async buyBloomStorage(node: NodeEntry, tier: string): Promise<BloomStorageState> {
+    if (!tier) throw badRequest('tier is required');
+    const filter = this.blooms.filter('node').toJSON();
+    const state = await this.nodes.client(node).json<BloomStorageState>('/v1/bloom', { method: 'PUT', body: { tier, filter } });
+    void this.nodes.refreshBalance(node);
+    return state;
+  }
+
+  /** Stops the search node from keeping the user's filter (it is deleted there). */
+  async dropBloomStorage(node: NodeEntry): Promise<BloomStorageState> {
+    const state = await this.nodes.client(node).json<BloomStorageState>('/v1/bloom', { method: 'DELETE' });
+    void this.nodes.refreshBalance(node);
+    return state;
   }
 
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */

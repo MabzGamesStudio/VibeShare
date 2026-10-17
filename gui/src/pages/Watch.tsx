@@ -839,7 +839,7 @@ export function WatchPage() {
       setView(result);
       setStats(result.item?.stats ?? { likes: 0, dislikes: 0 });
       const title = result.item?.title ?? (result.manifest?.meta?.title as string | undefined) ?? result.manifest?.name ?? result.id;
-      void api('/api/history', { body: { id: result.id, title } });
+      void api('/api/history', { body: { id: result.id, title, contentId: result.item?.contentId, link: result.item?.link } });
       // Content that plays from outside the network: report its id (or link) to the
       // nodes, which reward what they did not already have.
       if (!result.streamUrl) {

@@ -6,6 +6,7 @@ import { MiB } from '../shared/content.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, Preferences } from '../shared/protocol.js';
 import type { ClientCore } from './core.js';
+import { SCOPES_OF_EVENT } from './bloom.js';
 import { formatSeed, parseSeed } from './model.js';
 
 export interface ApiRequest {
@@ -186,6 +187,22 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/library', () => ({ published: core.store.data.data.library, history: core.store.data.data.history }));
   on('POST', '/api/history', async (request) => core.remember(await request.json()));
   on('DELETE', '/api/history', () => core.forgetHistory());
+
+  // Seen-content bloom filters: what was selected, what was previewed on screen, and the
+  // copy whose bits go to search algorithm nodes (so they stop suggesting what collides).
+  on('GET', '/api/bloom', () => core.bloomStatus());
+  on('POST', '/api/bloom/mark', async (request) => {
+    const body = await request.json<{ scope?: string; id?: string; contentId?: string; link?: string }>();
+    if (body.scope === 'selected') return { added: core.blooms.mark(body, SCOPES_OF_EVENT.selected) };
+    return core.markPreviewed(body);
+  });
+  on('POST', '/api/bloom/reset', async (request) => core.resetBloom(String((await request.json<{ scope?: string }>()).scope ?? '')));
+  // Keeping the filter on a search node for a while: the node sets the prices and durations.
+  on('GET', '/api/bloom/offers/:id', (request) => core.bloomOffers(node(request)));
+  on('POST', '/api/bloom/storage/:id', async (request) =>
+    core.buyBloomStorage(node(request), String((await request.json<{ tier?: string }>()).tier ?? ''))
+  );
+  on('DELETE', '/api/bloom/storage/:id', (request) => core.dropBloomStorage(node(request)));
 
   // Settings, identity, cache
   on('PATCH', '/api/settings', async (request) => core.updateSettings(await request.json<Partial<Settings>>()));

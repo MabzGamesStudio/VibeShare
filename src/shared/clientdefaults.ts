@@ -86,7 +86,28 @@ export function defaultSettings(): Settings {
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
     theme: 'system',
     tor: { mode: 'onion', proxy: '' },
+    selectedBloom: { enabled: true, bits: 10_000 },
+    previewBloom: { enabled: true, bits: 100_000, mode: 'hide' },
+    nodeBloom: { enabled: false, bits: 10_000, inline: true },
   };
+}
+
+/** The slider stops of one filter: 1, 10, 100, … bits (the exponent of ten). */
+export const BLOOM_BIT_STOPS = {
+  /** Selected content: up to 100,000,000 bits. */
+  selected: 8,
+  /** Previewed content: up to 1,000,000,000 bits. */
+  preview: 9,
+  /** The filter sent to search algorithm nodes: up to 1,000,000,000 bits. */
+  node: 9,
+} as const;
+
+/** A filter size on the slider: `10 ** exponent` bits, at most `maxStop` decades. */
+export function bloomBitStep(bits: number, maxStop: number): number {
+  const value = Number(bits);
+  if (!Number.isFinite(value) || value <= 0) throw new Error('A bloom filter size is 1, 10, 100, … bits');
+  const exponent = Math.round(Math.log10(value));
+  return 10 ** Math.min(maxStop, Math.max(0, exponent));
 }
 
 /** Fills in what older or partial settings miss, and keeps every preset page present. */
@@ -98,6 +119,9 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     profile: { ...base.profile, ...saved?.profile },
     storageService: { ...base.storageService, ...saved?.storageService },
     tor: { ...base.tor, ...saved?.tor },
+    selectedBloom: { ...base.selectedBloom, ...saved?.selectedBloom },
+    previewBloom: { ...base.previewBloom, ...saved?.previewBloom },
+    nodeBloom: { ...base.nodeBloom, ...saved?.nodeBloom },
   };
   // The old default home page (a 2D canvas) is gone: the video page is the home page now.
   const goneHome = (page: { id: string; preset?: string }) => page.id === 'home' || page.preset === 'home';
@@ -183,6 +207,9 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     profile: { ...current.profile, ...(patch.profile ?? {}) },
     storageService: { ...current.storageService, ...(patch.storageService ?? {}) },
     tor: { ...current.tor, ...(patch.tor ?? {}) },
+    selectedBloom: { ...current.selectedBloom, ...(patch.selectedBloom ?? {}) },
+    previewBloom: { ...current.previewBloom, ...(patch.previewBloom ?? {}) },
+    nodeBloom: { ...current.nodeBloom, ...(patch.nodeBloom ?? {}) },
     pages: patch.pages ?? current.pages,
   });
   if (!['off', 'onion', 'all'].includes(next.tor.mode)) throw new Error('Tor mode is off, onion or all');
@@ -192,6 +219,20 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   }
   if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
   if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
+  // Seen-content bloom filters: the size is one of 1, 10, 100, … bits; the preview filter
+  // either hides what was previewed or only pushes it down among the other previews.
+  try {
+    next.selectedBloom.bits = bloomBitStep(next.selectedBloom.bits, BLOOM_BIT_STOPS.selected);
+    next.previewBloom.bits = bloomBitStep(next.previewBloom.bits, BLOOM_BIT_STOPS.preview);
+    next.nodeBloom.bits = bloomBitStep(next.nodeBloom.bits, BLOOM_BIT_STOPS.node);
+  } catch (error) {
+    throw new Error((error as Error).message);
+  }
+  if (!['hide', 'demote'].includes(next.previewBloom.mode)) throw new Error('Previewed content is hidden or demoted');
+  next.selectedBloom.enabled = Boolean(next.selectedBloom.enabled);
+  next.previewBloom.enabled = Boolean(next.previewBloom.enabled);
+  next.nodeBloom.enabled = Boolean(next.nodeBloom.enabled);
+  next.nodeBloom.inline = Boolean(next.nodeBloom.inline);
   next.blockExternalEmbeds = Boolean(next.blockExternalEmbeds);
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));

@@ -13,6 +13,7 @@ import {
   type AlgorithmInfo,
   type AlgorithmPricing,
   type AlgorithmRewards,
+  type BloomStorageTier,
   type ClaimRequest,
   type ClaimResponse,
   type FeedRequest,
@@ -37,6 +38,7 @@ import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.
 import type { Discovered } from './crawler/types.js';
 import { Registry, identityOf, normalizeLink, type Entry, type EntryInput } from './registry.js';
 import { prioritize, priorityOf, SOURCE_CATALOG, sourceKeyOf } from './sources.js';
+import { BloomFilter, optimalHashCount, type BloomFilterData } from '../shared/bloom.js';
 
 export interface AlgorithmConfig extends BaseConfig {
   pricing: AlgorithmPricing;
@@ -67,6 +69,15 @@ export interface AlgorithmConfig extends BaseConfig {
    * never shown). Sources not listed are at 5, except VibeShare's own content at 10.
    */
   sources: { priorities: Record<string, number> };
+  /**
+   * Seen-content bloom filters clients send so this node stops suggesting what they have
+   * already seen: small ones travel inside requests (at most `inlineMaxBits` bits), and
+   * one may be kept per account for the prices and durations the operator sets (`tiers`).
+   */
+  bloom: {
+    inlineMaxBits: number;
+    storage: { tiers: BloomStorageTier[] };
+  };
   /** Exchanging content metadata and discoveries with other nodes. */
   peering: {
     /**
@@ -128,6 +139,16 @@ export function algorithmDefaults(): AlgorithmConfig {
     maxCreatorAccounts: 8,
     crawler: crawlerDefaults(),
     sources: { priorities: { vibeshare: 10 } },
+    bloom: {
+      inlineMaxBits: 32_768,
+      storage: {
+        tiers: [
+          { id: 'day', label: '1 day · up to 32 Kibit', maxBits: 32_768, durationSeconds: 86_400, price: 1 },
+          { id: 'week', label: '1 week · up to 256 Kibit', maxBits: 262_144, durationSeconds: 604_800, price: 5 },
+          { id: 'month', label: '30 days · up to 1 Mibit', maxBits: 1_048_576, durationSeconds: 2_592_000, price: 20 },
+        ],
+      },
+    },
     peering: {
       peers: [],
       job: { enabled: false, intervalMs: 3_600_000, adopt: true, limit: 50 },
@@ -187,6 +208,8 @@ function slug(text: string): string {
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
   private contributions: JsonFile<ContributionData>;
+  /** Seen-content bloom filters kept for accounts (a paid copy, until it expires). */
+  private blooms: JsonFile<{ stored: Record<string, { filter: BloomFilterData; expiresAt: string }> }>;
 
   readonly crawler: Crawler;
   private lastPrune = 0;
@@ -197,6 +220,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
     this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {} }));
+    this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
     this.crawler = new Crawler(
       () => this.config.crawler,
       this.path('crawler.json'),
@@ -282,6 +306,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           .filter(([, adapter]) => adapter.enabled)
           .map(([id]) => id),
       },
+      bloom: { inlineMaxBits: config.bloom.inlineMaxBits, storage: config.bloom.storage },
     };
   }
 
@@ -303,6 +328,19 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (adapter.dailyLimit !== undefined && !(Number(adapter.dailyLimit) >= 0)) throw badRequest(`${id}: daily limit must be 0 or more`);
       if (adapter.searchShare !== undefined && !(Number(adapter.searchShare) >= 0 && Number(adapter.searchShare) <= 1)) {
         throw badRequest(`${id}: the share kept for searches is between 0 and 1`);
+      }
+    }
+    const bloom = config.bloom;
+    if (!Number.isInteger(bloom.inlineMaxBits) || bloom.inlineMaxBits < 8 || bloom.inlineMaxBits > 1_048_576) {
+      throw badRequest('bloom.inlineMaxBits is a bit count between 8 and 1,048,576');
+    }
+    if (!Array.isArray(bloom.storage?.tiers)) throw badRequest('bloom.storage.tiers is a list of storage tiers');
+    const tierIds = new Set<string>();
+    for (const tier of bloom.storage.tiers) {
+      if (typeof tier.id !== 'string' || !tier.id.trim() || tierIds.has(tier.id)) throw badRequest('Every bloom storage tier needs its own id');
+      tierIds.add(tier.id);
+      if (!(Number(tier.maxBits) >= 1) || !(Number(tier.durationSeconds) >= 0) || !(Number(tier.price) >= 0)) {
+        throw badRequest(`${tier.id}: a bloom storage tier has maxBits, durationSeconds and a price`);
       }
     }
   }
@@ -347,6 +385,64 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   }
 
   // -------------------------------------------------------------------------
+  // Seen-content bloom filters: content whose cid or links collide with one is never
+  // suggested again. The user sends a filter inside a request (small ones only) and may
+  // keep a paid copy here for the time and price the operator's tiers set.
+
+  /** The user's stored filter on this node, while it has not expired. */
+  private storedBloom(accountId: string): BloomFilter | null {
+    const record = this.blooms.data.stored[accountId];
+    if (!record) return null;
+    if (Date.parse(record.expiresAt) <= Date.now()) {
+      delete this.blooms.data.stored[accountId];
+      this.blooms.changed();
+      return null;
+    }
+    try {
+      return BloomFilter.from(record.filter);
+    } catch {
+      return null;
+    }
+  }
+
+  /** A filter sent or stored in its `{ v, m, k, data }` form; refused when it is malformed. */
+  private parseBloom(value: unknown, maxBits: number): BloomFilter | null {
+    if (value === undefined || value === null) return null;
+    const data = value as Partial<BloomFilterData>;
+    if (data.v !== 1 || !Number.isInteger(data.m) || Number(data.m) < 1 || Number(data.m) > maxBits) {
+      throw badRequest(`A bloom filter is at most ${maxBits} bits`);
+    }
+    if (!Number.isInteger(data.k) || Number(data.k) !== optimalHashCount(Number(data.m))) {
+      throw badRequest(`A bloom filter of ${data.m} bits uses ${optimalHashCount(Number(data.m))} hash functions`);
+    }
+    try {
+      return BloomFilter.from(data as BloomFilterData);
+    } catch {
+      throw badRequest('The bloom filter bits do not match its size');
+    }
+  }
+
+  /** The filters of one request: the account's paid copy, plus the one carried along. */
+  private seenFilters(ctx: Ctx, body: { bloom?: unknown }): BloomFilter[] {
+    const filters: BloomFilter[] = [];
+    const account = this.auth.account(ctx);
+    const stored = account ? this.storedBloom(account.id) : null;
+    if (stored) filters.push(stored);
+    const inline = this.parseBloom(body.bloom, this.config.bloom.inlineMaxBits);
+    if (inline) filters.push(inline);
+    return filters;
+  }
+
+  /** Leaves out content the user has seen: any of its cid or links colliding is enough. */
+  private withoutSeen(entries: Entry[], filters: BloomFilter[]): Entry[] {
+    if (!filters.length) return entries;
+    return entries.filter((entry) => {
+      const identity = { id: entry.id, contentId: entry.contentId, link: entry.link, sources: entry.sources };
+      return !filters.some((filter) => filter.seesContent(identity));
+    });
+  }
+
+  // -------------------------------------------------------------------------
 
   protected registerRoutes(): void {
     const router = this.router;
@@ -362,8 +458,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     router.post('/v1/feed', async (ctx) => {
       const body = await readJson<FeedRequest>(ctx.req);
       this.charge(ctx, this.config.pricing.feed, 'feed');
+      const seen = this.seenFilters(ctx, body);
       const preferences = this.preferencesOf(body.preferences);
-      const visible = this.registry.visible(preferences, this.config.policy.maxRating);
+      const visible = this.withoutSeen(this.registry.visible(preferences, this.config.policy.maxRating), seen);
       const ranked = await rank(visible, {
         preferences,
         seed: String(body.seed ?? new Date().toISOString().slice(0, 13)),
@@ -378,6 +475,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const body = await readJson<SearchRequest>(ctx.req);
       if (typeof body.query !== 'string') throw badRequest('query is required');
       this.charge(ctx, this.config.pricing.search, 'search');
+      const seen = this.seenFilters(ctx, body);
       // The first page of a search also asks other platforms (briefly) for the query.
       const query = body.query.trim();
       if (!body.cursor && query && !/^(format|topic):/.test(query)) await this.crawler.search(query);
@@ -386,6 +484,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
       const platform = String(body.filters?.platform ?? '').slice(0, 40);
       if (platform) visible = visible.filter((entry) => sourceKeyOf(entry) === platform);
+      visible = this.withoutSeen(visible, seen);
       const results = this.bySource(this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry));
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
@@ -403,6 +502,42 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return this.lookup(ctx.params.id);
     });
 
+    // Seen-content bloom filters kept here for a while: the operator's tiers say how many
+    // bits and for how long, at what price. Suggestions skip whatever collides with them.
+    router.get('/v1/bloom', (ctx) => {
+      const account = this.auth.require(ctx);
+      const stored = this.storedBloom(account.id);
+      return {
+        filter: stored?.toJSON(),
+        expiresAt: this.blooms.data.stored[account.id]?.expiresAt,
+        tiers: this.config.bloom.storage.tiers,
+      };
+    });
+
+    router.put('/v1/bloom', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{ tier?: string; filter?: unknown }>(ctx.req, 1024 * 1024);
+      const tier = this.config.bloom.storage.tiers.find((t) => t.id === String(body.tier ?? ''));
+      if (!tier) throw badRequest('Unknown storage tier');
+      const filter = this.parseBloom(body.filter, tier.maxBits);
+      if (!filter) throw badRequest('filter is required');
+      this.charge(ctx, tier.price, 'bloom storage');
+      // A renewal keeps what is left of the old term and adds the new one to it.
+      const previous = this.blooms.data.stored[account.id];
+      const from = Math.max(Date.now(), previous ? Date.parse(previous.expiresAt) : 0);
+      const expiresAt = new Date(from + Number(tier.durationSeconds) * 1000).toISOString();
+      this.blooms.data.stored[account.id] = { filter: filter.toJSON(), expiresAt };
+      this.blooms.changed();
+      return { filter: filter.toJSON(), expiresAt, tiers: this.config.bloom.storage.tiers };
+    });
+
+    router.delete('/v1/bloom', (ctx) => {
+      const account = this.auth.require(ctx);
+      delete this.blooms.data.stored[account.id];
+      this.blooms.changed();
+      return { tiers: this.config.bloom.storage.tiers };
+    });
+
     router.get('/v1/thumbnails/:key', (ctx) => {
       const data = this.registry.thumbnail(ctx.params.key);
       if (!data) throw notFound('No thumbnail');
@@ -411,12 +546,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     router.post('/v1/creators/latest', async (ctx) => {
-      const body = await readJson<{ creators?: string[]; preferences?: Preferences; cursor?: string; limit?: number }>(ctx.req);
+      const body = await readJson<{ creators?: string[]; preferences?: Preferences; cursor?: string; limit?: number; bloom?: unknown }>(ctx.req);
       const creators = new Set((body.creators ?? []).slice(0, 500).map(String));
       this.charge(ctx, this.config.pricing.feed, 'subscriptions');
+      const seen = this.seenFilters(ctx, body);
       const preferences = this.preferencesOf(body.preferences);
-      const items = this.registry
-        .visible(preferences, this.config.policy.maxRating)
+      const items = this.withoutSeen(this.registry.visible(preferences, this.config.policy.maxRating), seen)
         .filter((entry) => entry.creatorId && creators.has(entry.creatorId))
         .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
       const page = pageOf(items, body.cursor, this.limitOf(body.limit));

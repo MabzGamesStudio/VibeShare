@@ -1,11 +1,19 @@
 // What a client keeps, independent of where it keeps it: files for the desktop and
 // command-line client, IndexedDB for the web client. Browser-safe.
 import type { HistoryItem, LibraryItem, NodeEntry, Settings, Subscription } from '../shared/clientapi.js';
+import type { BloomFilterData } from '../shared/bloom.js';
 import { defaultSettings } from '../shared/clientdefaults.js';
 import type { Identity } from '../shared/crypto.js';
 import { base32Decode, base32Encode } from '../shared/encoding.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
 import type { ProfileAccess, SealedBlob } from '../shared/profiles.js';
+
+/** The saved form of the seen-content bloom filters of one profile. */
+export interface BloomData {
+  selected?: BloomFilterData;
+  preview?: BloomFilterData;
+  node?: BloomFilterData;
+}
 
 /** One profile of the client: its own nodes, settings, history and client id. */
 export interface ProfileRecord {
@@ -28,6 +36,8 @@ export interface ProfileRecord {
   subscriptions: Subscription[];
   library: LibraryItem[];
   history: HistoryItem[];
+  /** The profile's bloom filters of seen content. */
+  blooms: BloomData;
 }
 
 /** What a profile keeps; the payload sealed inside a hidden profile's blob. */
@@ -39,6 +49,7 @@ export interface ProfilePayload {
   subscriptions: Subscription[];
   library: LibraryItem[];
   history: HistoryItem[];
+  blooms: BloomData;
 }
 
 export interface ClientData {
@@ -48,6 +59,8 @@ export interface ClientData {
   subscriptions: Subscription[];
   library: LibraryItem[];
   history: HistoryItem[];
+  /** The active profile's bloom filters of seen content. */
+  blooms: BloomData;
   /** Every profile of this client. Empty = the implicit single profile. */
   profiles: ProfileRecord[];
   /** The id of the profile whose data fills the fields above. */
@@ -61,6 +74,7 @@ export function emptyClientData(): ClientData {
     subscriptions: [],
     library: [],
     history: [],
+    blooms: {},
     profiles: [],
     activeProfile: 'main',
   };
@@ -81,6 +95,7 @@ export function prepareClientSave(data: ClientData): ClientData {
     subscriptions: hiddenActive ? [] : data.subscriptions,
     library: hiddenActive ? [] : data.library,
     history: hiddenActive ? [] : data.history,
+    blooms: hiddenActive ? {} : data.blooms,
     profiles: (data.profiles ?? []).map((profile) =>
       profile.hidden
         ? {
@@ -92,6 +107,7 @@ export function prepareClientSave(data: ClientData): ClientData {
             subscriptions: [],
             library: [],
             history: [],
+            blooms: {},
           }
         : profile
     ),

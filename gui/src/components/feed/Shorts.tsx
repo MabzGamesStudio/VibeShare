@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { Link } from 'react-router-dom';
 import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
 import { api, errorMessage } from '../../api';
+import { markPreviewed, useTrackingPreviews } from '../../bloom';
 import { useApp } from '../../state';
 import { watchPath } from '../../util';
 import { ShareButton } from '../Share';
@@ -146,9 +147,18 @@ export function ShortsLayout({ paged, page, ipfsGateway, header, empty }: { page
   const current = items[active];
   useEffect(() => {
     if (!current) return;
-    const timer = setTimeout(() => void api('/api/history', { body: { id: current.id, title: current.title } }).catch(() => undefined), 2500);
+    const timer = setTimeout(
+      () => void api('/api/history', { body: { id: current.id, title: current.title, contentId: current.contentId, link: current.link } }).catch(() => undefined),
+      2500
+    );
     return () => clearTimeout(timer);
   }, [current]);
+
+  // The preview is on screen the moment the short shows: the seen-content filters record it.
+  const tracking = useTrackingPreviews();
+  useEffect(() => {
+    if (current) markPreviewed(current, tracking);
+  }, [current?.id, tracking]);
 
   const onScroll = () => {
     const element = container.current;

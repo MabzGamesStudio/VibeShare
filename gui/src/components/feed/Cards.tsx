@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Play } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
+import { usePreviewSeen } from '../../bloom';
 import { aspectOf, imageFor } from '../../media';
 import { formatDuration, watchPath } from '../../util';
 import { ShareButton } from '../Share';
@@ -19,14 +20,16 @@ const VIDEO_FORMATS = new Set(['video', 'short-video', 'live']);
 
 /**
  * The picture of an item. In inline mode (the dual view) clicking a video starts playing
- * it in place instead of opening its content page.
+ * it in place instead of opening its content page. When the preview comes on screen, the
+ * client records the content as seen by the bloom filters that keep track of that.
  */
 export function ItemThumb({ item, share = true, inline = false }: { item: FeedItem; share?: boolean; inline?: boolean }) {
   const video = inline && VIDEO_FORMATS.has(item.format);
   const [playing, setPlaying] = useState(false);
+  const seen = usePreviewSeen(item);
   if (video) {
     return (
-      <div className="thumb">
+      <div className="thumb" ref={seen}>
         <button type="button" className="thumb-link" aria-label={playing ? `Pause ${item.title}` : `Play ${item.title}`} onClick={() => setPlaying((on) => !on)}>
           {playing ? (
             <MediaView item={item} active paused={false} muted controls loop={false} />
@@ -38,6 +41,7 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
                   <Play size={22} fill="currentColor" />
                 </span>
                 {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
+                {item.seen ? <span className="thumb-label">Seen</span> : null}
               </span>
             </>
           )}
@@ -51,13 +55,14 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
     );
   }
   return (
-    <div className="thumb">
+    <div className="thumb" ref={seen}>
       {/* Just the picture and its length: format and age rating are metadata fields a page can show. */}
       <Link to={watchPath(item.id)} className="thumb-link" aria-label={item.title}>
         <Poster item={item} src={previewOf(item)} />
-        {item.durationSeconds ? (
+        {(item.durationSeconds || item.seen) ? (
           <span className="thumb-overlay">
-            <span className="thumb-label">{formatDuration(item.durationSeconds)}</span>
+            {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
+            {item.seen ? <span className="thumb-label">Seen</span> : null}
           </span>
         ) : null}
       </Link>
@@ -73,20 +78,38 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
 // Big previews: fewer items per screen, and fewer fetched at once.
 const MIN_WIDTH = { small: 240, medium: 340, large: 440 };
 
+function GridCard({ item, page, inline }: { item: FeedItem; page: PageConfig; inline: boolean }) {
+  const seen = usePreviewSeen(item);
+  return (
+    <div className={`content-card ${page.thumbnail ? '' : 'text-only'}`} ref={seen}>
+      {page.thumbnail && <ItemThumb item={item} inline={inline} />}
+      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap', gap: 4 }}>
+        <Fields item={item} fields={page.fields} variant="card" />
+        {!page.thumbnail && <ShareButton target={{ id: item.id, title: item.title }} />}
+      </div>
+    </div>
+  );
+}
+
 export function GridLayout({ items, page, inline = false }: { items: FeedItem[]; page: PageConfig; inline?: boolean }) {
   const { columns, size } = page.options;
   const style = { gridTemplateColumns: columns ? `repeat(${columns}, minmax(0, 1fr))` : `repeat(auto-fill, minmax(${MIN_WIDTH[size]}px, 1fr))` };
   return (
     <div className="grid" style={style}>
       {items.map((item) => (
-        <div key={item.id} className={`content-card ${page.thumbnail ? '' : 'text-only'}`}>
-          {page.thumbnail && <ItemThumb item={item} inline={inline} />}
-          <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap', gap: 4 }}>
-            <Fields item={item} fields={page.fields} variant="card" />
-            {!page.thumbnail && <ShareButton target={{ id: item.id, title: item.title }} />}
-          </div>
-        </div>
+        <GridCard key={item.id} item={item} page={page} inline={inline} />
       ))}
+    </div>
+  );
+}
+
+function ListRow({ item, page, inline }: { item: FeedItem; page: PageConfig; inline: boolean }) {
+  const seen = usePreviewSeen(item);
+  return (
+    <div className="list-row" ref={seen}>
+      {page.thumbnail && <ItemThumb item={item} share={false} inline={inline} />}
+      <Fields item={item} fields={page.fields} variant="compact" />
+      <ShareButton target={{ id: item.id, title: item.title }} />
     </div>
   );
 }
@@ -95,11 +118,7 @@ export function ListLayout({ items, page, inline = false }: { items: FeedItem[];
   return (
     <div className={`list list-${page.options.size}`}>
       {items.map((item) => (
-        <div key={item.id} className="list-row">
-          {page.thumbnail && <ItemThumb item={item} share={false} inline={inline} />}
-          <Fields item={item} fields={page.fields} variant="compact" />
-          <ShareButton target={{ id: item.id, title: item.title }} />
-        </div>
+        <ListRow key={item.id} item={item} page={page} inline={inline} />
       ))}
     </div>
   );
@@ -123,6 +142,23 @@ function TileMedia({ item, inline, src }: { item: FeedItem; inline: boolean; src
     <Link to={watchPath(item.id)} aria-label={item.title}>
       <Poster item={item} src={src} />
     </Link>
+  );
+}
+
+function MasonryTile({ item, page, inline }: { item: FeedItem; page: PageConfig; inline: boolean }) {
+  const seen = usePreviewSeen(item);
+  const aspect = aspectOf(item);
+  const src = imageFor(item) ?? previewOf(item);
+  return (
+    <div className="masonry-tile" ref={seen}>
+      <div className="masonry-media" style={aspect ? { aspectRatio: String(aspect) } : undefined}>
+        <TileMedia item={item} inline={inline} src={src} />
+        <span className="thumb-actions">
+          <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
+        </span>
+      </div>
+      {page.fields.length > 0 && <Fields item={item} fields={page.fields} variant="compact" />}
+    </div>
   );
 }
 
@@ -155,21 +191,9 @@ export function MasonryLayout({ items, page, inline = false }: { items: FeedItem
       {width > 0 &&
         columns.map((column, i) => (
           <div key={i} className="masonry-column">
-            {column.map((item) => {
-              const aspect = aspectOf(item);
-              const src = imageFor(item) ?? previewOf(item);
-              return (
-                <div key={item.id} className="masonry-tile">
-                  <div className="masonry-media" style={aspect ? { aspectRatio: String(aspect) } : undefined}>
-                    <TileMedia item={item} inline={inline} src={src} />
-                    <span className="thumb-actions">
-                      <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
-                    </span>
-                  </div>
-                  {page.fields.length > 0 && <Fields item={item} fields={page.fields} variant="compact" />}
-                </div>
-              );
-            })}
+            {column.map((item) => (
+              <MasonryTile key={item.id} item={item} page={page} inline={inline} />
+            ))}
           </div>
         ))}
     </div>
