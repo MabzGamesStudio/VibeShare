@@ -1,6 +1,23 @@
-import { Check, Copy, X } from 'lucide-react';
+import { Check, Copy, Eye, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { copyText, gradientFor } from '../util';
+
+/**
+ * Marks content the bloom filters say was watched before. It is only a guess: the
+ * filters hold hashed ids and links in a fixed space and can occasionally be wrong,
+ * which the hover text says.
+ */
+export function WatchedBadge({ className = 'badge' }: { className?: string }) {
+  return (
+    <span
+      className={className}
+      title="This is a probabilistic guess that this content has already been watched. The bloom filters remember only hashed ids and links, so they can occasionally mistake other content for watched."
+      aria-label="Watched — a probabilistic guess"
+    >
+      <Eye size={11} style={{ verticalAlign: '-1px' }} /> *watched
+    </span>
+  );
+}
 
 export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label?: ReactNode }) {
   return (
@@ -65,7 +82,14 @@ export function CodeBox({ text, label }: { text: string; label?: string }) {
   );
 }
 
-export function Avatar({ name, id, large }: { name: string; id: string; large?: boolean }) {
+export function Avatar({ name, id, large, icon }: { name: string; id: string; large?: boolean; icon?: string }) {
+  if (icon) {
+    return (
+      <span className={`avatar ${large ? 'large' : ''}`} style={{ overflow: 'hidden', padding: 0 }}>
+        <img src={icon} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+      </span>
+    );
+  }
   const letter = (name || '?').trim().charAt(0).toUpperCase() || '?';
   return (
     <div className={`avatar ${large ? 'large' : ''}`} style={{ background: gradientFor(id || name) }}>

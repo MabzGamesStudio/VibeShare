@@ -4,7 +4,7 @@ import type { FeedItem, MetadataField } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
 import { FORMAT_LABELS, RATING_LABELS } from '../../../../src/shared/taxonomy';
 import { creatorPath, formatDuration, timeAgo, watchPath } from '../../util';
-import { Avatar } from '../ui';
+import { Avatar, WatchedBadge } from '../ui';
 
 export function compact(value: number): string {
   if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
@@ -20,7 +20,7 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
     case 'creator':
       return item.creator ? (
         <Link to={creatorPath(item.creator.id)} className="field-creator" onClick={(e) => e.stopPropagation()}>
-          {item.creator.name}
+          <Avatar name={item.creator.name} id={item.creator.id} icon={item.creator.icon} /> {item.creator.name}
         </Link>
       ) : null;
     case 'platform': {
@@ -94,11 +94,12 @@ export function Fields({ item, fields, variant = 'card' }: { item: FeedItem; fie
             {item.title}
           </Link>
         )}
-        {rest.length > 0 && (
+        {(rest.length > 0 || item.seen) && (
           <div className="fields-meta">
             {rest.map((field) => (
               <FieldValue key={field} item={item} field={field} />
             ))}
+            {item.seen && <WatchedBadge />}
           </div>
         )}
         {fields.includes('description') && item.description && <p className="fields-description">{item.description}</p>}

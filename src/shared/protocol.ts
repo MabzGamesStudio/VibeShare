@@ -284,6 +284,10 @@ export interface CreatorAccount {
   handle: string;
   /** A direct link to the account, when known. */
   url?: string;
+  /** The VibeShare creator this account belongs to, when it has a page here. */
+  creator?: string;
+  /** How many subscribers (or followers) the account has, when known. */
+  subscribers?: number;
 }
 
 export interface CreatorInfo {
@@ -296,6 +300,8 @@ export interface CreatorInfo {
   links?: string[];
   /** The creator's accounts on other platforms, linked together (capped by the node). */
   accounts?: CreatorAccount[];
+  /** The creator's icon: a data: URL of a small image (≤ 200 kB). */
+  icon?: string;
 }
 
 export interface TagNote {
@@ -413,20 +419,53 @@ export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
 
 /**
  * A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…) on a
- * node. The caller proves they hold this creator's key: `proof` signs
- * `claimSigningPayload(nodeId, creator, ts)` with it. The node caps how many accounts may
- * be linked (`maxCreatorAccounts` in its info).
+ * node. Signing is optional: with `proof` — a signature of
+ * `claimSigningPayload(nodeId, creator, ts)` with the creator's key — the accounts are
+ * linked at once. Without it, anyone may propose external links to the creator (every
+ * account must carry its link), and the node's operator decides whether to link them.
+ * The node caps how many accounts may be linked (`maxCreatorAccounts` in its info).
  */
 export interface CreatorAccountLinkRequest {
   /** The creator on this node (`name:…`, `vk1…`). New creators take their key as id. */
   creator: string;
-  /** The accounts to link together (this replaces the creator's list). */
+  /** The accounts to link together (this replaces the creator's list when signed). */
   accounts: CreatorAccount[];
   /** Name and kind, used when the creator is new. */
   name?: string;
   kind?: CreatorKind;
-  /** Proves the caller holds this creator's key. */
-  proof: { key: string; ts: number; sig: string };
+  /** Optional proof the caller holds this creator's key (the request is then trusted). */
+  proof?: { key: string; ts: number; sig: string };
+  /**
+   * Whether links between accounts go both ways (the default): an account pointing at
+   * another creator also appears on that creator's page. `false` makes it one way.
+   */
+  symmetric?: boolean;
+}
+
+/** An unsigned proposal to link accounts (external links) to a creator, for review. */
+export interface AccountLinkProposal {
+  id: string;
+  /** The creator the accounts are proposed for. */
+  creatorId: string;
+  creatorName?: string;
+  accounts: CreatorAccount[];
+  /** Name and kind, when the proposal would start the creator's record. */
+  name?: string;
+  kind?: CreatorKind;
+  accountId: string;
+  status: 'pending' | 'accepted';
+  createdAt: string;
+  reviewedAt?: string;
+  /** Whether accepted links go both ways (the default) or only point one way. */
+  symmetric?: boolean;
+}
+
+/** What linking accounts answers: done at once (signed), or kept for the operator. */
+export interface AccountLinkResponse {
+  /** True when the accounts were linked now (the request was signed with the creator key). */
+  linked: boolean;
+  creator?: CreatorInfo;
+  proposal?: AccountLinkProposal;
 }
 
 /** Content a client suggests as related to a creator, with an optional message. */
@@ -435,6 +474,12 @@ export interface CreatorContentRequest {
   id: string;
   /** An optional message for the operator. */
   message?: string;
+  /** The content's title, when the client knows it. */
+  title?: string;
+  /** The platform the content lives on (`youtube`, `tiktok`…), for the operator. */
+  platform?: string;
+  /** Platform numbers the client saw (views, likes, comments…), kept when accepted. */
+  metrics?: Record<string, number>;
 }
 
 /** One suggested piece of content on a creator, as the node keeps it for review. */
@@ -447,6 +492,10 @@ export interface CreatorContentSuggestion {
   /** The reference as the client sent it (a content id or a link). */
   contentRef: string;
   message?: string;
+  /** What the client knows about the content: title, platform and its numbers. */
+  title?: string;
+  platform?: string;
+  metrics?: Record<string, number>;
   accountId: string;
   status: 'pending' | 'accepted';
   createdAt: string;
@@ -458,6 +507,34 @@ export interface CreatorContentSuggestion {
 export interface CreatorContentResponse {
   suggestion: CreatorContentSuggestion;
   /** True when this suggestion was new (the node did not already have it waiting). */
+  newInfo: boolean;
+  /** Credits earned (paid when the operator accepts the suggestion). */
+  credited: number;
+}
+
+/** An icon a client suggests for a creator (a small image). */
+export interface CreatorIconRequest {
+  /** A data: URL of a small image (≤ 200 kB): png, jpeg, webp or gif. */
+  icon: string;
+}
+
+/** A suggested creator icon, as the node keeps it for review. */
+export interface CreatorIconSuggestion {
+  id: string;
+  creatorId: string;
+  creatorName?: string;
+  icon: string;
+  accountId: string;
+  status: 'pending' | 'accepted';
+  createdAt: string;
+  reviewedAt?: string;
+  /** Credits the suggesting client earned when it was accepted. */
+  credited?: number;
+}
+
+export interface CreatorIconResponse {
+  suggestion: CreatorIconSuggestion;
+  /** True when this suggestion was new (the node did not already have one waiting). */
   newInfo: boolean;
   /** Credits earned (paid when the operator accepts the suggestion). */
   credited: number;

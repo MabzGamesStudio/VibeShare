@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatSource, parseContentId, sourceFromUrl } from '../../../src/shared/sources';
 import {
   CREATOR_KIND_LABELS,
@@ -57,6 +57,26 @@ interface CreatorSuggestion {
   contentRef: string;
   title?: string;
   message?: string;
+  status: string;
+  createdAt: string;
+}
+
+/** Account links proposed without the creator's key, for the operator to link or not. */
+interface AccountLinkProposalView {
+  id: string;
+  creatorId: string;
+  creatorName?: string;
+  accounts: { platform: string; handle: string; url?: string }[];
+  status: string;
+  createdAt: string;
+}
+
+/** An icon a client suggested for a creator, for the operator to accept or delete. */
+interface IconSuggestionView {
+  id: string;
+  creatorId: string;
+  creatorName?: string;
+  icon: string;
   status: string;
   createdAt: string;
 }
@@ -147,12 +167,20 @@ function Review() {
   const [submissions, setSubmissions] = useState<Submission[] | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [creatorIdeas, setCreatorIdeas] = useState<CreatorSuggestion[]>([]);
+  const [accountLinks, setAccountLinks] = useState<AccountLinkProposalView[]>([]);
+  const [icons, setIcons] = useState<IconSuggestionView[]>([]);
   const [toast, show] = useToast();
   const load = useCallback(() => {
     admin<{ submissions: Submission[] }>('/v1/admin/submissions').then((r) => setSubmissions(r.submissions)).catch((e) => show(message(e)));
     admin<{ suggestions: Suggestion[] }>('/v1/admin/suggestions').then((r) => setSuggestions(r.suggestions)).catch(() => undefined);
     admin<{ suggestions: CreatorSuggestion[] }>('/v1/admin/creator-suggestions')
       .then((r) => setCreatorIdeas(r.suggestions))
+      .catch(() => undefined);
+    admin<{ suggestions: IconSuggestionView[] }>('/v1/admin/creator-icons')
+      .then((r) => setIcons(r.suggestions))
+      .catch(() => undefined);
+    admin<{ proposals: AccountLinkProposalView[] }>('/v1/admin/account-links')
+      .then((r) => setAccountLinks(r.proposals))
       .catch(() => undefined);
   }, [show]);
   useEffect(load, [load]);
@@ -259,6 +287,90 @@ function Review() {
           </table>
         </div>
       )}
+      <h2 style={{ marginTop: 20 }}>Creator icons</h2>
+      {icons.length === 0 ? (
+        <p className="muted small">Nothing waiting.</p>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {icons.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <img src={s.icon} alt="" style={{ width: 32, height: 32, borderRadius: 6, verticalAlign: 'middle', marginRight: 8 }} />
+                    <strong>{s.creatorName ?? s.creatorId}</strong>
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button
+                        className="small primary"
+                        onClick={async () => {
+                          await admin(`/v1/admin/creator-icons/${s.id}/accept`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Use it
+                      </button>
+                      <button
+                        className="small danger"
+                        onClick={async () => {
+                          await admin(`/v1/admin/creator-icons/${s.id}/delete`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <h2 style={{ marginTop: 20 }}>Account links without the creator key</h2>
+      {accountLinks.length === 0 ? (
+        <p className="muted small">Nothing waiting.</p>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {accountLinks.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <strong>{p.creatorName ?? p.creatorId}</strong>
+                    <div className="small muted">
+                      {p.accounts.map((a) => a.url || `${a.platform}:${a.handle}`).join(' · ')}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button
+                        className="small primary"
+                        onClick={async () => {
+                          await admin(`/v1/admin/account-links/${p.id}/accept`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Link them
+                      </button>
+                      <button
+                        className="small danger"
+                        onClick={async () => {
+                          await admin(`/v1/admin/account-links/${p.id}/delete`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -279,6 +391,8 @@ interface Entry {
   tags: string[];
   language?: string;
   creatorId?: string;
+  link?: string;
+  providers?: string[];
   likes: number;
   dislikes: number;
   updatedAt: string;
@@ -402,8 +516,8 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
     try {
       await admin('/v1/admin/content', {
         method: 'PUT',
-        // The preview image and the claimed numbers are shown here but never edited
-        // back: the thumbnail field only accepts data: URLs, and numbers come from claims.
+        // The preview image is shown here but never edited back: the thumbnail field
+        // only accepts data: URLs (set it with Add content or a suggestion).
         body: {
           ...draft,
           id: resolvedId,
@@ -412,7 +526,6 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
           dislikes: undefined,
           updatedAt: undefined,
           thumbnail: undefined,
-          platformStats: undefined,
         },
       });
       onSaved();
@@ -491,6 +604,69 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
           Creator id
           <input type="text" value={draft.creatorId ?? ''} onChange={(e) => setDraft({ ...draft, creatorId: e.target.value || undefined })} />
         </label>
+        <div className="form-grid">
+          <label className="field">
+            Duration (seconds)
+            <input
+              type="number"
+              min={0}
+              value={draft.durationSeconds ?? ''}
+              onChange={(e) => setDraft({ ...draft, durationSeconds: e.target.value ? Number(e.target.value) : undefined })}
+            />
+          </label>
+          <label className="field">
+            Published
+            <input
+              type="date"
+              value={(draft.publishedAt ?? '').slice(0, 10)}
+              onChange={(e) => setDraft({ ...draft, publishedAt: e.target.value ? new Date(e.target.value).toISOString() : undefined })}
+            />
+          </label>
+        </div>
+        <label className="field">
+          Link (where the content lives outside VibeShare)
+          <input type="text" className="mono" value={draft.link ?? ''} onChange={(e) => setDraft({ ...draft, link: e.target.value || undefined })} placeholder="yt:… or url:…" />
+        </label>
+        <label className="field">
+          Page URL
+          <input type="url" value={draft.pageUrl ?? ''} onChange={(e) => setDraft({ ...draft, pageUrl: e.target.value || undefined })} />
+        </label>
+        <label className="field">
+          Providers <span className="hint">Node references, comma separated</span>
+          <input type="text" defaultValue={(draft.providers ?? []).join(', ')} onBlur={(e) => setDraft({ ...draft, providers: splitList(e.target.value) })} />
+        </label>
+        <div className="field">
+          <span>Platform metrics</span>
+          {Object.entries(draft.platformStats ?? {}).map(([name, value]) => (
+            <div key={name} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+              <input type="text" value={name} disabled style={{ opacity: 0.7 }} />
+              <input
+                type="number"
+                value={value}
+                onChange={(e) => setDraft({ ...draft, platformStats: { ...(draft.platformStats ?? {}), [name]: Number(e.target.value) } })}
+              />
+              <button
+                className="small danger"
+                aria-label="Remove"
+                onClick={() => {
+                  const { [name]: _gone, ...rest } = draft.platformStats ?? {};
+                  setDraft({ ...draft, platformStats: rest });
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            className="small"
+            onClick={() => {
+              const name = window.prompt('Metric name (views, likes, comments…)');
+              if (name?.trim()) setDraft({ ...draft, platformStats: { ...(draft.platformStats ?? {}), [name.trim()]: 0 } });
+            }}
+          >
+            + Add metric
+          </button>
+        </div>
         {draft.status === 'blocked' && (
           <label className="field">
             Reason shown to clients
@@ -503,21 +679,116 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
   );
 }
 
+type Paging = { paging: 'lazy' | 'pages'; perPage: number };
+
+/** The operator's choice for one console list: lazy loading or pagination, and page size. */
+function useConsoleList(what: 'catalog' | 'creators') {
+  const [prefs, setPrefs] = useState<Paging>({ paging: 'lazy', perPage: 50 });
+  useEffect(() => {
+    admin<{ console?: Record<string, Paging> }>('/v1/admin/config')
+      .then((c) => setPrefs(c.console?.[what] ?? { paging: 'lazy', perPage: 50 }))
+      .catch(() => undefined);
+  }, [what]);
+  const save = (patch: Partial<Paging>) => {
+    const next = { ...prefs, ...patch };
+    setPrefs(next);
+    void admin('/v1/admin/config', { method: 'PUT', body: { console: { [what]: next } } }).catch(() => undefined);
+  };
+  return { prefs, save };
+}
+
+/** The mode switch and page size of one console list (kept in the node's settings). */
+function ListControls({ prefs, save }: { prefs: Paging; save: (patch: Partial<Paging>) => void }) {
+  return (
+    <div className="row">
+      <select value={prefs.paging} style={{ width: 'auto' }} onChange={(e) => save({ paging: e.target.value as Paging['paging'] })}>
+        <option value="lazy">Lazy loading</option>
+        <option value="pages">Pagination</option>
+      </select>
+      <input
+        key={prefs.perPage}
+        type="number"
+        min={5}
+        max={500}
+        style={{ maxWidth: 92 }}
+        defaultValue={prefs.perPage}
+        onBlur={(e) => {
+          const perPage = Math.round(Number(e.target.value));
+          if (Number.isFinite(perPage) && perPage >= 5 && perPage <= 500 && perPage !== prefs.perPage) save({ perPage });
+        }}
+      />
+      <span className="hint">items per page</span>
+    </div>
+  );
+}
+
+/** Asks for more when it scrolls into view (lazy loading). */
+function Sentinel({ onMore, done }: { onMore: () => void; done: boolean }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const more = useRef(onMore);
+  more.current = onMore;
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || done) return;
+    const observer = new IntersectionObserver((entries) => entries.some((entry) => entry.isIntersecting) && more.current(), { rootMargin: '200px' });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [done]);
+  return <div ref={ref} />;
+}
+
+/** The Previous / Next row of a paginated console list. */
+function Pager({ page, perPage, total, loading, go }: { page: number; perPage: number; total: number; loading: boolean; go: (page: number) => void }) {
+  return (
+    <div className="row">
+      <button className="small" disabled={page === 0 || loading} onClick={() => go(page - 1)}>
+        Previous
+      </button>
+      <span className="small">
+        Page {page + 1} of {Math.max(1, Math.ceil(total / perPage))}
+      </span>
+      <button className="small" disabled={(page + 1) * perPage >= total || loading} onClick={() => go(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
+
 function Catalog() {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState('');
-  const [page, setPage] = useState<{ items: Entry[]; cursor?: string } | null>(null);
+  const [items, setItems] = useState<Entry[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Partial<Entry> | null>(null);
   const [details, setDetails] = useState<Entry | null>(null);
   const [provider, setProvider] = useState('');
   const [toast, show] = useToast();
+  const { prefs, save: savePaging } = useConsoleList('catalog');
 
-  const load = useCallback(() => {
-    admin<{ items: Entry[]; cursor?: string }>(`/v1/admin/content?q=${encodeURIComponent(q)}&status=${status}`)
-      .then(setPage)
-      .catch((e) => show(message(e)));
-  }, [q, status, show]);
-  useEffect(load, [load]);
+  const fetchAt = useCallback(
+    async (at: number, append: boolean) => {
+      setLoading(true);
+      try {
+        const result = await admin<{ items: Entry[]; total?: number }>(
+          `/v1/admin/content?q=${encodeURIComponent(q)}&status=${status}&limit=${prefs.perPage}&cursor=${at}`
+        );
+        setItems((list) => (append ? [...(list ?? []), ...result.items] : result.items));
+        setTotal(result.total ?? 0);
+      } catch (e) {
+        show(message(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [q, status, prefs.perPage, show]
+  );
+  useEffect(() => {
+    setPage(0);
+    void fetchAt(0, false);
+  }, [fetchAt]);
+  const load = useCallback(() => void fetchAt(0, false), [fetchAt]);
 
   return (
     <div className="form-stack">
@@ -550,28 +821,29 @@ function Catalog() {
           <option value="pending">Found by the crawler, waiting for review</option>
           <option value="blocked">Blocked</option>
         </select>
-        {status === 'pending' && page && page.items.length > 0 && (
+        {status === 'pending' && items && items.length > 0 && (
           <button
             onClick={async () => {
-              await admin('/v1/admin/content/bulk', { body: { ids: page.items.map((entry) => entry.id), status: 'listed' } }).catch((e) => show(message(e)));
+              await admin('/v1/admin/content/bulk', { body: { ids: items.map((entry) => entry.id), status: 'listed' } }).catch((e) => show(message(e)));
               load();
             }}
           >
-            List all {page.items.length}
+            List all {items.length}
           </button>
         )}
+        <ListControls prefs={prefs} save={savePaging} />
         <button className="primary" onClick={() => setEditing(blankEntry())}>
           Add content
         </button>
       </div>
       <p className="hint">Ids that are not here are reported to clients as “unknown”.</p>
-      {!page ? (
+      {!items ? (
         <Loading />
       ) : (
         <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
           <table className="table">
             <tbody>
-              {page.items.map((entry) => (
+              {(items ?? []).map((entry) => (
                 <tr key={entry.id}>
                   <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(entry)}>
                     <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
@@ -667,6 +939,24 @@ function Catalog() {
           </table>
         </div>
       )}
+      {items && prefs.paging === 'lazy' && (
+        <>
+          <Sentinel onMore={() => !loading && void fetchAt(items.length, true)} done={items.length >= total} />
+          {items.length < total && <p className="hint">Scroll for more ({items.length} of {total})</p>}
+        </>
+      )}
+      {items && prefs.paging === 'pages' && (
+        <Pager
+          page={page}
+          perPage={prefs.perPage}
+          total={total}
+          loading={loading}
+          go={(next) => {
+            setPage(next);
+            void fetchAt(next * prefs.perPage, false);
+          }}
+        />
+      )}
       {details && (
         <EntryDetails
           entry={details}
@@ -703,21 +993,45 @@ interface Creator {
 
 function Creators() {
   const [creators, setCreators] = useState<Creator[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Partial<Creator> | null>(null);
   const [toast, show] = useToast();
-  const load = useCallback(() => {
-    admin<{ creators: Creator[] }>('/v1/admin/creators').then((r) => setCreators(r.creators)).catch((e) => show(message(e)));
-  }, [show]);
-  useEffect(load, [load]);
+  const { prefs, save: savePaging } = useConsoleList('creators');
+
+  const fetchAt = useCallback(
+    async (at: number, append: boolean) => {
+      setLoading(true);
+      try {
+        const result = await admin<{ creators: Creator[]; total?: number }>(`/v1/admin/creators?limit=${prefs.perPage}&cursor=${at}`);
+        setCreators((list) => (append ? [...(list ?? []), ...result.creators] : result.creators));
+        setTotal(result.total ?? 0);
+      } catch (e) {
+        show(message(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [prefs.perPage, show]
+  );
+  useEffect(() => {
+    setPage(0);
+    void fetchAt(0, false);
+  }, [fetchAt]);
+  const load = useCallback(() => void fetchAt(0, false), [fetchAt]);
 
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
       <div className="row between">
         <p className="small muted">People, companies and groups. Creators with a key id (vk1…) are proven by signatures; blocking a creator hides all their content.</p>
-        <button className="primary" onClick={() => setEditing({ id: '', name: '', kind: 'person', status: 'listed' })}>
-          Add creator
-        </button>
+        <div className="row">
+          <ListControls prefs={prefs} save={savePaging} />
+          <button className="primary" onClick={() => setEditing({ id: '', name: '', kind: 'person', status: 'listed' })}>
+            Add creator
+          </button>
+        </div>
       </div>
       {!creators ? (
         <Loading />
@@ -745,6 +1059,24 @@ function Creators() {
             </tbody>
           </table>
         </div>
+      )}
+      {creators && prefs.paging === 'lazy' && (
+        <>
+          <Sentinel onMore={() => !loading && void fetchAt(creators.length, true)} done={creators.length >= total} />
+          {creators.length < total && <p className="hint">Scroll for more ({creators.length} of {total})</p>}
+        </>
+      )}
+      {creators && prefs.paging === 'pages' && (
+        <Pager
+          page={page}
+          perPage={prefs.perPage}
+          total={total}
+          loading={loading}
+          go={(next) => {
+            setPage(next);
+            void fetchAt(next * prefs.perPage, false);
+          }}
+        />
       )}
       {editing && (
         <Modal

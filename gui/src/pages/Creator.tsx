@@ -1,37 +1,93 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import type { CreatorView } from '../../../src/shared/clientapi';
-import type { AlgorithmInfo, CreatorContentSuggestion, CreatorInfo } from '../../../src/shared/protocol';
+import type { AccountLinkProposal, AlgorithmInfo, CreatorAccount, CreatorContentSuggestion, CreatorIconSuggestion, CreatorInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
 import { SOURCE_LABELS } from '../../../src/shared/sources';
 import { api, errorMessage } from '../api';
 import { GridLayout } from '../components/feed/Cards';
+import { compact } from '../components/feed/Fields';
 import { CARD_PAGE } from '../components/Feed';
-import { Avatar, CopyButton, Empty, Loading } from '../components/ui';
+import { Avatar, CopyButton, Empty, Loading, Modal, Switch } from '../components/ui';
 import { useApp } from '../state';
 
-/** The creator linking their accounts on other platforms (YouTube, TikTok, Twitter…). */
+/** The creator's related accounts: a horizontal scroll of cards to click through. */
+function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]; creatorName: string }) {
+  if (!accounts.length) return null;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="hint" style={{ marginBottom: 6 }}>Related accounts of {creatorName}</div>
+      <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 6 }}>
+        {accounts.map((account) => {
+          const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+          const key = `${account.platform}:${account.handle}`;
+          const card = (
+            <div className="card" style={{ minWidth: 152, maxWidth: 184, textAlign: 'center', padding: 12, cursor: 'pointer', marginBottom: 0 }}>
+              <div className="tiny faint" style={{ minHeight: 15 }}>
+                {account.subscribers !== undefined ? `${compact(account.subscribers)} subscribers` : 'Subscribers unknown'}
+              </div>
+              <Avatar name={account.handle} id={key} />
+              <div style={{ marginTop: 6, fontWeight: 600 }}>{account.handle}</div>
+              <div className="tiny faint">{label}</div>
+            </div>
+          );
+          // A linked account goes to its VibeShare creator page; else to the actual URL.
+          return account.creator ? (
+            <Link key={key} to={`/creator/${encodeURIComponent(account.creator)}`} style={{ textDecoration: 'none', color: 'inherit' }}>
+              {card}
+            </Link>
+          ) : account.url ? (
+            <a key={key} href={account.url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
+              {card}
+            </a>
+          ) : (
+            <div key={key}>{card}</div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Accounts on other platforms: linked by the creator at once, or suggested by anyone. */
 function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; nodeId: string; onSaved: () => void }) {
   const { state, toast } = useApp();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [rows, setRows] = useState<{ platform: string; handle: string; url?: string }[]>(() => (creator.accounts ?? []).map((a) => ({ ...a })));
+  const [rows, setRows] = useState<{ platform: string; handle: string; url?: string; creator?: string; subscribers?: number }[]>(() =>
+    (creator.accounts ?? []).map((a) => ({ ...a }))
+  );
+  const [proposals, setProposals] = useState<AccountLinkProposal[]>([]);
+  const [symmetric, setSymmetric] = useState(true);
   const node = state?.nodes.find((n) => n.id === nodeId);
   const max = ((node?.info as AlgorithmInfo | undefined)?.maxCreatorAccounts ?? 8);
+  // Holding the creator's key signs the request (linked at once); anyone else may suggest.
+  const identity = state?.identity.id;
+  const isCreator = Boolean(identity && (creator.id === identity || creator.keys?.includes(identity)));
   useEffect(() => {
     setRows((creator.accounts ?? []).map((a) => ({ ...a })));
   }, [creator.id, creator.accounts?.length]);
+  const load = useCallback(() => {
+    api<{ proposals: AccountLinkProposal[] }>(`/api/account-links/${encodeURIComponent(nodeId)}`)
+      .then((result) => setProposals(result.proposals.filter((p) => p.creatorId === creator.id)))
+      .catch(() => setProposals([]));
+  }, [nodeId, creator.id]);
+  useEffect(load, [load]);
 
-  const update = (index: number, patch: Partial<{ platform: string; handle: string; url?: string }>) =>
+  const update = (index: number, patch: Partial<{ platform: string; handle: string; url?: string; creator?: string; subscribers?: number }>) =>
     setRows((list) => list.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   const save = async () => {
     setBusy(true);
     try {
       const accounts = rows.filter((row) => row.platform.trim() && row.handle.trim());
-      await api('/api/creators/accounts', { method: 'PUT', body: { nodeId, creator: creator.id, accounts } });
-      toast('Accounts linked', 'success');
+      const result = await api<{ linked: boolean }>('/api/creators/accounts', {
+        method: 'PUT',
+        body: { nodeId, creator: creator.id, accounts, sign: isCreator, symmetric },
+      });
+      toast(result.linked ? 'Accounts linked' : 'Sent to the node’s operator, who decides whether to link them', 'success');
       setOpen(false);
       onSaved();
+      load();
     } catch (error) {
       toast(errorMessage(error), 'error');
     } finally {
@@ -44,12 +100,14 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
       <div className="row between">
         <h3>Accounts on other platforms</h3>
         <button className="small" onClick={() => setOpen(!open)}>
-          {open ? 'Close' : 'Link accounts'}
+          {open ? 'Close' : isCreator ? 'Link accounts' : 'Suggest accounts'}
         </button>
       </div>
       <span className="hint">
-        {creator.name} can link up to {max} accounts here (YouTube, TikTok, Twitter…). Only the creator can: the request is signed with the
-        creator key, and this node decides the limit.
+        {creator.name} can link up to {max} accounts here (YouTube, TikTok, Twitter…).{' '}
+        {isCreator
+          ? 'You hold this creator’s key: your signature links them at once.'
+          : 'No creator key is needed to suggest external links: the node’s operator decides whether the accounts are linked. Every account must carry its link.'}
       </span>
       {open && (
         <div className="form-stack">
@@ -62,7 +120,25 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
                 onChange={(e) => update(index, { platform: e.target.value })}
               />
               <input type="text" placeholder="Handle" value={row.handle} onChange={(e) => update(index, { handle: e.target.value })} />
-              <input type="url" placeholder="Link (optional)" value={row.url ?? ''} onChange={(e) => update(index, { url: e.target.value })} />
+              <input
+                type="url"
+                placeholder={isCreator ? 'Link (optional)' : 'Link to the creator (required)'}
+                value={row.url ?? ''}
+                onChange={(e) => update(index, { url: e.target.value })}
+              />
+              <input
+                type="text"
+                placeholder="VibeShare creator id (optional)"
+                value={row.creator ?? ''}
+                onChange={(e) => update(index, { creator: e.target.value })}
+              />
+              <input
+                type="number"
+                placeholder="Subscribers"
+                style={{ maxWidth: 110 }}
+                value={row.subscribers ?? ''}
+                onChange={(e) => update(index, { subscribers: e.target.value ? Number(e.target.value) : undefined })}
+              />
               <button className="small danger" onClick={() => setRows(rows.filter((_, i) => i !== index))} aria-label="Remove">
                 ×
               </button>
@@ -73,20 +149,41 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
               + Add account
             </button>
             <button className="primary small" disabled={busy} onClick={() => void save()}>
-              {busy ? 'Saving…' : 'Save accounts'}
+              {busy ? 'Saving…' : isCreator ? 'Save accounts' : 'Suggest accounts'}
             </button>
           </div>
+          <Switch
+            checked={symmetric}
+            onChange={setSymmetric}
+            label="Two-way link: the linked creator's page shows this one back (off = one way)"
+          />
+        </div>
+      )}
+      {proposals.length > 0 && (
+        <div className="page-list">
+          {proposals.map((p) => (
+            <div key={p.id} className="page-row">
+              <div style={{ flex: 1, minWidth: 0 }}>{p.accounts.map((a) => a.url || `${a.platform}:${a.handle}`).join(' · ')}</div>
+              <span className={`badge ${p.status === 'accepted' ? 'ok' : ''}`}>
+                {p.status === 'accepted' ? 'linked' : 'waiting for the operator'}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-/** Content the user suggests as related to this creator, with an optional message. */
+/** Content the user suggests for this creator: a modal for the link, title and numbers. */
 function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: string }) {
   const { toast } = useApp();
+  const [open, setOpen] = useState(false);
   const [id, setId] = useState('');
+  const [title, setTitle] = useState('');
+  const [platform, setPlatform] = useState('');
   const [message, setMessage] = useState('');
+  const [metrics, setMetrics] = useState<{ name: string; value: string }[]>([]);
   const [mine, setMine] = useState<CreatorContentSuggestion[]>([]);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
@@ -100,12 +197,29 @@ function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: str
     if (!id.trim()) return;
     setBusy(true);
     try {
+      const numbers: Record<string, number> = {};
+      for (const row of metrics) {
+        const value = Number(row.value);
+        if (row.name.trim() && Number.isFinite(value) && value >= 0) numbers[row.name.trim()] = value;
+      }
       const result = await api<{ newInfo: boolean }>('/api/creator-suggestions', {
-        body: { nodeId, creator: creator.id, id: id.trim(), message: message.trim() || undefined },
+        body: {
+          nodeId,
+          creator: creator.id,
+          id: id.trim(),
+          title: title.trim() || undefined,
+          platform: platform.trim() || undefined,
+          message: message.trim() || undefined,
+          metrics: Object.keys(numbers).length ? numbers : undefined,
+        },
       });
       toast(result.newInfo ? 'Suggested — the node reviews it' : 'This is already suggested', 'success');
       setId('');
+      setTitle('');
+      setPlatform('');
       setMessage('');
+      setMetrics([]);
+      setOpen(false);
       load();
     } catch (error) {
       toast(errorMessage(error), 'error');
@@ -116,36 +230,162 @@ function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: str
 
   return (
     <div className="card form-stack">
-      <h3>Suggest content for {creator.name}</h3>
-      <span className="hint">
-        Know content that belongs to {creator.name}? Send its content id or link, with an optional message for the node's operator. When they
-        accept, it joins the creator and you earn credits.
-      </span>
-      <div className="form-grid">
-        <label className="field">
-          Content id or link
-          <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="vs1… or yt:…" />
-        </label>
-        <label className="field">
-          Message (optional)
-          <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Why this belongs to the creator" />
-        </label>
-      </div>
-      <div>
-        <button className="primary small" disabled={busy || !id.trim()} onClick={() => void submit()}>
-          {busy ? 'Sending…' : 'Suggest'}
+      <div className="row between">
+        <h3>Suggest content for {creator.name}</h3>
+        <button className="small" onClick={() => setOpen(true)}>
+          + Suggest content
         </button>
       </div>
+      <span className="hint">
+        Know content that belongs to {creator.name}? Open the form to send its link with the title, platform and platform numbers you know.
+        When the node accepts, it joins the creator and you earn credits.
+      </span>
+      {open && (
+        <Modal
+          title={`Suggest content for ${creator.name}`}
+          onClose={() => setOpen(false)}
+          actions={
+            <>
+              <button onClick={() => setOpen(false)}>Cancel</button>
+              <button className="primary" disabled={busy || !id.trim()} onClick={() => void submit()}>
+                {busy ? 'Sending…' : 'Suggest'}
+              </button>
+            </>
+          }
+        >
+          <div className="form-stack">
+            <label className="field">
+              Link (content id or URL)
+              <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="vs1… or yt:…" autoFocus />
+            </label>
+            <div className="form-grid">
+              <label className="field">
+                Title
+                <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} />
+              </label>
+              <label className="field">
+                Platform
+                <input type="text" value={platform} onChange={(e) => setPlatform(e.target.value)} placeholder="youtube, tiktok…" />
+              </label>
+            </div>
+            <div className="field">
+              <span>
+                Platform metrics <span className="hint">What the page shows: views, likes, comments…</span>
+              </span>
+              {metrics.map((row, index) => (
+                <div key={index} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                  <input
+                    type="text"
+                    placeholder="views"
+                    value={row.name}
+                    onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, name: e.target.value } : m)))}
+                  />
+                  <input
+                    type="number"
+                    placeholder="0"
+                    value={row.value}
+                    onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, value: e.target.value } : m)))}
+                  />
+                  <button className="small danger" onClick={() => setMetrics(metrics.filter((_, i) => i !== index))} aria-label="Remove">
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button className="small" onClick={() => setMetrics([...metrics, { name: '', value: '' }])}>
+                + Add metric
+              </button>
+            </div>
+            <label className="field">
+              Message for the operator (optional)
+              <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Why this belongs to the creator" />
+            </label>
+          </div>
+        </Modal>
+      )}
       {mine.length > 0 && (
         <div className="page-list">
           {mine.map((s) => (
             <div key={s.id} className="page-row">
               <div style={{ flex: 1, minWidth: 0 }}>
                 <code>{s.contentRef}</code>
+                {s.title && <span> · {s.title}</span>}
                 {s.message && <div className="tiny faint">{s.message}</div>}
               </div>
               <span className={`badge ${s.status === 'accepted' ? 'ok' : ''}`}>{s.status === 'accepted' ? 'accepted' : 'waiting for review'}</span>
             </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** An icon the user suggests for this creator (a small image, judged by the operator). */
+function SuggestIcon({ creator, nodeId }: { creator: CreatorInfo; nodeId: string }) {
+  const { toast } = useApp();
+  const [open, setOpen] = useState(false);
+  const [icon, setIcon] = useState('');
+  const [mine, setMine] = useState<CreatorIconSuggestion[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    api<{ suggestions: CreatorIconSuggestion[] }>(`/api/creator-icons/${encodeURIComponent(nodeId)}`)
+      .then((result) => setMine(result.suggestions.filter((s) => s.creatorId === creator.id)))
+      .catch(() => setMine([]));
+  }, [nodeId, creator.id]);
+  useEffect(load, [load]);
+
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setIcon(String(reader.result ?? ''));
+    reader.readAsDataURL(file);
+  };
+  const submit = async () => {
+    if (!icon) return;
+    setBusy(true);
+    try {
+      const result = await api<{ newInfo: boolean }>('/api/creator-icons', { body: { nodeId, creator: creator.id, icon } });
+      toast(result.newInfo ? 'Icon suggested — the node reviews it' : 'An icon is already waiting for review', 'success');
+      setIcon('');
+      setOpen(false);
+      load();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card form-stack">
+      <div className="row between">
+        <h3>Creator icon</h3>
+        <button className="small" onClick={() => setOpen(!open)}>
+          {open ? 'Close' : 'Suggest an icon'}
+        </button>
+      </div>
+      <span className="hint">
+        Suggest a picture for {creator.name} (png, jpeg, webp or gif, up to 200 kB). When the node's operator accepts it, it becomes the
+        creator's icon and you earn credits.
+      </span>
+      {open && (
+        <div className="form-stack">
+          <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => pick(e.target.files?.[0])} />
+          {icon && <img src={icon} alt="Suggested icon" style={{ width: 96, height: 96, borderRadius: 12, objectFit: 'cover' }} />}
+          <div>
+            <button className="primary small" disabled={busy || !icon} onClick={() => void submit()}>
+              {busy ? 'Sending…' : 'Suggest icon'}
+            </button>
+          </div>
+        </div>
+      )}
+      {mine.length > 0 && (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {mine.map((s) => (
+            <span key={s.id} className={`badge ${s.status === 'accepted' ? 'ok' : ''}`}>
+              <img src={s.icon} alt="" style={{ width: 18, height: 18, borderRadius: 4, verticalAlign: '-4px' }} />{' '}
+              {s.status === 'accepted' ? 'accepted' : 'waiting for review'}
+            </span>
           ))}
         </div>
       )}
@@ -188,7 +428,7 @@ export function CreatorPage() {
   return (
     <div className="page">
       <div className="row" style={{ gap: 20, marginBottom: 30 }}>
-        <Avatar name={creator.name} id={creator.id} large />
+        <Avatar name={creator.name} id={creator.id} large icon={creator.icon} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1>{creator.name}</h1>
           <div className="row small muted" style={{ marginTop: 6 }}>
@@ -197,27 +437,7 @@ export function CreatorPage() {
             <span>{view.items.length} item{view.items.length === 1 ? '' : 's'}</span>
           </div>
           {creator.description && <p className="muted" style={{ marginTop: 10 }}>{creator.description}</p>}
-          {creator.accounts && creator.accounts.length > 0 && (
-            <div className="row" style={{ marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
-              {creator.accounts.map((account) => {
-                const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
-                const href = account.url ?? (/^https?:/.test(account.handle) ? account.handle : undefined);
-                const chip = (
-                  <span className="badge">
-                    {label}
-                    {!/^https?:/.test(account.handle) && <> · @{account.handle}</>}
-                  </span>
-                );
-                return href ? (
-                  <a key={`${account.platform}:${account.handle}`} className="link" href={href} target="_blank" rel="noreferrer">
-                    {chip}
-                  </a>
-                ) : (
-                  <span key={`${account.platform}:${account.handle}`}>{chip}</span>
-                );
-              })}
-            </div>
-          )}
+          <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} />
           <div className="row" style={{ marginTop: 12 }}>
             <button className={subscribed ? '' : 'primary'} onClick={toggle}>
               {subscribed ? 'Subscribed' : 'Subscribe'}
@@ -229,6 +449,7 @@ export function CreatorPage() {
       {view.via && (
         <>
           <LinkAccounts creator={creator} nodeId={view.via} onSaved={load} />
+          <SuggestIcon creator={creator} nodeId={view.via} />
           <SuggestContent creator={creator} nodeId={view.via} />
         </>
       )}

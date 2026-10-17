@@ -15,7 +15,7 @@ export interface Status {
   content?: { contents: number; bytes: number; chunks: number };
   storageService?: { jobs: number; activeAssignments: number; onlineHolders: number };
   registry?: { listed: number; blocked: number; creators: number; pending?: number; discovered?: number };
-  pending?: { suggestions: number; submissions: number; creatorSuggestions?: number };
+  pending?: { suggestions: number; submissions: number; creatorSuggestions?: number; iconSuggestions?: number; accountLinks?: number };
 }
 
 export function useToast(): [string | null, (text: string) => void] {
@@ -134,7 +134,13 @@ function Overview({ status }: { status: Status }) {
         {status.pending && (
           <div className="stat">
             <div className="label">Waiting for review</div>
-            <div className="value">{status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0)}</div>
+            <div className="value">
+              {status.pending.submissions +
+                status.pending.suggestions +
+                (status.pending.creatorSuggestions ?? 0) +
+                (status.pending.iconSuggestions ?? 0) +
+                (status.pending.accountLinks ?? 0)}
+            </div>
             <div className="tiny faint">
               {status.pending.submissions} submissions · {status.pending.suggestions} suggestions
             </div>
@@ -577,7 +583,10 @@ export function AdminApp() {
           ['storage', 'Storage'],
         ] as [string, string][])
       : ([
-          ['review', `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0)})` : ''}`],
+          [
+            'review',
+            `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0) + (status.pending.iconSuggestions ?? 0) + (status.pending.accountLinks ?? 0)})` : ''}`,
+          ],
           ['catalog', 'Catalog'],
           ['claims', 'Claims'],
           ['peers', 'Peers'],
@@ -712,6 +721,12 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
         type: 'number',
         hint: 'YouTube, TikTok, Twitter… accounts one creator may link together here',
       },
+      {
+        path: 'allowUnsignedAccountLinks',
+        label: 'Allow account links without the creator key',
+        type: 'bool',
+        hint: 'Anyone may propose external links to a creator; you decide in Review whether they are linked',
+      },
       { path: 'pageSize', label: 'Items per page', type: 'number' },
     ],
   },
@@ -735,6 +750,16 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
         type: 'number',
         hint: 'Clients may also pay to keep their filter here: the prices (bits, duration, credits) are the storage tiers in the full configuration below. Whatever collides is never suggested again',
       },
+    ],
+  },
+  {
+    id: 'console',
+    label: 'Console',
+    fields: [
+      { path: 'console.catalog.paging', label: 'Catalog: lazy loading or pagination', type: 'select', options: ['lazy', 'pages'] },
+      { path: 'console.catalog.perPage', label: 'Catalog: items per page', type: 'number', hint: '5–500' },
+      { path: 'console.creators.paging', label: 'Creators: lazy loading or pagination', type: 'select', options: ['lazy', 'pages'] },
+      { path: 'console.creators.perPage', label: 'Creators: items per page', type: 'number', hint: '5–500' },
     ],
   },
 ];

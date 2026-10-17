@@ -9,17 +9,12 @@ import { api } from '../api';
 import { Feed } from '../components/Feed';
 import { Chips, toggle, Avatar } from '../components/ui';
 
-/** Creators whose name or id matches the query: Explore searches for creators too. */
+/** Creators matching the query (Explore shows creators too, and not only exact names). */
 function CreatorResults({ query }: { query: string }) {
   const [creators, setCreators] = useState<CreatorInfo[]>([]);
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setCreators([]);
-      return;
-    }
     let live = true;
-    api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(q)}`)
+    api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(query.trim())}`)
       .then((result) => live && setCreators(result.creators))
       .catch(() => live && setCreators([]));
     return () => {
@@ -48,10 +43,16 @@ function CreatorResults({ query }: { query: string }) {
   );
 }
 
+/** What Explore shows: content, creators, or both (both by default). */
+const SHOW_KINDS = ['content', 'creators'] as const;
+type ShowKind = (typeof SHOW_KINDS)[number];
+const SHOW_LABELS: Record<ShowKind, string> = { content: 'Content', creators: 'Creators' };
+
 export function SearchPage() {
   const [params, setParams] = useSearchParams();
   const query = params.get('q') ?? '';
   const [showFilters, setShowFilters] = useState(true);
+  const [show, setShow] = useState<ShowKind[]>([...SHOW_KINDS]);
   const [formats, setFormats] = useState<Format[]>([]);
   const [rating, setRating] = useState<Rating | ''>('');
   const [topics, setTopics] = useState<string[]>([]);
@@ -81,6 +82,10 @@ export function SearchPage() {
       </div>
       {showFilters && (
         <div className="card form-stack" style={{ marginBottom: 24 }}>
+          <div>
+            <div className="hint" style={{ marginBottom: 8 }}>Show</div>
+            <Chips options={SHOW_KINDS} selected={show} labels={SHOW_LABELS} onToggle={(v) => setShow(toggle(show, v))} />
+          </div>
           <div>
             <div className="hint" style={{ marginBottom: 8 }}>Format</div>
             <Chips options={FORMATS} selected={formats} labels={FORMAT_LABELS} onToggle={(v) => setFormats(toggle(formats, v))} />
@@ -126,27 +131,30 @@ export function SearchPage() {
           )}
         </div>
       )}
-      <CreatorResults query={query} />
-      <Feed
-        deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
-        load={(cursor) =>
-          api<FeedResponse>('/api/search', {
-            body: {
-              query,
-              sort,
-              cursor,
-              filters: {
-                formats: formats.length ? formats : undefined,
-                maxRating: rating || undefined,
-                topics: topics.length ? topics : undefined,
-                onlyTopics: topics.length ? true : undefined,
-                creatorKinds: kinds.length ? kinds : undefined,
-                platform: platform || undefined,
+      {show.includes('creators') && <CreatorResults query={query} />}
+      {show.includes('content') && (
+        <Feed
+          deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
+          load={(cursor) =>
+            api<FeedResponse>('/api/search', {
+              body: {
+                query,
+                sort,
+                cursor,
+                filters: {
+                  formats: formats.length ? formats : undefined,
+                  maxRating: rating || undefined,
+                  topics: topics.length ? topics : undefined,
+                  onlyTopics: topics.length ? true : undefined,
+                  creatorKinds: kinds.length ? kinds : undefined,
+                  platform: platform || undefined,
+                },
               },
-            },
-          })
-        }
-      />
+            })
+          }
+        />
+      )}
+      {show.length === 0 && <div className="banner info small">Choose what to show above: content, creators, or both.</div>}
     </div>
   );
 }

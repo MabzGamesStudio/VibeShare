@@ -6,6 +6,7 @@ import { usePreviewSeen } from '../../bloom';
 import { aspectOf, imageFor } from '../../media';
 import { formatDuration, watchPath } from '../../util';
 import { ShareButton } from '../Share';
+import { WatchedBadge } from '../ui';
 import { Fields } from './Fields';
 import { MediaView, Poster } from './Player';
 
@@ -41,7 +42,7 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
                   <Play size={22} fill="currentColor" />
                 </span>
                 {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
-                {item.seen ? <span className="thumb-label">Seen</span> : null}
+                {item.seen ? <WatchedBadge className="thumb-label" /> : null}
               </span>
             </>
           )}
@@ -62,7 +63,7 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
         {(item.durationSeconds || item.seen) ? (
           <span className="thumb-overlay">
             {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
-            {item.seen ? <span className="thumb-label">Seen</span> : null}
+            {item.seen ? <WatchedBadge className="thumb-label" /> : null}
           </span>
         ) : null}
       </Link>

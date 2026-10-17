@@ -3,6 +3,7 @@ import { after, describe, it } from 'node:test';
 import { generateIdentity, signData, type Identity } from '../src/shared/crypto.js';
 import {
   claimSigningPayload,
+  type AccountLinkResponse,
   type AlgorithmInfo,
   type CreatorAccountLinkRequest,
   type CreatorContentResponse,
@@ -42,9 +43,10 @@ describe('creators linking their accounts together', async () => {
       ],
       proof: proofFor(creator, 'name:labs'),
     };
-    const saved = await clientFor(url, 'pseudonym').json<CreatorInfo>('/v1/creators/accounts', { method: 'PUT', body: good });
+    const saved = await clientFor(url, 'pseudonym').json<AccountLinkResponse>('/v1/creators/accounts', { method: 'PUT', body: good });
+    assert.equal(saved.linked, true, 'a signed request links at once');
     assert.deepEqual(
-      saved.accounts?.map((account) => [account.platform, account.handle]),
+      saved.creator?.accounts?.map((account) => [account.platform, account.handle]),
       [
         ['yt', '@science'],
         ['tiktok', '@science'],
@@ -83,10 +85,76 @@ describe('creators linking their accounts together', async () => {
       accounts: [{ platform: 'x', handle: '@solo' }],
       proof: proofFor(fresh, fresh.id),
     };
-    const saved = await clientFor(url, 'pseudonym').json<CreatorInfo>('/v1/creators/accounts', { method: 'PUT', body: request });
-    assert.equal(saved.id, fresh.id);
-    assert.equal(saved.name, 'Solo Rider');
-    assert.equal(saved.accounts?.[0]?.handle, '@solo');
+    const saved = await clientFor(url, 'pseudonym').json<AccountLinkResponse>('/v1/creators/accounts', { method: 'PUT', body: request });
+    assert.equal(saved.linked, true);
+    assert.equal(saved.creator?.id, fresh.id);
+    assert.equal(saved.creator?.name, 'Solo Rider');
+    assert.equal(saved.creator?.accounts?.[0]?.handle, '@solo');
+  });
+
+  it('lets anyone propose external links without the key; the operator decides', async () => {
+    const stranger = clientFor(url, 'pseudonym');
+    // Without the key, every account must be an external link to the creator.
+    await assert.rejects(
+      stranger.json('/v1/creators/accounts', {
+        method: 'PUT',
+        body: { creator: 'name:labs', accounts: [{ platform: 'tiktok', handle: '@science' }] },
+      }),
+      /must be an external link/
+    );
+
+    const proposed = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: {
+        creator: 'name:labs',
+        accounts: [{ platform: 'reddit', handle: '@science', url: 'https://reddit.com/u/science' }],
+      },
+    });
+    assert.equal(proposed.linked, false, 'unsigned accounts wait for the operator');
+    assert.equal(proposed.proposal?.status, 'pending');
+
+    // Asking again is not new: the pending proposal comes back.
+    const again = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: {
+        creator: 'name:labs',
+        accounts: [{ platform: 'reddit', handle: '@science', url: 'https://reddit.com/u/science' }],
+      },
+    });
+    assert.equal(again.proposal?.id, proposed.proposal?.id);
+
+    // The operator decides: accepting links them, merged with what the creator linked.
+    const pending = await admin<{ proposals: { id: string; creatorName?: string }[] }>(url, '/v1/admin/account-links');
+    assert.equal(pending.proposals.length, 1);
+    assert.equal(pending.proposals[0].creatorName, 'Science Labs');
+    await admin(url, `/v1/admin/account-links/${pending.proposals[0].id}/accept`, { body: {} });
+    const view = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
+    assert.equal(view.creator.accounts?.length, 4, 'the suggested link joined the three the creator linked');
+
+    // The proposer sees the outcome among their own proposals.
+    const mine = await stranger.json<{ proposals: { status: string }[] }>('/v1/account-links/mine');
+    assert.equal(mine.proposals[0].status, 'accepted');
+  });
+
+  it('the operator can delete a proposal instead, and refuse unsigned ones entirely', async () => {
+    const stranger = clientFor(url, 'pseudonym');
+    const proposed = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: { creator: 'name:labs', accounts: [{ platform: 'x', handle: '@science', url: 'https://x.com/science' }] },
+    });
+    await admin(url, `/v1/admin/account-links/${proposed.proposal!.id}/delete`, { body: {} });
+    const after = await admin<{ proposals: unknown[] }>(url, '/v1/admin/account-links');
+    assert.equal(after.proposals.length, 0, 'deleted without linking');
+
+    await admin(url, '/v1/admin/config', { method: 'PUT', body: { allowUnsignedAccountLinks: false } });
+    await assert.rejects(
+      stranger.json('/v1/creators/accounts', {
+        method: 'PUT',
+        body: { creator: 'name:labs', accounts: [{ platform: 'x', handle: '@science', url: 'https://x.com/science' }] },
+      }),
+      /signed with the creator key/
+    );
+    await admin(url, '/v1/admin/config', { method: 'PUT', body: { allowUnsignedAccountLinks: true } });
   });
 });
 
@@ -99,12 +167,20 @@ describe('suggesting content related to a creator', async () => {
 
   it('takes the suggestion with its optional message; accepting pays the client', async () => {
     const first = await client.json<CreatorContentResponse>('/v1/creators/name:labs/suggestions', {
-      body: { id: 'yt:newclip', message: 'This is their second channel' },
+      body: {
+        id: 'yt:newclip',
+        message: 'This is their second channel',
+        title: 'A clip on their second channel',
+        platform: 'youtube',
+        metrics: { views: 1234, likes: 56 },
+      },
     });
     assert.equal(first.newInfo, true);
     assert.equal(first.credited, 0, 'credits come with the acceptance');
     assert.equal(first.suggestion.message, 'This is their second channel');
     assert.equal(first.suggestion.status, 'pending');
+    assert.equal(first.suggestion.title, 'A clip on their second channel');
+    assert.deepEqual(first.suggestion.metrics, { views: 1234, likes: 56 });
 
     const again = await client.json<CreatorContentResponse>('/v1/creators/name:labs/suggestions', { body: { id: 'yt:newclip' } });
     assert.equal(again.newInfo, false, 'the same content is not suggested twice');
@@ -117,8 +193,10 @@ describe('suggesting content related to a creator', async () => {
 
     const account = await client.json<{ account: { balance: number } }>('/v1/account');
     assert.equal(account.account.balance, 105, 'the accepted suggestion paid 5 credits');
-    const feed = await client.json<{ items: { id: string; creator?: { id: string } }[] }>('/v1/feed', { body: {}, auth: false });
-    assert.ok(feed.items.some((item) => item.id === 'yt:newclip' && item.creator?.id === 'name:labs'), 'the content joined the creator');
+    const feed = await client.json<{ items: { id: string; title: string; creator?: { id: string }; stats: { platformLikes?: number } }[] }>('/v1/feed', { body: {}, auth: false });
+    const linked = feed.items.find((item) => item.id === 'yt:newclip');
+    assert.ok(linked && linked.creator?.id === 'name:labs', 'the content joined the creator');
+    assert.equal(linked.title, 'A clip on their second channel', 'the suggested title came with it');
   });
 
   it('deletes a suggestion the operator does not want; it can be suggested again', async () => {
@@ -151,6 +229,7 @@ describe('a client searching for creators', async () => {
 
   await admin(algorithm.url(), '/v1/admin/creators', { method: 'PUT', body: { id: 'name:labs', name: 'Science Labs', kind: 'company' } });
   await admin(algorithm.url(), '/v1/admin/creators', { method: 'PUT', body: { id: 'name:solo', name: 'Solo Rider', kind: 'person' } });
+  await admin(algorithm.url(), '/v1/admin/creators', { method: 'PUT', body: { id: 'name:coats', name: 'Lab Coat Live', kind: 'person' } });
   await api('/api/nodes', { body: { text: algorithm.reference() } });
 
   it('finds creators by name (Explore shows them next to the content results)', async () => {
@@ -163,5 +242,138 @@ describe('a client searching for creators', async () => {
     assert.equal(people.creators[0]?.name, 'Solo Rider');
     const none = await api<{ creators: CreatorInfo[] }>('/api/creators?q=nobody-here');
     assert.deepEqual(none.creators, []);
+  });
+
+  it('matches creators whose name is not an exact match', async () => {
+    // The words may come in any order…
+    const swapped = await api<{ creators: CreatorInfo[] }>('/api/creators?q=labs science');
+    assert.deepEqual(
+      swapped.creators.map((c) => c.id),
+      ['name:labs']
+    );
+    // …match only partly…
+    const partial = await api<{ creators: CreatorInfo[] }>('/api/creators?q=rid');
+    assert.deepEqual(
+      partial.creators.map((c) => c.id),
+      ['name:solo']
+    );
+    // …and the closer names come first.
+    const ranked = await api<{ creators: CreatorInfo[] }>('/api/creators?q=lab');
+    assert.deepEqual(
+      ranked.creators.map((c) => c.id),
+      ['name:coats', 'name:labs']
+    );
+  });
+});
+
+const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+describe('suggesting a creator icon', async () => {
+  const node = await startAlgorithm({ rewards: { acceptedSuggestion: 3 } });
+  const url = node.url();
+  after(() => node.stop());
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:labs', name: 'Science Labs', kind: 'company' } });
+
+  it('takes the picture and pays the client when the operator uses it', async () => {
+    const client = clientFor(url, 'pseudonym');
+    // Only small images are accepted.
+    await assert.rejects(client.json('/v1/creators/name:labs/icon-suggestion', { body: { icon: 'data:text/html,hi' } }), /data: URL/);
+    const big = `data:image/png;base64,${Buffer.alloc(210 * 1024).toString('base64')}`;
+    await assert.rejects(client.json('/v1/creators/name:labs/icon-suggestion', { body: { icon: big } }), /at most 200 kB/);
+
+    const first = await client.json<{ newInfo: boolean; suggestion: { status: string } }>('/v1/creators/name:labs/icon-suggestion', {
+      body: { icon: TINY_PNG },
+    });
+    assert.equal(first.newInfo, true);
+    assert.equal(first.suggestion.status, 'pending');
+
+    const pending = await admin<{ suggestions: { id: string; icon: string }[] }>(url, '/v1/admin/creator-icons');
+    assert.equal(pending.suggestions[0].icon, TINY_PNG);
+    await admin(url, `/v1/admin/creator-icons/${pending.suggestions[0].id}/accept`, { body: {} });
+
+    const view = await client.json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
+    assert.equal(view.creator.icon, TINY_PNG, 'the icon became the creator icon');
+    const account = await client.json<{ account: { balance: number } }>('/v1/account');
+    assert.equal(account.account.balance, 103, 'the accepted icon paid 3 credits');
+  });
+});
+
+describe('linking accounts between creators', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:labs', name: 'Science Labs', kind: 'company' } });
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:friend', name: 'Friendly Studio', kind: 'company' } });
+
+  it('goes both ways by default, and one way when asked', async () => {
+    const stranger = clientFor(url, 'pseudonym');
+    const both = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: {
+        creator: 'name:labs',
+        accounts: [{ platform: 'x', handle: '@labs', url: 'https://x.com/labs', creator: 'name:friend', subscribers: 1200 }],
+      },
+    });
+    await admin(url, `/v1/admin/account-links/${both.proposal!.id}/accept`, { body: {} });
+    const friend = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:friend', { auth: false });
+    assert.equal(friend.creator.accounts?.some((a) => a.creator === 'name:labs'), true, 'the friend shows the link back');
+    const labs = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
+    assert.equal(labs.creator.accounts?.[0]?.subscribers, 1200, 'the subscriber count is kept');
+
+    // One way: only the suggesting creator shows it.
+    const oneWay = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: {
+        creator: 'name:labs',
+        accounts: [{ platform: 'tiktok', handle: '@labs', url: 'https://tiktok.com/@labs', creator: 'name:friend' }],
+        symmetric: false,
+      },
+    });
+    await admin(url, `/v1/admin/account-links/${oneWay.proposal!.id}/accept`, { body: {} });
+    const friendAfter = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:friend', { auth: false });
+    assert.equal(friendAfter.creator.accounts?.length, 1, 'a one way link adds nothing to the other side');
+    const labsAfter = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
+    assert.equal(labsAfter.creator.accounts?.length, 2);
+  });
+});
+
+describe('an operator editing content by hand', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:edit1', title: 'Old title', format: 'video', rating: 'all' } });
+
+  it('changes any of the details, and the console lists slice as asked', async () => {
+    await admin(url, '/v1/admin/content', {
+      method: 'PUT',
+      body: {
+        id: 'yt:edit1',
+        title: 'New title',
+        format: 'music',
+        rating: '13+',
+        durationSeconds: 240,
+        publishedAt: '2024-05-01T00:00:00.000Z',
+        link: 'yt:edit1',
+        pageUrl: 'https://youtube.com/watch?v=edit1',
+        providers: ['vs:provider:vk1x@https://p.example'],
+        platformStats: { views: 4200 },
+      },
+    });
+    const listed = await admin<{
+      items: { id: string; title: string; format: string; durationSeconds?: number; pageUrl?: string; platformStats?: Record<string, number> }[];
+    }>(url, '/v1/admin/content?q=new%20title');
+    const entry = listed.items.find((item) => item.id === 'yt:edit1')!;
+    assert.equal(entry.title, 'New title');
+    assert.equal(entry.format, 'music');
+    assert.equal(entry.durationSeconds, 240);
+    assert.equal(entry.pageUrl, 'https://youtube.com/watch?v=edit1');
+    assert.deepEqual(entry.platformStats, { views: 4200 });
+
+    // The console lists slice both ways: limits and totals come back.
+    const slice = await admin<{ items: unknown[]; total?: number }>(url, '/v1/admin/content?limit=5');
+    assert.equal(slice.items.length <= 5, true);
+    assert.equal(slice.total, 1);
+    const creators = await admin<{ creators: unknown[]; total?: number }>(url, '/v1/admin/creators?limit=5');
+    assert.equal(creators.total, 0);
   });
 });

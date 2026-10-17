@@ -35,7 +35,7 @@ import { FormatIcon } from '../components/ContentCard';
 import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
 import { ShareButton } from '../components/Share';
-import { Avatar, CopyButton, Loading, Modal, Spinner } from '../components/ui';
+import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, timeAgo } from '../util';
 
@@ -973,6 +973,11 @@ export function WatchPage() {
           )}
 
           <h1 className="watch-title">{title}</h1>
+          {view.seen && (
+            <div style={{ marginTop: -8, marginBottom: 12 }}>
+              <WatchedBadge />
+            </div>
+          )}
           <div className="watch-actions">
             {creator && (
               <div className="row" style={{ marginRight: 12 }}>

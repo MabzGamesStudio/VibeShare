@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import { BloomFilter, optimalHashCount } from '../src/shared/bloom.js';
-import type { BloomStatus, FeedResponse, NodeEntry, Settings } from '../src/shared/clientapi.js';
+import type { BloomStatus, ContentView, FeedResponse, NodeEntry, Settings } from '../src/shared/clientapi.js';
 import type { AlgorithmInfo, BloomStorageState, ContentItem, Page, SignedInfo } from '../src/shared/protocol.js';
 import { admin, clientFor, startAlgorithm, startClient, tempDir } from './helpers.js';
 
@@ -169,7 +169,13 @@ describe('a client keeping track of what the user has seen', async () => {
   it('remembers previews it saw on screen: hiding them, or only pushing them down', async () => {
     const all = await browse();
     const target = all.items[0];
+    assert.ok(!target.seen, 'nothing is guessed watched before it was seen');
     await api('/api/bloom/mark', { body: { scope: 'preview', id: target.id, contentId: target.contentId, link: target.link } });
+
+    // The content page marks it "*watched" — a probabilistic guess, on hover explained.
+    const view = await api<ContentView>(`/api/content/${encodeURIComponent(target.id)}`);
+    assert.equal(view.seen, true, 'the content page shows the watched guess');
+
     const hidden = await browse();
     assert.ok(!hidden.items.some((item) => item.id === target.id), 'hidden completely by default');
 

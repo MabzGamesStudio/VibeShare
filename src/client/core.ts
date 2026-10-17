@@ -35,7 +35,7 @@ import {
   type ProfileAccess,
   type SealKey,
 } from '../shared/profiles.js';
-import { SOFTWARE, claimSigningPayload, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { SOFTWARE, claimSigningPayload, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { bytesMatchCid } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
@@ -355,6 +355,9 @@ export class ClientCore {
       view.embeds = [];
       view.embedsDisabled = true;
     }
+    // The bloom filters may already know this content: shown as a guess of "watched".
+    const identity = { id: view.id, contentId: view.item?.contentId, link: view.item?.link };
+    if (this.blooms.sees('selected', identity) || this.blooms.sees('preview', identity)) view.seen = true;
     return view;
   }
 
@@ -394,30 +397,63 @@ export class ClientCore {
 
   /**
    * Links a creator's accounts on other platforms (YouTube, TikTok, Twitter…) on a node.
-   * The user's own key signs the request: the node accepts it only for the creator that
-   * key belongs to, and only up to the node's account limit.
+   * Signed with the user's key when they hold the creator's, the accounts are linked at
+   * once; unsigned, they must be external links to the creator and the node's operator
+   * decides whether to link them (its account limit applies either way).
    */
   async linkCreatorAccounts(
     node: NodeEntry,
-    body: { creator?: string; accounts?: { platform: string; handle: string; url?: string }[]; name?: string; kind?: string }
-  ): Promise<{ creator: CreatorInfo }> {
+    body: {
+      creator?: string;
+      accounts?: { platform: string; handle: string; url?: string; creator?: string; subscribers?: number }[];
+      name?: string;
+      kind?: string;
+      /** Send the user's signature (only useful — and only allowed — for one's own creator). */
+      sign?: boolean;
+      /** Links go both ways by default; `false` makes them one way. */
+      symmetric?: boolean;
+    }
+  ): Promise<AccountLinkResponse> {
     const creator = String(body.creator ?? '').trim();
     if (!creator) throw badRequest('creator is required');
-    const ts = Date.now();
-    const proof = { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(node.id, creator, ts)) };
-    const saved = await this.nodes.client(node).json<CreatorInfo>('/v1/creators/accounts', {
+    let proof: { key: string; ts: number; sig: string } | undefined;
+    if (body.sign !== false) {
+      const ts = Date.now();
+      proof = { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(node.id, creator, ts)) };
+    }
+    return this.nodes.client(node).json<AccountLinkResponse>('/v1/creators/accounts', {
       method: 'PUT',
-      body: { creator, accounts: body.accounts ?? [], name: body.name, kind: body.kind, proof },
+      body: { creator, accounts: body.accounts ?? [], name: body.name, kind: body.kind, proof, symmetric: body.symmetric },
     });
-    return { creator: saved };
+  }
+
+  /** The account links the user proposed without the creator's key, with their status. */
+  myAccountLinks(node: NodeEntry): Promise<{ proposals: AccountLinkProposal[] }> {
+    return this.nodes.client(node).json<{ proposals: AccountLinkProposal[] }>('/v1/account-links/mine');
   }
 
   /** Content the user suggests as related to a creator, with an optional message. */
-  suggestCreatorContent(node: NodeEntry, creator: string, body: { id?: string; message?: string }): Promise<CreatorContentResponse> {
+  suggestCreatorContent(
+    node: NodeEntry,
+    creator: string,
+    body: { id?: string; message?: string; title?: string; platform?: string; metrics?: Record<string, number> }
+  ): Promise<CreatorContentResponse> {
     if (!String(body.id ?? '').trim()) throw badRequest('id is required');
     return this.nodes.client(node).json<CreatorContentResponse>(`/v1/creators/${encodeURIComponent(creator)}/suggestions`, {
-      body: { id: body.id, message: body.message },
+      body: { id: body.id, message: body.message, title: body.title, platform: body.platform, metrics: body.metrics },
     });
+  }
+
+  /** An icon the user suggests for a creator (a small image, as a data: URL). */
+  suggestCreatorIcon(node: NodeEntry, creator: string, icon: string): Promise<CreatorIconResponse> {
+    return this.nodes.client(node).json<CreatorIconResponse>(`/v1/creators/${encodeURIComponent(creator)}/icon-suggestion`, {
+      body: { icon },
+    });
+  }
+
+  /** The icons the user suggested for creators, with their status. */
+  myIconSuggestions(node: NodeEntry): Promise<{ suggestions: CreatorIconSuggestion[] }> {
+    return this.nodes.client(node).json<{ suggestions: CreatorIconSuggestion[] }>('/v1/creator-icons/mine');
   }
 
   /** The user's own creator-content suggestions on a node, with their status. */

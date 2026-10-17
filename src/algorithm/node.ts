@@ -10,16 +10,22 @@ import { NodeClient } from '../shared/nodeclient.js';
 import {
   claimSigningPayload,
   SUGGESTION_KINDS,
+  type AccountLinkProposal,
+  type AccountLinkResponse,
   type AlgorithmInfo,
   type AlgorithmPricing,
   type AlgorithmRewards,
   type BloomStorageTier,
   type ClaimRequest,
   type ClaimResponse,
+  type CreatorAccount,
   type CreatorAccountLinkRequest,
   type CreatorContentRequest,
   type CreatorContentResponse,
   type CreatorContentSuggestion,
+  type CreatorIconRequest,
+  type CreatorIconResponse,
+  type CreatorIconSuggestion,
   type FeedRequest,
   type Page,
   type PeerDiscoverCriteria,
@@ -33,7 +39,7 @@ import {
   type SuggestionRequest,
   type ContentItem,
 } from '../shared/protocol.js';
-import { baseId, parseContentId } from '../shared/sources.js';
+import { baseId, parseContentId, parseSource } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
@@ -66,6 +72,19 @@ export interface AlgorithmConfig extends BaseConfig {
   pageSize: number;
   /** The most accounts a creator may link together (YouTube, TikTok, Twitter…). */
   maxCreatorAccounts: number;
+  /**
+   * Whether anyone may propose accounts for a creator without the creator's key (only
+   * external links to the creator, and the operator decides whether to link them).
+   */
+  allowUnsignedAccountLinks: boolean;
+  /**
+   * How the operator's console lists the catalog and the creators: lazy loading (more
+   * as you scroll) or pagination, with how many items per page for each.
+   */
+  console: {
+    catalog: { paging: 'lazy' | 'pages'; perPage: number };
+    creators: { paging: 'lazy' | 'pages'; perPage: number };
+  };
   /** Finding content on other platforms (YouTube, PeerTube, Mastodon, Flickr…) by itself. */
   crawler: CrawlerConfig;
   /**
@@ -141,6 +160,11 @@ export function algorithmDefaults(): AlgorithmConfig {
     topics: [...TOPICS],
     pageSize: 24,
     maxCreatorAccounts: 8,
+    allowUnsignedAccountLinks: true,
+    console: {
+      catalog: { paging: 'lazy', perPage: 50 },
+      creators: { paging: 'lazy', perPage: 50 },
+    },
     crawler: crawlerDefaults(),
     sources: { priorities: { vibeshare: 10 } },
     bloom: {
@@ -194,6 +218,10 @@ interface ContributionData {
   submissions: Record<string, Submission>;
   /** Content clients suggested as related to a creator, waiting for the operator. */
   creatorSuggestions: Record<string, CreatorContentSuggestion>;
+  /** Icons clients suggested for a creator, waiting for the operator. */
+  iconSuggestions: Record<string, CreatorIconSuggestion>;
+  /** Unsigned account links clients proposed for a creator, waiting for the operator. */
+  accountLinks: Record<string, AccountLinkProposal>;
 }
 
 function offsetOf(cursor: string | undefined): number {
@@ -211,6 +239,41 @@ function slug(text: string): string {
   return normalizeTag(text).slice(0, 40) || 'creator';
 }
 
+/** The words of a search phrase or a name: lower case, any order, matched partly. */
+function wordsOf(text: string): string[] {
+  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * How well a creator matches the words of a search — null when they do not. Every word
+ * must appear in the name, the id or a linked account, but the name need not match
+ * exactly: the words may come in any order and match only partly. Lower is better:
+ * the whole name, the name as a prefix, the starts of its words, parts of its words,
+ * or only the id/accounts.
+ */
+function creatorMatch(creator: CreatorRecord, phrase: string): number | null {
+  const words = wordsOf(phrase);
+  if (!words.length) return 0;
+  const name = creator.name.toLowerCase();
+  const nameWords = wordsOf(name);
+  const extras = [
+    creator.id.toLowerCase(),
+    ...(creator.accounts ?? []).flatMap((account) => [
+      account.platform.toLowerCase(),
+      account.handle.toLowerCase(),
+      (account.url ?? '').toLowerCase(),
+    ]),
+  ];
+  const matched = (word: string) => name.includes(word) || extras.some((text) => text.includes(word));
+  if (!words.every(matched)) return null;
+  const whole = words.join(' ');
+  if (name === whole) return 0;
+  if (name.startsWith(whole)) return 1;
+  if (words.every((word) => nameWords.some((part) => part.startsWith(word)))) return 2;
+  if (words.every((word) => nameWords.some((part) => part.includes(word)))) return 3;
+  return 4;
+}
+
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
   private contributions: JsonFile<ContributionData>;
@@ -225,7 +288,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
-    this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {}, creatorSuggestions: {} }));
+    this.contributions = new JsonFile(this.path('contributions.json'), () => ({
+      votes: {},
+      suggestions: {},
+      submissions: {},
+      creatorSuggestions: {},
+      iconSuggestions: {},
+      accountLinks: {},
+    }));
     this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
     this.crawler = new Crawler(
       () => this.config.crawler,
@@ -341,6 +411,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     if (!Number.isInteger(bloom.inlineMaxBits) || bloom.inlineMaxBits < 8 || bloom.inlineMaxBits > 1_048_576) {
       throw badRequest('bloom.inlineMaxBits is a bit count between 8 and 1,048,576');
     }
+    for (const list of [config.console?.catalog, config.console?.creators]) {
+      if (!list || !['lazy', 'pages'].includes(list.paging)) throw badRequest('console paging is lazy or pages');
+      if (!Number.isInteger(list.perPage) || list.perPage < 5 || list.perPage > 500) throw badRequest('console perPage is between 5 and 500');
+    }
     if (!Array.isArray(bloom.storage?.tiers)) throw badRequest('bloom.storage.tiers is a list of storage tiers');
     const tierIds = new Set<string>();
     for (const tier of bloom.storage.tiers) {
@@ -385,6 +459,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private limitOf(value: unknown): number {
     const limit = Math.floor(Number(value ?? this.config.pageSize));
     return Math.min(100, Math.max(1, Number.isFinite(limit) ? limit : this.config.pageSize));
+  }
+
+  /** The page size of the operator's console lists (5–500, 100 when not given). */
+  private listLimit(value: string | null): number {
+    const limit = Math.floor(Number(value));
+    return Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.max(5, limit)) : 100;
   }
 
   private canEarn(account: Account): boolean {
@@ -569,11 +649,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) };
     });
 
+    // Creator search (Explore): no exact name needed — the words may come in any order
+    // and match only partly, in the name, the id or a linked account.
     router.get('/v1/creators', (ctx) => {
-      const q = (ctx.query.get('q') ?? '').toLowerCase();
+      const q = (ctx.query.get('q') ?? '').trim();
       const creators = Object.values(this.registry.data.creators)
-        .filter((creator) => creator.status === 'listed' && (!q || creator.name.toLowerCase().includes(q) || creator.id.includes(q)))
-        .slice(0, 50);
+        .filter((creator) => creator.status === 'listed')
+        .map((creator) => ({ creator, score: creatorMatch(creator, q) }))
+        .filter((match): match is { creator: CreatorRecord; score: number } => match.score !== null)
+        .sort((a, b) => a.score - b.score || a.creator.name.localeCompare(b.creator.name))
+        .slice(0, 50)
+        .map((match) => match.creator);
       return { creators };
     });
 
@@ -591,11 +677,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     // A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…):
-    // whoever holds the creator's key signs the request, and the operator's cap applies.
+    // signed with the creator's key it links at once; unsigned it is kept for the operator.
     router.put('/v1/creators/accounts', async (ctx) => {
-      this.auth.require(ctx);
+      const account = this.auth.require(ctx);
       const body = await readJson<CreatorAccountLinkRequest>(ctx.req);
-      return this.linkAccounts(body);
+      return this.linkAccounts(account, body);
     });
 
     this.contributionRoutes();
@@ -682,6 +768,34 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return {
         suggestions: Object.values(this.contributions.data.creatorSuggestions)
           .filter((s) => s.accountId === account.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 200),
+      };
+    });
+
+    // Icons a client suggested for a creator (a small image), for the operator to judge.
+    router.post('/v1/creators/:id/icon-suggestion', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<CreatorIconRequest>(ctx.req, 1024 * 1024);
+      return this.suggestCreatorIcon(account, ctx.params.id, body);
+    });
+
+    router.get('/v1/creator-icons/mine', (ctx) => {
+      const account = this.auth.require(ctx);
+      return {
+        suggestions: Object.values(this.contributions.data.iconSuggestions ?? {})
+          .filter((s) => s.accountId === account.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 200),
+      };
+    });
+
+    // The account links a client proposed without the creator's key, with their status.
+    router.get('/v1/account-links/mine', (ctx) => {
+      const account = this.auth.require(ctx);
+      return {
+        proposals: Object.values(this.contributions.data.accountLinks ?? {})
+          .filter((p) => p.accountId === account.id)
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .slice(0, 200),
       };
@@ -858,35 +972,130 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.contributions.changed();
   }
 
-  /**
-   * A creator links their accounts on other platforms (YouTube, TikTok, Twitter…) here.
-   * Whoever holds the creator's key proves it with a signature; the operator's cap decides
-   * how many accounts may be linked together.
-   */
-  linkAccounts(body: CreatorAccountLinkRequest): CreatorRecord {
-    const creatorId = String(body.creator ?? '').trim();
-    if (!creatorId || creatorId.length > 128) throw badRequest('creator is required');
-    const proof = body.proof;
-    if (!proof || !isKeyId(proof.key) || Math.abs(Date.now() - Number(proof.ts)) > 15 * 60_000) throw badRequest('Bad or stale proof');
-    if (!verifySignature(proof.key, claimSigningPayload(this.identity.id, creatorId, Number(proof.ts)), String(proof.sig))) {
-      throw badRequest('The proof signature does not match');
-    }
-    const known = this.registry.creator(creatorId);
-    // A new creator takes its key as its id; a known one is only touched by its own key.
-    if (known ? !(known.id === proof.key || known.keys?.includes(proof.key)) : creatorId !== proof.key) {
-      throw forbidden('Only the creator (holding its key) may link accounts for it');
-    }
+  /** The accounts of a link request, cleaned: platform, handle and the link, when given. */
+  private accountsOf(body: CreatorAccountLinkRequest): CreatorAccount[] {
     const accounts = (Array.isArray(body.accounts) ? body.accounts : []).map((account) => ({
       platform: String(account?.platform ?? '').trim().slice(0, 32),
       handle: String(account?.handle ?? '').trim().slice(0, 120),
       url: account?.url ? String(account.url).trim().slice(0, 2048) : undefined,
+      creator: account?.creator ? String(account.creator).trim().slice(0, 128) : undefined,
+      subscribers:
+        Number.isFinite(Number(account?.subscribers)) && Number(account?.subscribers) >= 0 ? Math.round(Number(account.subscribers)) : undefined,
     }));
     for (const account of accounts) {
       if (!account.platform || !account.handle) throw badRequest('Every account needs a platform and a handle');
     }
+    return accounts;
+  }
+
+  /**
+   * Links between accounts go both ways by default: an account pointing at another
+   * creator also shows on that creator's page (pointing back). One-way links skip this.
+   * A creator already at the account cap simply gets no back-link.
+   */
+  private linkBack(fromCreator: string, accounts: CreatorAccount[], symmetric: boolean | undefined): void {
+    if (symmetric === false) return;
+    const max = Math.max(0, this.config.maxCreatorAccounts);
+    for (const account of accounts) {
+      if (!account.creator || account.creator === fromCreator) continue;
+      const target = this.registry.creator(account.creator);
+      if (!target) continue;
+      const list = [...(target.accounts ?? [])];
+      const same = (other: CreatorAccount) =>
+        (account.url && other.url === account.url) || (other.platform === account.platform && other.handle === account.handle);
+      if (list.some(same) || list.length >= max) continue;
+      list.push({ platform: account.platform, handle: account.handle, url: account.url, creator: fromCreator });
+      this.registry.upsertCreator({ id: account.creator, accounts: list });
+    }
+  }
+
+  /**
+   * A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…) here.
+   * Signing is optional: with the creator's key signing the request, the accounts are
+   * linked at once. Without it, anyone may propose accounts that are external links to
+   * the creator (each carrying its link) — the node's operator then decides whether to
+   * link them or not. Either way the operator's cap decides how many may be linked.
+   */
+  linkAccounts(account: Account, body: CreatorAccountLinkRequest): AccountLinkResponse {
+    const creatorId = String(body.creator ?? '').trim();
+    if (!creatorId || creatorId.length > 128) throw badRequest('creator is required');
+    const accounts = this.accountsOf(body);
     const max = Math.max(0, this.config.maxCreatorAccounts);
     if (accounts.length > max) throw badRequest(`A creator may link at most ${max} accounts`);
-    return this.registry.upsertCreator({ id: creatorId, name: body.name, kind: body.kind, keys: [proof.key], accounts });
+    const proof = body.proof;
+    if (proof) {
+      if (!isKeyId(proof.key) || Math.abs(Date.now() - Number(proof.ts)) > 15 * 60_000) throw badRequest('Bad or stale proof');
+      if (!verifySignature(proof.key, claimSigningPayload(this.identity.id, creatorId, Number(proof.ts)), String(proof.sig))) {
+        throw badRequest('The proof signature does not match');
+      }
+      const known = this.registry.creator(creatorId);
+      // A new creator takes its key as its id; a known one is only touched by its own key.
+      if (known ? !(known.id === proof.key || known.keys?.includes(proof.key)) : creatorId !== proof.key) {
+        throw forbidden('Only the creator (holding its key) may link accounts for it');
+      }
+      const creator = this.registry.upsertCreator({ id: creatorId, name: body.name, kind: body.kind, keys: [proof.key], accounts });
+      this.linkBack(creatorId, accounts, body.symmetric);
+      return { linked: true, creator };
+    }
+    // Unsigned: only external links to the creator, and only where the operator allows it.
+    if (!this.config.allowUnsignedAccountLinks) throw forbidden('This node only links accounts signed with the creator key');
+    for (const linked of accounts) {
+      const link = linked.url ?? '';
+      if (!link || (!parseSource(link) && !/^https?:\/\//.test(link))) {
+        throw badRequest('Without the creator key, every account must be an external link to the creator (its url)');
+      }
+    }
+    const store = this.contributions.data.accountLinks;
+    const same = (list: CreatorAccount[]) => list.map((a) => a.url).sort().join('\n');
+    const existing = Object.values(store).find((s) => s.status === 'pending' && s.creatorId === creatorId && same(s.accounts) === same(accounts));
+    if (existing) return { linked: false, proposal: existing };
+    const proposal: AccountLinkProposal = {
+      id: randomId('acc-', 8),
+      creatorId,
+      creatorName: this.registry.creator(creatorId)?.name,
+      accounts,
+      name: body.name ? String(body.name).trim().slice(0, 120) : undefined,
+      kind: body.kind,
+      symmetric: body.symmetric,
+      accountId: account.id,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    store[proposal.id] = proposal;
+    this.contributions.changed();
+    return { linked: false, proposal };
+  }
+
+  /** The operator accepts a proposal: the accounts join the creator's, within the cap. */
+  acceptAccountLink(proposal: AccountLinkProposal): CreatorRecord {
+    if (proposal.status !== 'pending') throw badRequest('This proposal is already decided');
+    const known = this.registry.creator(proposal.creatorId);
+    const merged = [...(known?.accounts ?? [])];
+    for (const account of proposal.accounts) {
+      const same = (other: CreatorAccount) =>
+        (account.url && other.url === account.url) || (other.platform === account.platform && other.handle === account.handle);
+      if (!merged.some(same)) merged.push(account);
+    }
+    const max = Math.max(0, this.config.maxCreatorAccounts);
+    if (merged.length > max) throw badRequest(`Linking these would make more than ${max} accounts for this creator`);
+    const creator = this.registry.upsertCreator({ id: proposal.creatorId, name: proposal.name, kind: proposal.kind, accounts: merged });
+    this.linkBack(proposal.creatorId, proposal.accounts, proposal.symmetric);
+    proposal.status = 'accepted';
+    proposal.reviewedAt = new Date().toISOString();
+    this.contributions.changed();
+    return creator;
+  }
+
+  /** Platform numbers a client saw (views, likes, comments…), cleaned for keeping. */
+  private metricsOf(raw: unknown): Record<string, number> | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const metrics: Record<string, number> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>).slice(0, 16)) {
+      const name = key.trim().slice(0, 32);
+      const number = Number(value);
+      if (name && Number.isFinite(number) && number >= 0) metrics[name] = Math.min(number, 1e15);
+    }
+    return Object.keys(metrics).length ? metrics : undefined;
   }
 
   /**
@@ -911,6 +1120,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       contentId: identity.key,
       contentRef: ref.slice(0, 4096),
       message: message || undefined,
+      title: String(body.title ?? '').trim().slice(0, 300) || undefined,
+      platform: String(body.platform ?? '').trim().slice(0, 32) || undefined,
+      metrics: this.metricsOf(body.metrics),
       accountId: account.id,
       status: 'pending',
       createdAt: new Date().toISOString(),
@@ -924,7 +1136,15 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   acceptCreatorContent(suggestion: CreatorContentSuggestion): number {
     if (suggestion.status !== 'pending') return 0;
     const { key, contentId, link } = identityOf({ id: suggestion.contentRef });
-    this.registry.upsert({ id: key, contentId, link, creatorId: suggestion.creatorId, origin: 'report' });
+    this.registry.upsert({
+      id: key,
+      contentId,
+      link,
+      creatorId: suggestion.creatorId,
+      title: suggestion.title || undefined,
+      platformStats: suggestion.metrics,
+      origin: 'report',
+    });
     suggestion.status = 'accepted';
     suggestion.reviewedAt = new Date().toISOString();
     const reward = this.config.rewards.acceptedSuggestion;
@@ -932,6 +1152,54 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const account = this.ledger.get(suggestion.accountId);
     if (account && reward > 0 && this.canEarn(account)) {
       this.ledger.credit(account.id, reward, 'accepted creator content', suggestion.id);
+      credited = reward;
+    }
+    suggestion.credited = credited;
+    this.contributions.changed();
+    return credited;
+  }
+
+  /**
+   * An icon a client suggests for a creator: accepted, it becomes the creator's icon and
+   * the client earns credits; deleted, it is simply gone.
+   */
+  suggestCreatorIcon(account: Account, rawCreator: string, body: CreatorIconRequest): CreatorIconResponse {
+    const creatorId = String(rawCreator ?? '').trim();
+    const creator = this.registry.creator(creatorId);
+    if (!creator || creator.status === 'blocked') throw notFound('Unknown creator');
+    const icon = String(body.icon ?? '');
+    const image = /^data:image\/(png|jpeg|webp|gif);base64,(.+)$/.exec(icon);
+    const bytes = image ? Buffer.from(image[2], 'base64') : Buffer.alloc(0);
+    if (!bytes.length) throw badRequest('The icon is a data: URL of a png, jpeg, webp or gif image');
+    if (bytes.length > 200 * 1024) throw badRequest('The icon is at most 200 kB');
+    const store = this.contributions.data.iconSuggestions;
+    const existing = Object.values(store).find((s) => s.creatorId === creatorId && s.status === 'pending');
+    if (existing) return { suggestion: existing, newInfo: false, credited: 0 };
+    const suggestion: CreatorIconSuggestion = {
+      id: randomId('ico-', 8),
+      creatorId,
+      creatorName: creator.name,
+      icon,
+      accountId: account.id,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    store[suggestion.id] = suggestion;
+    this.contributions.changed();
+    return { suggestion, newInfo: true, credited: 0 };
+  }
+
+  /** The operator accepts: the image becomes the creator's icon and the client is paid. */
+  acceptCreatorIcon(suggestion: CreatorIconSuggestion): number {
+    if (suggestion.status !== 'pending') return 0;
+    this.registry.upsertCreator({ id: suggestion.creatorId, icon: suggestion.icon });
+    suggestion.status = 'accepted';
+    suggestion.reviewedAt = new Date().toISOString();
+    const reward = this.config.rewards.acceptedSuggestion;
+    let credited = 0;
+    const account = this.ledger.get(suggestion.accountId);
+    if (account && reward > 0 && this.canEarn(account)) {
+      this.ledger.credit(account.id, reward, 'accepted creator icon', suggestion.id);
       credited = reward;
     }
     suggestion.credited = credited;
@@ -1452,7 +1720,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           ...entry,
           thumbnail: entry.thumbnail ? `/v1/thumbnails/${this.registry.thumbKey(entry.id)}` : entry.thumbnailUrl,
         }));
-      return pageOf(items, ctx.query.get('cursor') ?? undefined, 100);
+      return pageOf(items, ctx.query.get('cursor') ?? undefined, this.listLimit(ctx.query.get('limit')));
     });
     router.put('/v1/admin/content', async (ctx) => {
       admin(ctx);
@@ -1482,7 +1750,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
     router.get('/v1/admin/creators', (ctx) => {
       admin(ctx);
-      return { creators: Object.values(this.registry.data.creators) };
+      const all = Object.values(this.registry.data.creators);
+      // Without a limit the whole list (the way it has always answered).
+      if (ctx.query.get('limit') === null) return { creators: all };
+      const page = pageOf(all, ctx.query.get('cursor') ?? undefined, this.listLimit(ctx.query.get('limit')));
+      return { creators: page.items, cursor: page.cursor, total: page.total };
     });
     router.put('/v1/admin/creators', async (ctx) => {
       admin(ctx);
@@ -1537,6 +1809,57 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (!suggestion) throw notFound('No such suggestion');
       if (ctx.params.action === 'accept') {
         this.acceptCreatorContent(suggestion);
+      } else if (ctx.params.action === 'delete') {
+        delete store[ctx.params.id];
+        this.contributions.changed();
+      } else throw notFound();
+      return { ok: true };
+    });
+
+    // Icons clients suggested for a creator: accepted it becomes the icon (and the
+    // suggesting client is paid), deleted it is gone.
+    router.get('/v1/admin/creator-icons', (ctx) => {
+      admin(ctx);
+      const status = ctx.query.get('status') ?? 'pending';
+      const suggestions = Object.values(this.contributions.data.iconSuggestions ?? {})
+        .filter((s) => s.status === status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 300);
+      return { suggestions };
+    });
+
+    router.post('/v1/admin/creator-icons/:id/:action', (ctx) => {
+      admin(ctx);
+      const store = this.contributions.data.iconSuggestions ?? {};
+      const suggestion = store[ctx.params.id];
+      if (!suggestion) throw notFound('No such suggestion');
+      if (ctx.params.action === 'accept') {
+        this.acceptCreatorIcon(suggestion);
+      } else if (ctx.params.action === 'delete') {
+        delete store[ctx.params.id];
+        this.contributions.changed();
+      } else throw notFound();
+      return { ok: true };
+    });
+
+    // Account links proposed without the creator's key: linked only if the operator says so.
+    router.get('/v1/admin/account-links', (ctx) => {
+      admin(ctx);
+      const status = ctx.query.get('status') ?? 'pending';
+      const proposals = Object.values(this.contributions.data.accountLinks ?? {})
+        .filter((p) => p.status === status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 300);
+      return { proposals };
+    });
+
+    router.post('/v1/admin/account-links/:id/:action', (ctx) => {
+      admin(ctx);
+      const store = this.contributions.data.accountLinks ?? {};
+      const proposal = store[ctx.params.id];
+      if (!proposal) throw notFound('No such proposal');
+      if (ctx.params.action === 'accept') {
+        this.acceptAccountLink(proposal);
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
@@ -1783,6 +2106,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         suggestions: Object.values(data.suggestions).filter((s) => s.status === 'pending').length,
         submissions: Object.values(data.submissions).filter((s) => s.status === 'pending').length,
         creatorSuggestions: Object.values(data.creatorSuggestions ?? {}).filter((s) => s.status === 'pending').length,
+        iconSuggestions: Object.values(data.iconSuggestions ?? {}).filter((s) => s.status === 'pending').length,
+        accountLinks: Object.values(data.accountLinks ?? {}).filter((p) => p.status === 'pending').length,
       },
     };
   }

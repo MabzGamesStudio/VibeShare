@@ -353,6 +353,8 @@ export interface ContentView {
   /** Local stream URL (with access token) for native content. */
   streamUrl?: string;
   downloadUrl?: string;
+  /** True when the bloom filters guess the user has watched this content before. */
+  seen?: boolean;
   /** External sources to embed when no provider has the content. */
   embeds: (Embed & { source: ExternalSource })[];
   /** True when the user disabled every external embed (placeholders show instead). */

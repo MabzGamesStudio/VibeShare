@@ -134,14 +134,36 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   // creator key), and suggesting content that is related to one.
   on('GET', '/api/creators', (request) => core.searchCreators(request.query.get('q') ?? ''));
   on('PUT', '/api/creators/accounts', async (request) => {
-    const body = await request.json<{ nodeId?: string; creator?: string; accounts?: { platform: string; handle: string; url?: string }[]; name?: string; kind?: string }>();
+    const body = await request.json<{
+      nodeId?: string;
+      creator?: string;
+      accounts?: { platform: string; handle: string; url?: string; creator?: string; subscribers?: number }[];
+      name?: string;
+      kind?: string;
+      sign?: boolean;
+      symmetric?: boolean;
+    }>();
     return core.linkCreatorAccounts(nodes.require(String(body.nodeId ?? '')), body);
   });
+  on('GET', '/api/account-links/:id', (request) => core.myAccountLinks(node(request)));
   on('POST', '/api/creator-suggestions', async (request) => {
-    const body = await request.json<{ nodeId?: string; creator?: string; id?: string; message?: string }>();
+    const body = await request.json<{
+      nodeId?: string;
+      creator?: string;
+      id?: string;
+      message?: string;
+      title?: string;
+      platform?: string;
+      metrics?: Record<string, number>;
+    }>();
     return core.suggestCreatorContent(nodes.require(String(body.nodeId ?? '')), String(body.creator ?? ''), body);
   });
   on('GET', '/api/creator-suggestions/:id', (request) => core.myCreatorSuggestions(node(request)));
+  on('POST', '/api/creator-icons', async (request) => {
+    const body = await request.json<{ nodeId?: string; creator?: string; icon?: string }>();
+    return core.suggestCreatorIcon(nodes.require(String(body.nodeId ?? '')), String(body.creator ?? ''), String(body.icon ?? ''));
+  });
+  on('GET', '/api/creator-icons/:id', (request) => core.myIconSuggestions(node(request)));
 
   // Contributions to algorithm nodes (they pay credits for these)
   on('POST', '/api/vote', async (request) => {

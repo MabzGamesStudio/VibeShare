@@ -223,7 +223,7 @@ export class Registry {
       pageUrl: input.pageUrl ?? existing?.pageUrl,
       thumbnailUrl: input.thumbnailUrl ?? existing?.thumbnailUrl,
       media: input.media ?? existing?.media,
-      platformStats: existing?.platformStats,
+      platformStats: input.platformStats ?? existing?.platformStats,
     };
     if (entry.status !== 'blocked') delete entry.reason;
     this.store.data.entries[entry.id] = entry;
@@ -260,6 +260,7 @@ export class Registry {
       keys: [...new Set([...(existing?.keys ?? []), ...(input.keys ?? [])])],
       links: input.links ?? existing?.links,
       accounts: input.accounts ?? existing?.accounts,
+      icon: input.icon !== undefined ? input.icon : existing?.icon,
       status: input.status ?? existing?.status ?? 'listed',
       addedAt: existing?.addedAt ?? new Date().toISOString(),
     };
@@ -321,7 +322,7 @@ export class Registry {
       language: entry.language,
       durationSeconds: entry.durationSeconds,
       creator: creator
-        ? { id: creator.id, name: creator.name, kind: creator.kind, description: creator.description, keys: creator.keys, links: creator.links }
+        ? { id: creator.id, name: creator.name, kind: creator.kind, description: creator.description, keys: creator.keys, links: creator.links, icon: creator.icon }
         : entry.creatorId
           ? { id: entry.creatorId, name: entry.creatorId.slice(0, 12), kind: 'unknown' }
           : undefined,
