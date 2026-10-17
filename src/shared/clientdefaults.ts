@@ -1,6 +1,7 @@
 // Default client settings, preset pages and helpers shared by the desktop/CLI client
 // and the static web client. Browser-safe: no Node imports.
 import type { PageConfig, PageFilters, PagePreset, Settings } from './clientapi.js';
+import { BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX } from './bloom.js';
 import type { Preferences } from './protocol.js';
 import { baseLanguage } from './language.js';
 import { RATINGS, type Rating } from './taxonomy.js';
@@ -86,9 +87,9 @@ export function defaultSettings(): Settings {
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
     theme: 'system',
     tor: { mode: 'onion', proxy: '' },
-    selectedBloom: { enabled: true, bits: 10_000 },
-    previewBloom: { enabled: true, bits: 100_000, mode: 'hide' },
-    nodeBloom: { enabled: false, bits: 10_000, inline: true },
+    selectedBloom: { enabled: true, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
+    previewBloom: { enabled: true, bits: 100_000, mode: 'hide', expected: BLOOM_EXPECTED_ITEMS },
+    nodeBloom: { enabled: false, bits: 10_000, inline: true, expected: BLOOM_EXPECTED_ITEMS },
   };
 }
 
@@ -108,6 +109,13 @@ export function bloomBitStep(bits: number, maxStop: number): number {
   if (!Number.isFinite(value) || value <= 0) throw new Error('A bloom filter size is 1, 10, 100, … bits');
   const exponent = Math.round(Math.log10(value));
   return 10 ** Math.min(maxStop, Math.max(0, exponent));
+}
+
+/** The number of items a filter is made for: a whole number, 1 … 10,000,000. */
+export function bloomExpected(value: unknown): number {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count <= 0) throw new Error('The number of items a filter is made for must be a positive number');
+  return Math.min(BLOOM_EXPECTED_MAX, Math.max(1, Math.round(count)));
 }
 
 /** Fills in what older or partial settings miss, and keeps every preset page present. */
@@ -225,6 +233,9 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     next.selectedBloom.bits = bloomBitStep(next.selectedBloom.bits, BLOOM_BIT_STOPS.selected);
     next.previewBloom.bits = bloomBitStep(next.previewBloom.bits, BLOOM_BIT_STOPS.preview);
     next.nodeBloom.bits = bloomBitStep(next.nodeBloom.bits, BLOOM_BIT_STOPS.node);
+    next.selectedBloom.expected = bloomExpected(next.selectedBloom.expected);
+    next.previewBloom.expected = bloomExpected(next.previewBloom.expected);
+    next.nodeBloom.expected = bloomExpected(next.nodeBloom.expected);
   } catch (error) {
     throw new Error((error as Error).message);
   }

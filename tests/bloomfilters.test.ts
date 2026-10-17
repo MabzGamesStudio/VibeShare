@@ -70,6 +70,9 @@ describe('a search node filtering content the user has seen', async () => {
     await assert.rejects(client.json('/v1/search', { body: { query: 'holes', bloom: big.toJSON() }, auth: false }), /at most 1024 bits/);
     const wrongK = { ...seen.toJSON(), k: 99 };
     await assert.rejects(client.json('/v1/search', { body: { query: 'holes', bloom: wrongK }, auth: false }), /hash functions/);
+    // The hash count must match the number of items the filter declares it is made for.
+    const wrongN = { ...seen.toJSON(), n: 10 };
+    await assert.rejects(client.json('/v1/search', { body: { query: 'holes', bloom: wrongN }, auth: false }), /hash functions/);
   });
 
   it('keeps a paid copy of the filter for as long as its tier says, and drops it when asked', async () => {
@@ -129,9 +132,9 @@ describe('a client keeping track of what the user has seen', async () => {
 
   it('has the three filters in its settings, with their defaults and their own ranges', async () => {
     const { settings } = await api<{ settings: Settings }>('/api/state');
-    assert.deepEqual(settings.selectedBloom, { enabled: true, bits: 10_000 });
-    assert.deepEqual(settings.previewBloom, { enabled: true, bits: 100_000, mode: 'hide' });
-    assert.deepEqual(settings.nodeBloom, { enabled: false, bits: 10_000, inline: true });
+    assert.deepEqual(settings.selectedBloom, { enabled: true, bits: 10_000, expected: 10_000 });
+    assert.deepEqual(settings.previewBloom, { enabled: true, bits: 100_000, mode: 'hide', expected: 10_000 });
+    assert.deepEqual(settings.nodeBloom, { enabled: false, bits: 10_000, inline: true, expected: 10_000 });
 
     // The slider stops snap to 1, 10, 100, … bits within each range.
     const saved = await api<Settings>('/api/settings', {
@@ -143,6 +146,14 @@ describe('a client keeping track of what the user has seen', async () => {
     await assert.rejects(api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 0 } } }), /400/);
     await assert.rejects(api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100, mode: 'shuffle' } } }), /400/);
     await api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100_000, mode: 'hide' } } });
+
+    // The number of items a filter is made for is configurable too (it sets the hashes).
+    const tuned = await api<Settings>('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 10_000, expected: 2500.4 } } });
+    assert.equal(tuned.selectedBloom.expected, 2500);
+    const status = await api<BloomStatus>('/api/bloom');
+    assert.equal(status.selected.hashes, optimalHashCount(10_000, 2500));
+    await assert.rejects(api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 10_000, expected: 0 } } }), /400/);
+    await api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 10_000, expected: 10_000 } } });
   });
 
   it('records what the user selected — the cid and each link — and stops showing it', async () => {

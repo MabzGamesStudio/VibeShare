@@ -16,6 +16,10 @@ import {
   type BloomStorageTier,
   type ClaimRequest,
   type ClaimResponse,
+  type CreatorAccountLinkRequest,
+  type CreatorContentRequest,
+  type CreatorContentResponse,
+  type CreatorContentSuggestion,
   type FeedRequest,
   type Page,
   type PeerDiscoverCriteria,
@@ -36,9 +40,9 @@ import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
 import { claimDefaults, claimMultiplier, claimRuleFor, type ClaimConfig } from './metrics.js';
 import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
 import type { Discovered } from './crawler/types.js';
-import { Registry, identityOf, normalizeLink, type Entry, type EntryInput } from './registry.js';
+import { Registry, identityOf, normalizeLink, type CreatorRecord, type Entry, type EntryInput } from './registry.js';
 import { prioritize, priorityOf, SOURCE_CATALOG, sourceKeyOf } from './sources.js';
-import { BloomFilter, optimalHashCount, type BloomFilterData } from '../shared/bloom.js';
+import { BloomFilter, BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX, optimalHashCount, type BloomFilterData } from '../shared/bloom.js';
 
 export interface AlgorithmConfig extends BaseConfig {
   pricing: AlgorithmPricing;
@@ -188,6 +192,8 @@ interface ContributionData {
   votes: Record<string, Record<string, 1 | -1>>;
   suggestions: Record<string, Suggestion>;
   submissions: Record<string, Submission>;
+  /** Content clients suggested as related to a creator, waiting for the operator. */
+  creatorSuggestions: Record<string, CreatorContentSuggestion>;
 }
 
 function offsetOf(cursor: string | undefined): number {
@@ -219,7 +225,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
-    this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {} }));
+    this.contributions = new JsonFile(this.path('contributions.json'), () => ({ votes: {}, suggestions: {}, submissions: {}, creatorSuggestions: {} }));
     this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
     this.crawler = new Crawler(
       () => this.config.crawler,
@@ -307,6 +313,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           .map(([id]) => id),
       },
       bloom: { inlineMaxBits: config.bloom.inlineMaxBits, storage: config.bloom.storage },
+      maxCreatorAccounts: config.maxCreatorAccounts,
     };
   }
 
@@ -412,8 +419,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     if (data.v !== 1 || !Number.isInteger(data.m) || Number(data.m) < 1 || Number(data.m) > maxBits) {
       throw badRequest(`A bloom filter is at most ${maxBits} bits`);
     }
-    if (!Number.isInteger(data.k) || Number(data.k) !== optimalHashCount(Number(data.m))) {
-      throw badRequest(`A bloom filter of ${data.m} bits uses ${optimalHashCount(Number(data.m))} hash functions`);
+    const expected = Number(data.n ?? BLOOM_EXPECTED_ITEMS);
+    if (!Number.isInteger(expected) || expected < 1 || expected > BLOOM_EXPECTED_MAX) {
+      throw badRequest(`A bloom filter is made for 1 to ${BLOOM_EXPECTED_MAX} items`);
+    }
+    if (!Number.isInteger(data.k) || Number(data.k) !== optimalHashCount(Number(data.m), expected)) {
+      throw badRequest(`A bloom filter of ${data.m} bits for ${expected} items uses ${optimalHashCount(Number(data.m), expected)} hash functions`);
     }
     try {
       return BloomFilter.from(data as BloomFilterData);
@@ -579,6 +590,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return { creator: info, items };
     });
 
+    // A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…):
+    // whoever holds the creator's key signs the request, and the operator's cap applies.
+    router.put('/v1/creators/accounts', async (ctx) => {
+      this.auth.require(ctx);
+      const body = await readJson<CreatorAccountLinkRequest>(ctx.req);
+      return this.linkAccounts(body);
+    });
+
     this.contributionRoutes();
     this.peerRoutes();
     this.adminRoutes();
@@ -648,6 +667,24 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         .slice(0, 200)
         .map(({ votes, ...rest }) => ({ ...rest, agreeing: votes.length }));
       return { suggestions: mine };
+    });
+
+    // Content a client says is related to a creator (with an optional message). The
+    // operator accepts — the content joins the creator and the client is paid — or deletes.
+    router.post('/v1/creators/:id/suggestions', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<CreatorContentRequest>(ctx.req);
+      return this.suggestCreatorContent(account, ctx.params.id, body);
+    });
+
+    router.get('/v1/creator-suggestions/mine', (ctx) => {
+      const account = this.auth.require(ctx);
+      return {
+        suggestions: Object.values(this.contributions.data.creatorSuggestions)
+          .filter((s) => s.accountId === account.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 200),
+      };
     });
 
     router.post('/v1/submissions', async (ctx) => {
@@ -819,6 +856,87 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (account && reward > 0 && this.canEarn(account)) this.ledger.credit(account.id, reward, `accepted ${suggestion.kind}`, suggestion.id);
     }
     this.contributions.changed();
+  }
+
+  /**
+   * A creator links their accounts on other platforms (YouTube, TikTok, Twitter…) here.
+   * Whoever holds the creator's key proves it with a signature; the operator's cap decides
+   * how many accounts may be linked together.
+   */
+  linkAccounts(body: CreatorAccountLinkRequest): CreatorRecord {
+    const creatorId = String(body.creator ?? '').trim();
+    if (!creatorId || creatorId.length > 128) throw badRequest('creator is required');
+    const proof = body.proof;
+    if (!proof || !isKeyId(proof.key) || Math.abs(Date.now() - Number(proof.ts)) > 15 * 60_000) throw badRequest('Bad or stale proof');
+    if (!verifySignature(proof.key, claimSigningPayload(this.identity.id, creatorId, Number(proof.ts)), String(proof.sig))) {
+      throw badRequest('The proof signature does not match');
+    }
+    const known = this.registry.creator(creatorId);
+    // A new creator takes its key as its id; a known one is only touched by its own key.
+    if (known ? !(known.id === proof.key || known.keys?.includes(proof.key)) : creatorId !== proof.key) {
+      throw forbidden('Only the creator (holding its key) may link accounts for it');
+    }
+    const accounts = (Array.isArray(body.accounts) ? body.accounts : []).map((account) => ({
+      platform: String(account?.platform ?? '').trim().slice(0, 32),
+      handle: String(account?.handle ?? '').trim().slice(0, 120),
+      url: account?.url ? String(account.url).trim().slice(0, 2048) : undefined,
+    }));
+    for (const account of accounts) {
+      if (!account.platform || !account.handle) throw badRequest('Every account needs a platform and a handle');
+    }
+    const max = Math.max(0, this.config.maxCreatorAccounts);
+    if (accounts.length > max) throw badRequest(`A creator may link at most ${max} accounts`);
+    return this.registry.upsertCreator({ id: creatorId, name: body.name, kind: body.kind, keys: [proof.key], accounts });
+  }
+
+  /**
+   * Content a client says is related to a creator, with an optional message for the
+   * operator: accepted, it is linked to the creator and the client earns credits;
+   * deleted, it is simply gone.
+   */
+  suggestCreatorContent(account: Account, rawCreator: string, body: CreatorContentRequest): CreatorContentResponse {
+    const creatorId = String(rawCreator ?? '').trim();
+    const creator = this.registry.creator(creatorId);
+    if (!creator || creator.status === 'blocked') throw notFound('Unknown creator');
+    const ref = String(body.id ?? '').trim();
+    if (!ref) throw badRequest('id is required');
+    const identity = identityOf({ id: ref });
+    const message = String(body.message ?? '').trim().slice(0, 1000);
+    const store = this.contributions.data.creatorSuggestions;
+    const existing = Object.values(store).find((s) => s.creatorId === creatorId && s.contentId === identity.key);
+    if (existing) return { suggestion: existing, newInfo: false, credited: 0 };
+    const suggestion: CreatorContentSuggestion = {
+      id: randomId('ccs-', 8),
+      creatorId,
+      contentId: identity.key,
+      contentRef: ref.slice(0, 4096),
+      message: message || undefined,
+      accountId: account.id,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    store[suggestion.id] = suggestion;
+    this.contributions.changed();
+    return { suggestion, newInfo: true, credited: 0 };
+  }
+
+  /** The operator accepts: the content is linked to the creator, and the client is paid. */
+  acceptCreatorContent(suggestion: CreatorContentSuggestion): number {
+    if (suggestion.status !== 'pending') return 0;
+    const { key, contentId, link } = identityOf({ id: suggestion.contentRef });
+    this.registry.upsert({ id: key, contentId, link, creatorId: suggestion.creatorId, origin: 'report' });
+    suggestion.status = 'accepted';
+    suggestion.reviewedAt = new Date().toISOString();
+    const reward = this.config.rewards.acceptedSuggestion;
+    let credited = 0;
+    const account = this.ledger.get(suggestion.accountId);
+    if (account && reward > 0 && this.canEarn(account)) {
+      this.ledger.credit(account.id, reward, 'accepted creator content', suggestion.id);
+      credited = reward;
+    }
+    suggestion.credited = credited;
+    this.contributions.changed();
+    return credited;
   }
 
   /**
@@ -1398,6 +1516,33 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else throw notFound();
       return { ok: true };
     });
+
+    // Content clients suggested as related to a creator: accepted, it is linked to the
+    // creator (and the client is paid); deleted, the suggestion is gone for good.
+    router.get('/v1/admin/creator-suggestions', (ctx) => {
+      admin(ctx);
+      const status = ctx.query.get('status') ?? 'pending';
+      const suggestions = Object.values(this.contributions.data.creatorSuggestions)
+        .filter((s) => s.status === status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 300)
+        .map((s) => ({ ...s, title: this.registry.get(s.contentId)?.title, creatorName: this.registry.creator(s.creatorId)?.name }));
+      return { suggestions };
+    });
+
+    router.post('/v1/admin/creator-suggestions/:id/:action', (ctx) => {
+      admin(ctx);
+      const store = this.contributions.data.creatorSuggestions;
+      const suggestion = store[ctx.params.id];
+      if (!suggestion) throw notFound('No such suggestion');
+      if (ctx.params.action === 'accept') {
+        this.acceptCreatorContent(suggestion);
+      } else if (ctx.params.action === 'delete') {
+        delete store[ctx.params.id];
+        this.contributions.changed();
+      } else throw notFound();
+      return { ok: true };
+    });
     router.get('/v1/admin/submissions', (ctx) => {
       admin(ctx);
       const status = ctx.query.get('status') ?? 'pending';
@@ -1637,6 +1782,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       pending: {
         suggestions: Object.values(data.suggestions).filter((s) => s.status === 'pending').length,
         submissions: Object.values(data.submissions).filter((s) => s.status === 'pending').length,
+        creatorSuggestions: Object.values(data.creatorSuggestions ?? {}).filter((s) => s.status === 'pending').length,
       },
     };
   }

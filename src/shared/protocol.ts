@@ -154,6 +154,8 @@ export interface AlgorithmInfo extends NodeInfoBase {
   discovery?: { crawling: boolean; searchesPlatforms: boolean; platforms: string[] };
   /** Seen-content bloom filters this node accepts (it then stops suggesting what collides). */
   bloom?: BloomServiceInfo;
+  /** How many accounts a creator may link together here (YouTube, TikTok, Twitter…). */
+  maxCreatorAccounts?: number;
 }
 
 export type NodeInfo = ProviderInfo | AlgorithmInfo;
@@ -408,6 +410,58 @@ export interface Page<T> {
 
 export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate'] as const;
 export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
+
+/**
+ * A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…) on a
+ * node. The caller proves they hold this creator's key: `proof` signs
+ * `claimSigningPayload(nodeId, creator, ts)` with it. The node caps how many accounts may
+ * be linked (`maxCreatorAccounts` in its info).
+ */
+export interface CreatorAccountLinkRequest {
+  /** The creator on this node (`name:…`, `vk1…`). New creators take their key as id. */
+  creator: string;
+  /** The accounts to link together (this replaces the creator's list). */
+  accounts: CreatorAccount[];
+  /** Name and kind, used when the creator is new. */
+  name?: string;
+  kind?: CreatorKind;
+  /** Proves the caller holds this creator's key. */
+  proof: { key: string; ts: number; sig: string };
+}
+
+/** Content a client suggests as related to a creator, with an optional message. */
+export interface CreatorContentRequest {
+  /** The content: a content id (`vs1…`, with sources) or a link (`yt:…`, `url:…`). */
+  id: string;
+  /** An optional message for the operator. */
+  message?: string;
+}
+
+/** One suggested piece of content on a creator, as the node keeps it for review. */
+export interface CreatorContentSuggestion {
+  id: string;
+  /** The creator the content is related to. */
+  creatorId: string;
+  /** The suggested content, in the node's own form (its key). */
+  contentId: string;
+  /** The reference as the client sent it (a content id or a link). */
+  contentRef: string;
+  message?: string;
+  accountId: string;
+  status: 'pending' | 'accepted';
+  createdAt: string;
+  reviewedAt?: string;
+  /** Credits the suggesting client earned when it was accepted. */
+  credited?: number;
+}
+
+export interface CreatorContentResponse {
+  suggestion: CreatorContentSuggestion;
+  /** True when this suggestion was new (the node did not already have it waiting). */
+  newInfo: boolean;
+  /** Credits earned (paid when the operator accepts the suggestion). */
+  credited: number;
+}
 
 export interface SuggestionRequest {
   id: string;

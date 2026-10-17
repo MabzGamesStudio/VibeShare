@@ -769,13 +769,46 @@ function ProfilesCard() {
   );
 }
 
+/** The settings grouped into tabs: similar settings live together. */
+const SETTINGS_TABS: [string, string][] = [
+  ['feed', 'Feed'],
+  ['seen', 'Seen content'],
+  ['privacy', 'Privacy'],
+  ['profiles', 'Profiles'],
+];
+
+/** Which tab a deep link (settings#profiles…) lands on. */
+function tabForHash(hash: string): string {
+  const groups: Record<string, string> = {
+    pages: 'feed',
+    feed: 'feed',
+    playback: 'feed',
+    storage: 'feed',
+    seen: 'seen',
+    'seen-selected': 'seen',
+    'seen-preview': 'seen',
+    'seen-node': 'seen',
+    tor: 'privacy',
+    sharing: 'privacy',
+    privacy: 'privacy',
+    profiles: 'profiles',
+    identity: 'profiles',
+  };
+  return groups[hash.slice(1)] ?? 'feed';
+}
+
 export function SettingsPage() {
   const { state, updateSettings } = useApp();
   const location = useLocation();
+  const [tab, setTab] = useState(() => tabForHash(location.hash));
+  useEffect(() => {
+    const target = tabForHash(location.hash);
+    if (target) setTab(target);
+  }, [location.hash]);
   useEffect(() => {
     const id = location.hash.slice(1);
     if (id && state) document.getElementById(id)?.scrollIntoView({ block: 'start' });
-  }, [location.hash, Boolean(state)]);
+  }, [location.hash, Boolean(state), tab]);
   if (!state) return null;
   const s = state.settings;
   const prefs = s.preferences;
@@ -790,7 +823,17 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <PagesCard />
+      <div className="tabs">
+        {SETTINGS_TABS.map(([id, label]) => (
+          <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'feed' && (
+        <>
+          <PagesCard />
 
       <div className="card form-stack">
         <h2>Content preferences</h2>
@@ -869,9 +912,64 @@ export function SettingsPage() {
         </label>
       </div>
 
-      <TorCard />
+          <div className="card form-stack">
+            <h2>Playback and storage</h2>
+            <Switch checked={s.autoplay} onChange={(autoplay) => void updateSettings({ autoplay })} label="Start playing reviewed content automatically" />
+            <Switch
+              checked={s.blockExternalEmbeds}
+              onChange={(blockExternalEmbeds) => void updateSettings({ blockExternalEmbeds })}
+              label="Disable all external content embeds"
+            />
+            <span className="hint">
+              When on, only content hosted on the network (its cid) plays and only its metadata shows. External platform players and previews
+              are replaced by a placeholder.
+            </span>
+            <div className="form-grid">
+              <label className="field">
+                Pause before loading more (seconds)
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  step={0.5}
+                  defaultValue={s.loadPauseMs / 1000}
+                  onBlur={(e) => void updateSettings({ loadPauseMs: Math.round(Number(e.target.value) * 1000) })}
+                />
+                <span className="hint">A little friction at the end of each list, so fast scrolling does not spend credits on content you skip.</span>
+              </label>
+              <label className="field">
+                Cache size (MiB)
+                <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
+              </label>
+              <label className="field">
+                IPFS gateway
+                <input type="url" defaultValue={s.ipfsGateway} onBlur={(e) => void updateSettings({ ipfsGateway: e.target.value })} />
+              </label>
+              <label className="field">
+                Theme
+                <select value={s.theme} onChange={(e) => void updateSettings({ theme: e.target.value as Settings['theme'] })}>
+                  <option value="system">System</option>
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </>
+      )}
 
-      <ProfilesCard />
+      {tab === 'seen' && <SeenFiltersSection />}
+
+      {tab === 'privacy' && (
+        <>
+          <TorCard />
+          <SharingCard />
+        </>
+      )}
+
+      {tab === 'profiles' && (
+        <>
+          <ProfilesCard />
 
       <div className="card form-stack">
         <h2>Creator profile</h2>
@@ -897,55 +995,9 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <div className="card form-stack">
-        <h2>Playback and storage</h2>
-        <Switch checked={s.autoplay} onChange={(autoplay) => void updateSettings({ autoplay })} label="Start playing reviewed content automatically" />
-        <Switch
-          checked={s.blockExternalEmbeds}
-          onChange={(blockExternalEmbeds) => void updateSettings({ blockExternalEmbeds })}
-          label="Disable all external content embeds"
-        />
-        <span className="hint">
-          When on, only content hosted on the network (its cid) plays and only its metadata shows. External platform players and previews are
-          replaced by a placeholder.
-        </span>
-        <div className="form-grid">
-          <label className="field">
-            Pause before loading more (seconds)
-            <input
-              type="number"
-              min={0}
-              max={10}
-              step={0.5}
-              defaultValue={s.loadPauseMs / 1000}
-              onBlur={(e) => void updateSettings({ loadPauseMs: Math.round(Number(e.target.value) * 1000) })}
-            />
-            <span className="hint">A little friction at the end of each list, so fast scrolling does not spend credits on content you skip.</span>
-          </label>
-          <label className="field">
-            Cache size (MiB)
-            <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
-          </label>
-          <label className="field">
-            IPFS gateway
-            <input type="url" defaultValue={s.ipfsGateway} onBlur={(e) => void updateSettings({ ipfsGateway: e.target.value })} />
-          </label>
-          <label className="field">
-            Theme
-            <select value={s.theme} onChange={(e) => void updateSettings({ theme: e.target.value as Settings['theme'] })}>
-              <option value="system">System</option>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </label>
-        </div>
-      </div>
-
-      <SeenFiltersSection />
-
-      <SharingCard />
-
-      <IdentityCard />
+          <IdentityCard />
+        </>
+      )}
     </div>
   );
 }

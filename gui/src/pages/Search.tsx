@@ -1,12 +1,52 @@
 import { SlidersHorizontal } from 'lucide-react';
-import { useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { FeedResponse } from '../../../src/shared/clientapi';
+import type { CreatorInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS, CREATOR_KINDS, FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../../../src/shared/taxonomy';
 import { api } from '../api';
 import { Feed } from '../components/Feed';
-import { Chips, toggle } from '../components/ui';
+import { Chips, toggle, Avatar } from '../components/ui';
+
+/** Creators whose name or id matches the query: Explore searches for creators too. */
+function CreatorResults({ query }: { query: string }) {
+  const [creators, setCreators] = useState<CreatorInfo[]>([]);
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setCreators([]);
+      return;
+    }
+    let live = true;
+    api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(q)}`)
+      .then((result) => live && setCreators(result.creators))
+      .catch(() => live && setCreators([]));
+    return () => {
+      live = false;
+    };
+  }, [query]);
+  if (!creators.length) return null;
+  return (
+    <div className="card form-stack" style={{ marginBottom: 24 }}>
+      <h2>Creators</h2>
+      <div className="page-list">
+        {creators.map((creator) => (
+          <Link key={creator.id} to={`/creator/${encodeURIComponent(creator.id)}`} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <Avatar name={creator.name} id={creator.id} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <strong>{creator.name}</strong>
+              <div className="tiny faint">
+                {CREATOR_KIND_LABELS[creator.kind]}
+                {creator.accounts?.length ? ` · ${creator.accounts.map((account) => account.platform).join(', ')}` : ''}
+              </div>
+            </div>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function SearchPage() {
   const [params, setParams] = useSearchParams();
@@ -86,6 +126,7 @@ export function SearchPage() {
           )}
         </div>
       )}
+      <CreatorResults query={query} />
       <Feed
         deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
         load={(cursor) =>

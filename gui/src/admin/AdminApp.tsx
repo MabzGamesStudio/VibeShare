@@ -15,7 +15,7 @@ export interface Status {
   content?: { contents: number; bytes: number; chunks: number };
   storageService?: { jobs: number; activeAssignments: number; onlineHolders: number };
   registry?: { listed: number; blocked: number; creators: number; pending?: number; discovered?: number };
-  pending?: { suggestions: number; submissions: number };
+  pending?: { suggestions: number; submissions: number; creatorSuggestions?: number };
 }
 
 export function useToast(): [string | null, (text: string) => void] {
@@ -134,7 +134,7 @@ function Overview({ status }: { status: Status }) {
         {status.pending && (
           <div className="stat">
             <div className="label">Waiting for review</div>
-            <div className="value">{status.pending.submissions + status.pending.suggestions}</div>
+            <div className="value">{status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0)}</div>
             <div className="tiny faint">
               {status.pending.submissions} submissions · {status.pending.suggestions} suggestions
             </div>
@@ -433,7 +433,8 @@ function patchFor(path: string, value: unknown): Record<string, unknown> {
     .reduce<unknown>((inner, key) => ({ [key]: inner }), value) as Record<string, unknown>;
 }
 
-function SettingsTab({ fields }: { fields: FieldDef[] }) {
+function SettingsTab({ groups }: { groups: FieldGroup[] }) {
+  const [group, setGroup] = useState(() => groups[0]?.id ?? '');
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [json, setJson] = useState('');
   const [toast, show] = useToast();
@@ -464,13 +465,21 @@ function SettingsTab({ fields }: { fields: FieldDef[] }) {
   };
 
   if (!config) return <Loading />;
+  const active = groups.find((g) => g.id === group) ?? groups[0];
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
+      <div className="tabs">
+        {groups.map((g) => (
+          <button key={g.id} className={`tab ${active.id === g.id ? 'on' : ''}`} onClick={() => setGroup(g.id)}>
+            {g.label}
+          </button>
+        ))}
+      </div>
       <div className="card form-stack">
-        <h3>Quick settings</h3>
+        <h3>{active.label}</h3>
         <div className="form-grid">
-          {[...COMMON_FIELDS, ...fields].map((field) => {
+          {active.fields.map((field) => {
             const value = get(config, field.path);
             const commit = (next: unknown) => void save(patchFor(field.path, next));
             return (
@@ -568,7 +577,7 @@ export function AdminApp() {
           ['storage', 'Storage'],
         ] as [string, string][])
       : ([
-          ['review', `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions})` : ''}`],
+          ['review', `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0)})` : ''}`],
           ['catalog', 'Catalog'],
           ['claims', 'Claims'],
           ['peers', 'Peers'],
@@ -615,46 +624,117 @@ export function AdminApp() {
       {tab === 'overview' && <Overview status={status} />}
       {tab === 'accounts' && <Accounts />}
       {tab === 'payments' && <Payments />}
-      {tab === 'settings' && <SettingsTab fields={provider ? PROVIDER_FIELDS : ALGORITHM_FIELDS} />}
+      {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} />}
       {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}
     </div>
   );
 }
 
-const PROVIDER_FIELDS: FieldDef[] = [
-  { path: 'pricing.perMiB', label: 'Credits per MiB downloaded', type: 'number' },
-  { path: 'pricing.manifest', label: 'Credits per manifest', type: 'number' },
-  { path: 'pricing.freeMiBPerDay', label: 'Free MiB per account per day', type: 'number' },
-  { path: 'pricing.creatorShare', label: 'Share of download credits paid to uploaders (0–1)', type: 'number' },
-  { path: 'pricing.upload.mode', label: 'Uploads', type: 'select', options: ['open', 'paid', 'closed'] },
-  { path: 'pricing.upload.perMiB', label: 'Upload price per MiB (paid mode)', type: 'number' },
-  { path: 'pricing.upload.maxBytes', label: 'Largest upload (bytes)', type: 'number' },
-  { path: 'storage.replication', label: 'Copies of each chunk', type: 'number', hint: 'Across writable storage backends' },
-  { path: 'storage.usePeers', label: 'Fetch missing chunks from client storage', type: 'bool' },
-  { path: 'catalog', label: 'Publish catalog', type: 'bool' },
-  { path: 'storageService.enabled', label: 'Storage service for clients', type: 'bool' },
-  { path: 'storageService.auto.enabled', label: 'Storage job for every upload', type: 'bool' },
-  { path: 'storageService.auto.replicas', label: 'Client copies per upload', type: 'number' },
-  { path: 'storageService.auto.durationDays', label: 'Storage term (days)', type: 'number' },
+/** The node's settings, grouped into tab categories on the settings page. */
+export interface FieldGroup {
+  id: string;
+  label: string;
+  fields: FieldDef[];
+}
+
+const PROVIDER_GROUPS: FieldGroup[] = [
+  { id: 'general', label: 'General', fields: COMMON_FIELDS },
+  {
+    id: 'prices',
+    label: 'Prices and storage',
+    fields: [
+      { path: 'pricing.perMiB', label: 'Credits per MiB downloaded', type: 'number' },
+      { path: 'pricing.manifest', label: 'Credits per manifest', type: 'number' },
+      { path: 'pricing.freeMiBPerDay', label: 'Free MiB per account per day', type: 'number' },
+      { path: 'pricing.creatorShare', label: 'Share of download credits paid to uploaders (0–1)', type: 'number' },
+      { path: 'pricing.upload.mode', label: 'Uploads', type: 'select', options: ['open', 'paid', 'closed'] },
+      { path: 'pricing.upload.perMiB', label: 'Upload price per MiB (paid mode)', type: 'number' },
+      { path: 'pricing.upload.maxBytes', label: 'Largest upload (bytes)', type: 'number' },
+      { path: 'storage.replication', label: 'Copies of each chunk', type: 'number', hint: 'Across writable storage backends' },
+      { path: 'storage.usePeers', label: 'Fetch missing chunks from client storage', type: 'bool' },
+      { path: 'catalog', label: 'Publish catalog', type: 'bool' },
+      { path: 'storageService.enabled', label: 'Storage service for clients', type: 'bool' },
+      { path: 'storageService.auto.enabled', label: 'Storage job for every upload', type: 'bool' },
+      { path: 'storageService.auto.replicas', label: 'Client copies per upload', type: 'number' },
+      { path: 'storageService.auto.durationDays', label: 'Storage term (days)', type: 'number' },
+    ],
+  },
 ];
 
-const ALGORITHM_FIELDS: FieldDef[] = [
-  { path: 'ranking.strategy', label: 'Ranking', type: 'select', options: ['balanced', 'hot', 'new', 'top', 'random', 'custom'] },
-  { path: 'ranking.module', label: 'Custom ranking module', type: 'text', hint: 'Path to an ES module (strategy = custom)' },
-  { path: 'ranking.description', label: 'Ranking description', type: 'text' },
-  { path: 'ranking.weights.quality', label: 'Weight: approval', type: 'number' },
-  { path: 'ranking.weights.recency', label: 'Weight: freshness', type: 'number' },
-  { path: 'ranking.weights.preference', label: 'Weight: favourite topics', type: 'number' },
-  { path: 'ranking.weights.discovery', label: 'Weight: discovery', type: 'number' },
-  { path: 'pricing.feed', label: 'Credits per feed page', type: 'number' },
-  { path: 'pricing.search', label: 'Credits per search', type: 'number' },
-  { path: 'pricing.submission', label: 'Credits per submission', type: 'number' },
-  { path: 'rewards.vote', label: 'Reward per vote', type: 'number' },
-  { path: 'rewards.voteDailyCap', label: 'Rewarded votes per day', type: 'number' },
-  { path: 'rewards.acceptedSuggestion', label: 'Reward per accepted suggestion', type: 'number' },
-  { path: 'rewards.autoAcceptAgreement', label: 'Auto-accept after N agreeing accounts', type: 'number', hint: '0 = only by hand' },
-  { path: 'rewards.requireIdentity', label: 'Only key accounts earn', type: 'bool' },
-  { path: 'policy.maxRating', label: 'Highest rating served', type: 'select', options: ['all', '10+', '13+', '16+', '18+', 'nsfw'] },
-  { path: 'policy.defaultMaxRating', label: 'Default rating limit', type: 'select', options: ['all', '10+', '13+', '16+', '18+', 'nsfw'] },
-  { path: 'policy.autoListSubmissions', label: 'List submissions without review', type: 'bool' },
+const ALGORITHM_GROUPS: FieldGroup[] = [
+  { id: 'general', label: 'General', fields: COMMON_FIELDS },
+  {
+    id: 'ranking',
+    label: 'Ranking',
+    fields: [
+      { path: 'ranking.strategy', label: 'Ranking', type: 'select', options: ['balanced', 'hot', 'new', 'top', 'random', 'custom'] },
+      { path: 'ranking.module', label: 'Custom ranking module', type: 'text', hint: 'Path to an ES module (strategy = custom)' },
+      { path: 'ranking.description', label: 'Ranking description', type: 'text' },
+      { path: 'ranking.weights.quality', label: 'Weight: approval', type: 'number' },
+      { path: 'ranking.weights.recency', label: 'Weight: freshness', type: 'number' },
+      { path: 'ranking.weights.preference', label: 'Weight: favourite topics', type: 'number' },
+      { path: 'ranking.weights.discovery', label: 'Weight: discovery', type: 'number' },
+    ],
+  },
+  {
+    id: 'prices',
+    label: 'Prices',
+    fields: [
+      { path: 'pricing.feed', label: 'Credits per feed page', type: 'number' },
+      { path: 'pricing.search', label: 'Credits per search', type: 'number' },
+      { path: 'pricing.lookup', label: 'Credits per lookup', type: 'number' },
+      { path: 'pricing.submission', label: 'Credits per submission', type: 'number' },
+    ],
+  },
+  {
+    id: 'rewards',
+    label: 'Rewards',
+    fields: [
+      { path: 'rewards.vote', label: 'Reward per vote', type: 'number' },
+      { path: 'rewards.voteDailyCap', label: 'Rewarded votes per day', type: 'number' },
+      { path: 'rewards.acceptedSuggestion', label: 'Reward per accepted suggestion', type: 'number' },
+      { path: 'rewards.autoAcceptAgreement', label: 'Auto-accept after N agreeing accounts', type: 'number', hint: '0 = only by hand' },
+      { path: 'rewards.report', label: 'Reward per report', type: 'number' },
+      { path: 'rewards.reportDailyCap', label: 'Rewarded reports per day', type: 'number' },
+      { path: 'rewards.requireIdentity', label: 'Only key accounts earn', type: 'bool' },
+    ],
+  },
+  {
+    id: 'policy',
+    label: 'Policy and creators',
+    fields: [
+      { path: 'policy.maxRating', label: 'Highest rating served', type: 'select', options: ['all', '10+', '13+', '16+', '18+', 'nsfw'] },
+      { path: 'policy.defaultMaxRating', label: 'Default rating limit', type: 'select', options: ['all', '10+', '13+', '16+', '18+', 'nsfw'] },
+      { path: 'policy.autoListSubmissions', label: 'List submissions without review', type: 'bool' },
+      {
+        path: 'maxCreatorAccounts',
+        label: 'Accounts a creator may link',
+        type: 'number',
+        hint: 'YouTube, TikTok, Twitter… accounts one creator may link together here',
+      },
+      { path: 'pageSize', label: 'Items per page', type: 'number' },
+    ],
+  },
+  {
+    id: 'discovery',
+    label: 'Discovery',
+    fields: [
+      { path: 'crawler.enabled', label: 'Find content by itself', type: 'bool' },
+      { path: 'crawler.searchPlatforms', label: 'Search platforms for queries', type: 'bool' },
+      { path: 'crawler.maxEntries', label: 'Most contents kept', type: 'number' },
+      { path: 'crawler.defaultRating', label: 'Rating for finds without one', type: 'select', options: ['all', '10+', '13+', '16+', '18+', 'nsfw'] },
+    ],
+  },
+  {
+    id: 'seen',
+    label: 'Seen-content filters',
+    fields: [
+      {
+        path: 'bloom.inlineMaxBits',
+        label: 'Largest filter inside a request (bits)',
+        type: 'number',
+        hint: 'Clients may also pay to keep their filter here: the prices (bits, duration, credits) are the storage tiers in the full configuration below. Whatever collides is never suggested again',
+      },
+    ],
+  },
 ];

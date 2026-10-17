@@ -13,6 +13,8 @@ export interface BloomFilterSettings {
   enabled: boolean;
   /** Number of bits: 1, 10, 100, … 100,000,000 (powers of ten). */
   bits: number;
+  /** How many items the filter is made for (its design capacity; sets the hash count). */
+  expected: number;
 }
 
 /** Content previews the user has seen on screen (separate from content actually selected). */
@@ -35,11 +37,13 @@ export interface NodeBloomSettings extends BloomFilterSettings {
 export interface BloomFilterStatus {
   enabled: boolean;
   bits: number;
-  /** The optimal number of hash functions for this size. */
+  /** How many items the filter is made for. */
+  expected: number;
+  /** The optimal number of hash functions for this size and capacity. */
   hashes: number;
   /** Bytes of the bit array (ceil(bits/8)). */
   bytes: number;
-  /** How many keys were added (the filter is designed for 10,000 of them). */
+  /** How many keys were added (of the `expected` the filter is made for). */
   added: number;
 }
 

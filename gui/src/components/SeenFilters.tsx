@@ -34,13 +34,38 @@ function BitsSlider({ stops, value, onChange }: { stops: number; value: number; 
   );
 }
 
+/** How many items the filter is made for: it sets the optimal number of hash functions. */
+function ExpectedInput({ value, onChange }: { value: number; onChange: (expected: number) => void }) {
+  return (
+    <label className="field">
+      Made for (items)
+      <input
+        key={value}
+        type="number"
+        min={1}
+        max={10_000_000}
+        step={100}
+        defaultValue={value}
+        onBlur={(e) => {
+          const count = Math.round(Number(e.target.value));
+          if (Number.isFinite(count) && count >= 1 && count !== value) onChange(Math.min(10_000_000, count));
+        }}
+      />
+      <span className="hint">
+        How many contents the filter is made for: it decides the optimal number of hash functions (more items → more hashes, fewer mistakes).
+        Changing it clears the filter.
+      </span>
+    </label>
+  );
+}
+
 /** What one filter knows: its optimal hash count, its bytes, and how much it recorded. */
 function FilterStatus({ status }: { status: BloomFilterStatus | undefined }) {
   if (!status) return null;
   return (
     <span className="hint">
-      {status.hashes} hash function{status.hashes === 1 ? '' : 's'} · {formatBytes(status.bytes)} · about {status.added.toLocaleString()}{' '}
-      item{status.added === 1 ? '' : 's'} recorded (the filter is made for 10,000)
+      {status.hashes} hash function{status.hashes === 1 ? '' : 's'} · {formatBytes(status.bytes)} · about {status.added.toLocaleString()} of{' '}
+      {status.expected.toLocaleString()} items recorded
     </span>
   );
 }
@@ -226,6 +251,7 @@ export function SeenFiltersSection() {
           it can mistake other content for seen.
         </span>
         <BitsSlider stops={8} value={s.selectedBloom.bits} onChange={(bits) => patchSelected({ bits })} />
+        <ExpectedInput value={s.selectedBloom.expected} onChange={(expected) => patchSelected({ expected })} />
         <FilterStatus status={status?.selected} />
         <div>
           <ResetFilter scope="selected" onDone={load} />
@@ -254,6 +280,7 @@ export function SeenFiltersSection() {
           </select>
         </label>
         <BitsSlider stops={9} value={s.previewBloom.bits} onChange={(bits) => patchPreview({ bits })} />
+        <ExpectedInput value={s.previewBloom.expected} onChange={(expected) => patchPreview({ expected })} />
         <FilterStatus status={status?.preview} />
         <div>
           <ResetFilter scope="preview" onDone={load} />
@@ -288,6 +315,7 @@ export function SeenFiltersSection() {
           stops suggesting any content whose id or links collide with it, at all. Nothing is sent until you turn this on.
         </span>
         <BitsSlider stops={9} value={s.nodeBloom.bits} onChange={(bits) => patchNode({ bits })} />
+        <ExpectedInput value={s.nodeBloom.expected} onChange={(expected) => patchNode({ expected })} />
         <FilterStatus status={status?.node} />
         <div>
           <ResetFilter scope="node" onDone={load} />

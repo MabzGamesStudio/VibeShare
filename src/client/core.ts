@@ -35,10 +35,11 @@ import {
   type ProfileAccess,
   type SealKey,
 } from '../shared/profiles.js';
-import { SOFTWARE, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { SOFTWARE, claimSigningPayload, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { bytesMatchCid } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
+import { signData } from '../shared/crypto.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
@@ -370,6 +371,58 @@ export class ClientCore {
     }
     const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
     return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subscription?.kind ?? 'unknown' }, items: [] };
+  }
+
+  /** Creators matching a name or id, across the enabled algorithm nodes (Explore). */
+  async searchCreators(query: string): Promise<{ creators: CreatorInfo[] }> {
+    const q = String(query ?? '').trim().slice(0, 100);
+    const found = new Map<string, CreatorInfo>();
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes.client(node).json<{ creators: CreatorInfo[] }>(`/v1/creators?q=${encodeURIComponent(q)}`, {
+          auth: false,
+          timeoutMs: 8000,
+        });
+        for (const creator of result.creators ?? []) if (!found.has(creator.id)) found.set(creator.id, creator);
+      } catch (error) {
+        log.debug(`Creators on ${node.name}: ${errorText(error)}`);
+      }
+      if (found.size >= 24) break;
+    }
+    return { creators: [...found.values()].slice(0, 24) };
+  }
+
+  /**
+   * Links a creator's accounts on other platforms (YouTube, TikTok, Twitter…) on a node.
+   * The user's own key signs the request: the node accepts it only for the creator that
+   * key belongs to, and only up to the node's account limit.
+   */
+  async linkCreatorAccounts(
+    node: NodeEntry,
+    body: { creator?: string; accounts?: { platform: string; handle: string; url?: string }[]; name?: string; kind?: string }
+  ): Promise<{ creator: CreatorInfo }> {
+    const creator = String(body.creator ?? '').trim();
+    if (!creator) throw badRequest('creator is required');
+    const ts = Date.now();
+    const proof = { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(node.id, creator, ts)) };
+    const saved = await this.nodes.client(node).json<CreatorInfo>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: { creator, accounts: body.accounts ?? [], name: body.name, kind: body.kind, proof },
+    });
+    return { creator: saved };
+  }
+
+  /** Content the user suggests as related to a creator, with an optional message. */
+  suggestCreatorContent(node: NodeEntry, creator: string, body: { id?: string; message?: string }): Promise<CreatorContentResponse> {
+    if (!String(body.id ?? '').trim()) throw badRequest('id is required');
+    return this.nodes.client(node).json<CreatorContentResponse>(`/v1/creators/${encodeURIComponent(creator)}/suggestions`, {
+      body: { id: body.id, message: body.message },
+    });
+  }
+
+  /** The user's own creator-content suggestions on a node, with their status. */
+  myCreatorSuggestions(node: NodeEntry): Promise<{ suggestions: CreatorContentSuggestion[] }> {
+    return this.nodes.client(node).json<{ suggestions: CreatorContentSuggestion[] }>('/v1/creator-suggestions/mine');
   }
 
   updateSettings(patch: Partial<Settings>): Settings {

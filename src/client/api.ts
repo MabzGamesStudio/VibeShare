@@ -130,6 +130,19 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/content/:id', (request) => core.content(request.params.id));
   on('GET', '/api/creators/:id', (request) => core.creator(request.params.id));
 
+  // Creators: searching them (Explore), linking their platform accounts (proven with the
+  // creator key), and suggesting content that is related to one.
+  on('GET', '/api/creators', (request) => core.searchCreators(request.query.get('q') ?? ''));
+  on('PUT', '/api/creators/accounts', async (request) => {
+    const body = await request.json<{ nodeId?: string; creator?: string; accounts?: { platform: string; handle: string; url?: string }[]; name?: string; kind?: string }>();
+    return core.linkCreatorAccounts(nodes.require(String(body.nodeId ?? '')), body);
+  });
+  on('POST', '/api/creator-suggestions', async (request) => {
+    const body = await request.json<{ nodeId?: string; creator?: string; id?: string; message?: string }>();
+    return core.suggestCreatorContent(nodes.require(String(body.nodeId ?? '')), String(body.creator ?? ''), body);
+  });
+  on('GET', '/api/creator-suggestions/:id', (request) => core.myCreatorSuggestions(node(request)));
+
   // Contributions to algorithm nodes (they pay credits for these)
   on('POST', '/api/vote', async (request) => {
     const body = await request.json<{ nodeId?: string; id?: string; vote?: number }>();

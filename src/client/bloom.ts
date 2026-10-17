@@ -7,7 +7,7 @@
 //              then stop suggesting anything that collides with it.
 // Every filter remembers a content by its cid and each of its links, independently.
 // Browser-safe: no Node imports.
-import { BloomFilter, optimalHashCount, type BloomFilterData, type ContentIdentity } from '../shared/bloom.js';
+import { BloomFilter, BLOOM_EXPECTED_ITEMS, optimalHashCount, type BloomFilterData, type ContentIdentity } from '../shared/bloom.js';
 import type { BloomFilterSettings, BloomStatus, PreviewBloomSettings, Settings } from '../shared/clientapi.js';
 import type { BloomData, ClientStoreLike } from './model.js';
 
@@ -48,15 +48,16 @@ export class BloomBook {
   }
 
   /**
-   * The filter of one scope, rebuilt empty whenever the size setting changed (the bits
-   * of the old size cannot be reinterpreted as the new size).
+   * The filter of one scope, rebuilt empty whenever the size or capacity setting changed
+   * (the bits of the old shape cannot be reinterpreted as the new one).
    */
   filter(scope: BloomScope): BloomFilter {
-    const bits = this.setting(scope).bits;
+    const setting = this.setting(scope) as BloomFilterSettings;
+    const { bits, expected } = setting;
     let filter = this.filters[scope];
-    if (!filter || filter.m !== bits) {
+    if (!filter || filter.m !== bits || filter.expected !== expected) {
       const saved = this.data[scope];
-      filter = saved && saved.m === bits ? BloomFilter.from(saved) : new BloomFilter(bits);
+      filter = saved && saved.m === bits && (saved.n ?? BLOOM_EXPECTED_ITEMS) === expected ? BloomFilter.from(saved) : new BloomFilter(bits, expected);
       this.filters[scope] = filter;
     }
     return filter;
@@ -103,7 +104,8 @@ export class BloomBook {
       return {
         enabled: setting.enabled,
         bits: filter.m,
-        hashes: optimalHashCount(filter.m),
+        expected: filter.expected,
+        hashes: optimalHashCount(filter.m, filter.expected),
         bytes: filter.bytes,
         added: filter.added,
       };

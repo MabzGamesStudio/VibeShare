@@ -49,11 +49,25 @@ describe('bloom filters of seen content', () => {
     assert.equal(saved.v, 1);
     assert.equal(saved.m, 10_000);
     assert.equal(saved.k, optimalHashCount(10_000));
+    assert.equal(saved.n, BLOOM_EXPECTED_ITEMS);
     assert.equal(saved.added, 2);
     const restored = BloomFilter.from(saved);
     assert.ok(restored.seesContent({ id: cid }));
     assert.ok(restored.seesContent({ link: 'yt:zzz' }));
     assert.ok(!restored.seesContent({ id: 'yt:never' }), 'nothing else collides');
+  });
+
+  it('pick the hash count for the number of items the filter is made for', () => {
+    assert.equal(optimalHashCount(100_000, 1_000), 69);
+    assert.equal(optimalHashCount(100_000, 100_000), 1);
+    assert.equal(optimalHashCount(100_000, 500), 139);
+    const filter = new BloomFilter(100_000, 500);
+    assert.equal(filter.expected, 500);
+    assert.equal(filter.k, 139);
+    assert.equal(filter.toJSON().n, 500, 'the capacity travels with the bits');
+    const restored = BloomFilter.from(filter.toJSON());
+    assert.equal(restored.expected, 500);
+    assert.equal(restored.k, 139, 'a reload keeps the same hash count');
   });
 
   it('spend ceil(m/8) bytes on the bits, at every slider stop', () => {

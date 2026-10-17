@@ -8,12 +8,15 @@ import { base64url, fromBase64url } from './encoding.js';
 import { formatSource, parseContentId } from './sources.js';
 
 /**
- * The number of items every filter is designed to hold. The optimal number of hash
- * functions for `m` bits and this capacity is k = (m/n)·ln 2 — with n fixed at 10,000
- * for every filter, k grows with the chosen size (1 bit → 1 hash, 100,000 bits → 7,
+ * The number of items every filter is designed to hold unless the settings say otherwise.
+ * The optimal number of hash functions for `m` bits and this capacity is k = (m/n)·ln 2 —
+ * with n = 10,000, k grows with the chosen size (1 bit → 1 hash, 100,000 bits → 7,
  * 100,000,000 bits → 6,931).
  */
 export const BLOOM_EXPECTED_ITEMS = 10_000;
+
+/** How many items one filter may be designed for at the most (the settings cap). */
+export const BLOOM_EXPECTED_MAX = 10_000_000;
 
 /** The wire/saved form of one filter. `data` is base64url of ceil(m/8) bytes. */
 export interface BloomFilterData {
@@ -22,6 +25,8 @@ export interface BloomFilterData {
   m: number;
   /** Number of hash functions. */
   k: number;
+  /** Number of items the filter is made for (its design capacity; defaults to 10,000). */
+  n?: number;
   /** How many keys were added so far (informational; nodes ignore it). */
   added?: number;
   /** base64url of the bit array. */
@@ -74,7 +79,7 @@ export function contentKeys(input: ContentIdentity): string[] {
  */
 export class BloomFilter {
   readonly bits: Uint8Array;
-  /** How many keys were added (the filter is designed for BLOOM_EXPECTED_ITEMS of them). */
+  /** How many keys were added (the filter is designed for `expected` of them). */
   added = 0;
   /** Bumped on every change, so the serialized form can be cached. */
   version = 0;
@@ -82,10 +87,13 @@ export class BloomFilter {
 
   constructor(
     readonly m: number,
-    readonly k: number = optimalHashCount(m),
+    /** How many items the filter is made for (its design capacity). */
+    readonly expected: number = BLOOM_EXPECTED_ITEMS,
+    readonly k: number = optimalHashCount(m, expected),
     bits?: Uint8Array
   ) {
     if (!Number.isInteger(m) || m < 1) throw new Error('A bloom filter needs at least one bit');
+    if (!Number.isInteger(expected) || expected < 1) throw new Error('A bloom filter is made for at least one item');
     if (!Number.isInteger(k) || k < 1) throw new Error('A bloom filter needs at least one hash');
     this.bits = bits ?? new Uint8Array(Math.ceil(m / 8));
     if (this.bits.length !== Math.ceil(m / 8)) throw new Error('The bit array does not match the size');
@@ -93,7 +101,8 @@ export class BloomFilter {
 
   /** Rebuilds a filter from its saved or sent form. */
   static from(data: BloomFilterData): BloomFilter {
-    const filter = new BloomFilter(data.m, data.k, Uint8Array.from(fromBase64url(data.data)));
+    const expected = Math.max(1, Math.floor(Number(data.n ?? BLOOM_EXPECTED_ITEMS)));
+    const filter = new BloomFilter(data.m, expected, data.k, Uint8Array.from(fromBase64url(data.data)));
     filter.added = Math.max(0, Math.floor(Number(data.added ?? 0)));
     return filter;
   }
@@ -101,7 +110,7 @@ export class BloomFilter {
   /** The saved or sent form of this filter (cached until the next add). */
   toJSON(): BloomFilterData {
     if (this.cached && this.cached.version === this.version) return this.cached.json;
-    const json: BloomFilterData = { v: 1, m: this.m, k: this.k, added: this.added, data: base64url(this.bits) };
+    const json: BloomFilterData = { v: 1, m: this.m, k: this.k, n: this.expected, added: this.added, data: base64url(this.bits) };
     this.cached = { version: this.version, json };
     return json;
   }

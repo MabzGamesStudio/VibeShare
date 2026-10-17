@@ -48,6 +48,19 @@ interface Suggestion {
   createdAt: string;
 }
 
+/** Content a client suggested as related to a creator, for the operator to accept or delete. */
+interface CreatorSuggestion {
+  id: string;
+  creatorId: string;
+  creatorName?: string;
+  contentId: string;
+  contentRef: string;
+  title?: string;
+  message?: string;
+  status: string;
+  createdAt: string;
+}
+
 function SubmissionCard({ submission, done }: { submission: Submission; done: () => void }) {
   const r = submission.request;
   const [title, setTitle] = useState(r.title);
@@ -133,10 +146,14 @@ function SubmissionCard({ submission, done }: { submission: Submission; done: ()
 function Review() {
   const [submissions, setSubmissions] = useState<Submission[] | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [creatorIdeas, setCreatorIdeas] = useState<CreatorSuggestion[]>([]);
   const [toast, show] = useToast();
   const load = useCallback(() => {
     admin<{ submissions: Submission[] }>('/v1/admin/submissions').then((r) => setSubmissions(r.submissions)).catch((e) => show(message(e)));
     admin<{ suggestions: Suggestion[] }>('/v1/admin/suggestions').then((r) => setSuggestions(r.suggestions)).catch(() => undefined);
+    admin<{ suggestions: CreatorSuggestion[] }>('/v1/admin/creator-suggestions')
+      .then((r) => setCreatorIdeas(r.suggestions))
+      .catch(() => undefined);
   }, [show]);
   useEffect(load, [load]);
 
@@ -191,6 +208,48 @@ function Review() {
                         }}
                       >
                         Reject
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <h2 style={{ marginTop: 20 }}>Content for creators</h2>
+      {creatorIdeas.length === 0 ? (
+        <p className="muted small">Nothing waiting.</p>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {creatorIdeas.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <strong>{s.creatorName ?? s.creatorId}</strong> ← <code>{s.contentRef}</code>
+                    {s.title ? ` (${s.title})` : ''}
+                    {s.message && <div className="small muted">“{s.message}”</div>}
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button
+                        className="small primary"
+                        onClick={async () => {
+                          await admin(`/v1/admin/creator-suggestions/${s.id}/accept`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        className="small danger"
+                        onClick={async () => {
+                          await admin(`/v1/admin/creator-suggestions/${s.id}/delete`, { body: {} }).catch((e) => show(message(e)));
+                          load();
+                        }}
+                      >
+                        Delete
                       </button>
                     </div>
                   </td>
