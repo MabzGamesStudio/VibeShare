@@ -665,6 +665,11 @@ export class ClientCore {
           library: [],
           history: [],
         };
+        // The fresh start is an ordinary public profile (drop any hidden/locked state).
+        target.hidden = undefined;
+        target.access = { mode: 'public' };
+        target.sealed = undefined;
+        this.sealKeys.delete(target.id);
         this.loadProfile(target, fresh, previousSettings);
         return this.profileSummaries();
       }
@@ -672,6 +677,7 @@ export class ClientCore {
     const before = data.profiles.length;
     data.profiles = data.profiles.filter((profile) => profile.id !== id);
     if (data.profiles.length === before) throw notFound('No such profile');
+    this.sealKeys.delete(id);
     this.store.changed();
     return this.profileSummaries();
   }

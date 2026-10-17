@@ -558,19 +558,17 @@ function ProfilesCard() {
                   </button>
                 </>
               )}
-              {!profile.hidden && (
-                <button
-                  className="small danger"
-                  title="Delete"
-                  onClick={() => {
-                    setDeleting(profile);
-                    setDeleteUser(profile.access === 'protected' ? (profile.username ?? '') : profile.name);
-                    setDeletePassword('');
-                  }}
-                >
-                  <Trash2 size={14} />
-                </button>
-              )}
+              <button
+                className="small danger"
+                title="Delete"
+                onClick={() => {
+                  setDeleting(profile);
+                  setDeleteUser(profile.access === 'protected' ? (profile.username ?? '') : profile.name);
+                  setDeletePassword('');
+                }}
+              >
+                <Trash2 size={14} />
+              </button>
             </div>
           </div>
         ))}

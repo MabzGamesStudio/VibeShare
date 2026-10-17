@@ -160,4 +160,16 @@ describe('hidden profiles', async () => {
     const main = await api<ClientState>('/api/profiles/main/switch', { method: 'POST', body: {} });
     assert.deepEqual(main.profiles.map((profile) => profile.name), ['Main']);
   });
+
+  it('deletes a hidden profile with its username and password', async () => {
+    const { api } = started;
+    // A hidden profile only appears while it is unlocked; the delete button is there too.
+    const opened = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    const hidden = opened.profiles.find((profile) => profile.hidden)!;
+    assert.equal(hidden.active, true, 'the hidden profile is open');
+    await api(`/api/profiles/${hidden.id}`, { method: 'DELETE', body: { username: 'kim', password: 'pw123' } });
+    const after = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.ok(!after.profiles.some((profile) => profile.hidden), 'the hidden profile is gone');
+    assert.equal(after.profiles.length, 1);
+  });
 });
