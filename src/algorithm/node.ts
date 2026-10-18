@@ -640,9 +640,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const body = await readJson<{ creators?: string[]; preferences?: Preferences; cursor?: string; limit?: number; bloom?: unknown }>(ctx.req);
       const creators = new Set((body.creators ?? []).slice(0, 500).map(String));
       this.charge(ctx, this.config.pricing.feed, 'subscriptions');
-      const seen = this.seenFilters(ctx, body);
+      // The subscriptions feed is simply the newest content of the creators you follow:
+      // seen-content filters do not apply here — it lists what is recent, seen or not.
       const preferences = this.preferencesOf(body.preferences);
-      const items = this.withoutSeen(this.registry.visible(preferences, this.config.policy.maxRating), seen)
+      const items = this.registry
+        .visible(preferences, this.config.policy.maxRating)
         .filter((entry) => entry.creatorId && creators.has(entry.creatorId))
         .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
       const page = pageOf(items, body.cursor, this.limitOf(body.limit));
@@ -1750,7 +1752,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
     router.get('/v1/admin/creators', (ctx) => {
       admin(ctx);
-      const all = Object.values(this.registry.data.creators);
+      const q = (ctx.query.get('q') ?? '').trim().slice(0, 100);
+      let all = Object.values(this.registry.data.creators);
+      // The console finds creators by name: the words may come in any order and match
+      // only partly, in the name, the id or a linked account.
+      if (q) {
+        all = all
+          .map((creator) => ({ creator, score: creatorMatch(creator, q) }))
+          .filter((match): match is { creator: CreatorRecord; score: number } => match.score !== null)
+          .sort((a, b) => a.score - b.score || a.creator.name.localeCompare(b.creator.name))
+          .map((match) => match.creator);
+      }
       // Without a limit the whole list (the way it has always answered).
       if (ctx.query.get('limit') === null) return { creators: all };
       const page = pageOf(all, ctx.query.get('cursor') ?? undefined, this.listLimit(ctx.query.get('limit')));

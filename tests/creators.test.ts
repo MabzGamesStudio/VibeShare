@@ -377,3 +377,25 @@ describe('an operator editing content by hand', async () => {
     assert.equal(creators.total, 0);
   });
 });
+
+describe('an operator searching creators by name', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:labs', name: 'Science Labs', kind: 'company' } });
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:solo', name: 'Solo Rider', kind: 'person' } });
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:coats', name: 'Lab Coat Live', kind: 'person' } });
+
+  it('finds creators by name, the words in any order and only partly', async () => {
+    const byName = await admin<{ creators: { id: string }[] }>(url, '/v1/admin/creators?q=science%20labs');
+    assert.deepEqual(byName.creators.map((creator) => creator.id), ['name:labs']);
+
+    // "coat live" is "Lab Coat Live" — and the paging counts only what matches.
+    const partial = await admin<{ creators: { id: string }[]; total?: number }>(url, '/v1/admin/creators?q=coat%20live&limit=5');
+    assert.equal(partial.total, 1);
+    assert.deepEqual(partial.creators.map((creator) => creator.id), ['name:coats']);
+
+    const none = await admin<{ creators: { id: string }[] }>(url, '/v1/admin/creators?q=zzz');
+    assert.deepEqual(none.creators, []);
+  });
+});

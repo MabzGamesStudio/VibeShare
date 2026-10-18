@@ -22,7 +22,7 @@ describe('a search node filtering content the user has seen', async () => {
   const url = node.url();
   after(() => node.stop());
 
-  await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: `${vid}~yt:black1`, title: 'Black holes', format: 'video', rating: 'all' } });
+  await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: `${vid}~yt:black1`, title: 'Black holes', format: 'video', rating: 'all', creatorId: 'stars' } });
   await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:lava2', title: 'Lava flow', format: 'video', rating: 'all' } });
 
   const seen = new BloomFilter(1_024);
@@ -61,6 +61,15 @@ describe('a search node filtering content the user has seen', async () => {
     const feed = await client.json<Page<ContentItem>>('/v1/feed', { body: { bloom: seen.toJSON() }, auth: false });
     assert.ok(!feed.items.some((item) => item.title === 'Black holes'));
     assert.ok(feed.items.some((item) => item.title === 'Lava flow'), 'the rest is still suggested');
+  });
+
+  it('still lists the newest content of followed creators: the subscriptions feed ignores seen filters', async () => {
+    const client = clientFor(url);
+    const latest = await client.json<Page<ContentItem>>('/v1/creators/latest', {
+      body: { creators: ['stars'], bloom: seen.toJSON() },
+      auth: false,
+    });
+    assert.ok(latest.items.some((item) => item.title === 'Black holes'), 'the newest content is listed there, seen or not');
   });
 
   it('refuses filters that are too big or do not use the optimal hash count', async () => {

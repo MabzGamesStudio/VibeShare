@@ -1,4 +1,5 @@
-import { ExternalLink, Eye, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { Eye, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { Fragment } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedItem, MetadataField } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
@@ -23,17 +24,9 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
           {item.creator.name}
         </Link>
       ) : null;
-    case 'platform': {
-      const platform = platformOf(item.id);
-      const page = item.pageUrl ?? platform.page;
-      return page ? (
-        <a className="field-platform" href={page} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-          {platform.name} <ExternalLink size={11} />
-        </a>
-      ) : (
-        <span className="field-platform">{platform.name}</span>
-      );
-    }
+    case 'platform':
+      // The platform is just a label of where the content lives, not a link.
+      return <span className="field-platform">{platformOf(item.id).name}</span>;
     case 'likes': {
       // VibeShare votes, or the platform's own count while nobody voted here.
       const fromPlatform = !item.stats.likes && item.stats.platformLikes !== undefined;
@@ -81,6 +74,9 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
 export function Fields({ item, fields, variant = 'card' }: { item: FeedItem; fields: MetadataField[]; variant?: 'card' | 'overlay' | 'compact' }) {
   const rest = fields.filter((field) => field !== 'title' && field !== 'description');
   const showAvatar = variant === 'card' && fields.includes('creator') && item.creator;
+  // The "*watched" mark belongs with the identity of the content — right after the
+  // creator name and the platform — not at the end of the line among the numbers.
+  const afterIdentity = Math.max(rest.lastIndexOf('creator'), rest.lastIndexOf('platform'));
   return (
     <div className={`fields fields-${variant}`}>
       {showAvatar && (
@@ -96,10 +92,13 @@ export function Fields({ item, fields, variant = 'card' }: { item: FeedItem; fie
         )}
         {(rest.length > 0 || item.seen) && (
           <div className="fields-meta">
-            {rest.map((field) => (
-              <FieldValue key={field} item={item} field={field} />
+            {rest.map((field, index) => (
+              <Fragment key={field}>
+                <FieldValue item={item} field={field} />
+                {item.seen && index === afterIdentity ? <WatchedBadge /> : null}
+              </Fragment>
             ))}
-            {item.seen && <WatchedBadge />}
+            {item.seen && afterIdentity < 0 ? <WatchedBadge /> : null}
           </div>
         )}
         {fields.includes('description') && item.description && <p className="fields-description">{item.description}</p>}

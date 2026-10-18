@@ -193,6 +193,11 @@ export class ClientCore {
     const cursors = decodeCursor(cursor) ?? {};
     const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
     const priceKind = kind === 'search' ? 'search' : 'feed';
+    // The subscriptions feed ("latest") is just the newest content of the creators the
+    // user follows: the seen-content filters do not touch it. No filter travels along,
+    // and nothing is hidden, demoted or marked locally — it lists what is recent, seen
+    // or not. Every other feed and search results are filtered as the user chose.
+    const seenContent = kind !== 'latest';
     // Nodes filter by language too; this covers nodes that do not, and content they pass on.
     const languages = ((body.preferences ?? body.filters) as Preferences | undefined)?.languages ?? this.settings.preferences.languages;
     const wanted = (item: ContentItem) => matchesLanguages(item, languages);
@@ -200,11 +205,11 @@ export class ClientCore {
       const price = this.nodes.algorithmPrice(node, priceKind);
       // (Paid answers carry the new balance; nothing else is asked — except when the node
       // keeps the user's seen-content filter, which it only applies to the account.)
-      const identify = price > 0 || this.settings.nodeBloom.enabled;
+      const identify = price > 0 || (seenContent && this.settings.nodeBloom.enabled);
       return this.askJson<Page<ContentItem>>(
         node,
         path,
-        { ...body, ...this.bloomPayload(node), limit, cursor: cursors[node.id] ?? undefined },
+        { ...body, ...(seenContent ? this.bloomPayload(node) : {}), limit, cursor: cursors[node.id] ?? undefined },
         identify
       );
     };
@@ -216,7 +221,9 @@ export class ClientCore {
         try {
           const page = await ask(node, 24);
           return {
-            items: this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item))),
+            items: seenContent
+              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
+              : page.items.filter(wanted).map((item) => this.feedItem(node, item)),
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
           };
@@ -255,7 +262,7 @@ export class ClientCore {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    return { items: this.applySeenFilters(items), cursor: more ? encodeCursor(next) : undefined, errors };
+    return { items: seenContent ? this.applySeenFilters(items) : items, cursor: more ? encodeCursor(next) : undefined, errors };
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */

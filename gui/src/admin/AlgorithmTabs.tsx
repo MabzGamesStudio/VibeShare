@@ -992,6 +992,7 @@ interface Creator {
 }
 
 function Creators() {
+  const [q, setQ] = useState('');
   const [creators, setCreators] = useState<Creator[] | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -1004,7 +1005,9 @@ function Creators() {
     async (at: number, append: boolean) => {
       setLoading(true);
       try {
-        const result = await admin<{ creators: Creator[]; total?: number }>(`/v1/admin/creators?limit=${prefs.perPage}&cursor=${at}`);
+        const result = await admin<{ creators: Creator[]; total?: number }>(
+          `/v1/admin/creators?q=${encodeURIComponent(q)}&limit=${prefs.perPage}&cursor=${at}`
+        );
         setCreators((list) => (append ? [...(list ?? []), ...result.creators] : result.creators));
         setTotal(result.total ?? 0);
       } catch (e) {
@@ -1013,7 +1016,7 @@ function Creators() {
         setLoading(false);
       }
     },
-    [prefs.perPage, show]
+    [q, prefs.perPage, show]
   );
   useEffect(() => {
     setPage(0);
@@ -1032,6 +1035,9 @@ function Creators() {
             Add creator
           </button>
         </div>
+      </div>
+      <div className="row">
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search names or ids" style={{ flex: 1 }} />
       </div>
       {!creators ? (
         <Loading />

@@ -126,6 +126,14 @@ describe('a client browsing pages', async () => {
     await api('/api/subscriptions', { body: { id: 'nasa', name: 'NASA' } });
     const subscribed = await api<FeedResponse>('/api/browse', { body: { source: 'subscriptions' } });
     assert.deepEqual(subscribed.items.map((item) => item.title), ['Mountain timelapse']);
+
+    // The subscriptions tab just shows the most recent content, ignoring the bloom
+    // filters of seen content: opening something takes it out of the feed, not of this.
+    await api('/api/history', { body: { id: 'yt:video000001', title: 'Mountain timelapse' } });
+    const feed = await api<FeedResponse>('/api/browse', { body: { source: 'feed' } });
+    assert.ok(!feed.items.some((item) => item.id === 'yt:video000001'), 'the feed leaves out what was opened');
+    const still = await api<FeedResponse>('/api/browse', { body: { source: 'subscriptions' } });
+    assert.deepEqual(still.items.map((item) => item.title), ['Mountain timelapse'], 'the newest content stays listed here, seen or not');
   });
 
   it('saves page configurations and refuses bad ones', async () => {
