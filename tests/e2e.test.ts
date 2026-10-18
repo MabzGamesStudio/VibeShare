@@ -98,6 +98,12 @@ describe('a client using a provider and an algorithm node', async () => {
     assert.match(whole.headers.get('content-security-policy') ?? '', /^sandbox;/, 'untrusted content never runs in the daemon origin');
     assert.equal(whole.headers.get('x-content-type-options'), 'nosniff');
     assert.deepEqual(Buffer.from(await whole.arrayBuffer()), video);
+    // The download path is verified in full before it sends anything: what is saved is
+    // exactly the content the cid names (or the mismatch message, never wrong bytes).
+    const saved = await fetch(client.url() + view.downloadUrl!);
+    assert.equal(saved.status, 200);
+    assert.match(saved.headers.get('content-disposition') ?? '', /^attachment;/, 'served as a file to save');
+    assert.deepEqual(Buffer.from(await saved.arrayBuffer()), video, 'the downloaded content matches the expected cid');
     const state = await api<{ nodes: NodeEntry[] }>('/api/state');
     const balance = state.nodes.find((n) => n.id === provider.identity.id)!.balance;
     assert.equal(balance, 50 - 3, 'each chunk was paid once; the rest came from the cache');

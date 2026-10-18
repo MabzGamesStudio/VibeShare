@@ -10,10 +10,10 @@ import { useApp } from './state';
 /** Ids already reported in this session (the client drops repeats anyway). */
 const reported = new Set<string>();
 
-/** True while any filter that records previews is on. */
+/** True while any filter that records previews is on (and history is not paused). */
 export function useTrackingPreviews(): boolean {
   const { state } = useApp();
-  return Boolean(state?.settings.previewBloom.enabled || state?.settings.nodeBloom.enabled);
+  return Boolean((state?.settings.previewBloom.enabled || state?.settings.nodeBloom.enabled) && !state?.settings.pauseHistory);
 }
 
 /** Reports one shown preview to the client (once per content and session). */

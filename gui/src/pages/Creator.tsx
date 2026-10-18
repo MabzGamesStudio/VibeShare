@@ -1,3 +1,4 @@
+import { ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { CreatorView } from '../../../src/shared/clientapi';
@@ -10,38 +11,38 @@ import { compact } from '../components/feed/Fields';
 import { CARD_PAGE } from '../components/Feed';
 import { Avatar, CopyButton, Empty, Loading, Modal, Switch } from '../components/ui';
 import { useApp } from '../state';
+import { creatorPath } from '../util';
 
-/** The creator's related accounts: a horizontal scroll of cards to click through. */
+/**
+ * The creator's related accounts: a horizontal scroll of fixed-width cards to click
+ * through. Every card goes to a VibeShare page — the linked creator's page, or Explore
+ * for its handle where VibeShare has no creator id yet. The external channel links
+ * themselves live next to the page's main row instead.
+ */
 function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]; creatorName: string }) {
   if (!accounts.length) return null;
   return (
     <div style={{ marginTop: 14 }}>
       <div className="hint" style={{ marginBottom: 6 }}>Related accounts of {creatorName}</div>
-      <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 6 }}>
+      <div className="carousel">
         {accounts.map((account) => {
           const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
           const key = `${account.platform}:${account.handle}`;
-          const card = (
-            <div className="card" style={{ minWidth: 152, maxWidth: 184, textAlign: 'center', padding: 12, cursor: 'pointer', marginBottom: 0 }}>
-              <div className="tiny faint" style={{ minHeight: 15 }}>
-                {account.subscribers !== undefined ? `${compact(account.subscribers)} subscribers` : 'Subscribers unknown'}
+          const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
+          const to = account.creator ? creatorPath(account.creator) : `/search?q=${encodeURIComponent(handle)}`;
+          return (
+            <Link key={key} to={to} style={{ textDecoration: 'none', color: 'inherit' }}>
+              <div className="card carousel-card">
+                <Avatar name={account.handle} id={key} />
+                <div className="carousel-handle" title={account.handle}>
+                  {account.handle}
+                </div>
+                <div className="carousel-line" title={label}>
+                  {label}
+                </div>
+                <div className="carousel-line">{account.subscribers !== undefined ? `${compact(account.subscribers)} subscribers` : 'Subscribers unknown'}</div>
               </div>
-              <Avatar name={account.handle} id={key} />
-              <div style={{ marginTop: 6, fontWeight: 600 }}>{account.handle}</div>
-              <div className="tiny faint">{label}</div>
-            </div>
-          );
-          // A linked account goes to its VibeShare creator page; else to the actual URL.
-          return account.creator ? (
-            <Link key={key} to={`/creator/${encodeURIComponent(account.creator)}`} style={{ textDecoration: 'none', color: 'inherit' }}>
-              {card}
             </Link>
-          ) : account.url ? (
-            <a key={key} href={account.url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
-              {card}
-            </a>
-          ) : (
-            <div key={key}>{card}</div>
           );
         })}
       </div>
@@ -425,19 +426,46 @@ export function CreatorPage() {
     }
   };
 
+  // Where the creator's channel lives off VibeShare. These external links sit next to
+  // the page's main row; the related-accounts carousel below links inside VibeShare.
+  const channelLinks: { url: string; label: string }[] = [];
+  const seenUrls = new Set<string>();
+  for (const account of creator.accounts ?? []) {
+    if (account.url && !seenUrls.has(account.url)) {
+      seenUrls.add(account.url);
+      channelLinks.push({ url: account.url, label: SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform });
+    }
+  }
+  for (const url of creator.links ?? []) {
+    if (/^https?:\/\//.test(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      let label = 'Channel';
+      try {
+        label = new URL(url).host.replace(/^www\./, '');
+      } catch {
+        // not a parseable URL: the plain label stands
+      }
+      channelLinks.push({ url, label });
+    }
+  }
+
   return (
     <div className="page">
-      <div className="row" style={{ gap: 20, marginBottom: 30 }}>
+      <div className="row" style={{ gap: 20, marginBottom: 12, alignItems: 'flex-start' }}>
         <Avatar name={creator.name} id={creator.id} large icon={creator.icon} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h1>{creator.name}</h1>
+          {/* In line with the icon: just the text link of the creator. */}
+          <h1>
+            <Link to={creatorPath(creator.id)} className="link">
+              {creator.name}
+            </Link>
+          </h1>
           <div className="row small muted" style={{ marginTop: 6 }}>
             <span className="badge">{CREATOR_KIND_LABELS[creator.kind]}</span>
             {creator.keys?.length ? <span className="badge ok">Verified key</span> : <span className="badge">Name only</span>}
             <span>{view.items.length} item{view.items.length === 1 ? '' : 's'}</span>
           </div>
           {creator.description && <p className="muted" style={{ marginTop: 10 }}>{creator.description}</p>}
-          <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} />
           <div className="row" style={{ marginTop: 12 }}>
             <button className={subscribed ? '' : 'primary'} onClick={toggle}>
               {subscribed ? 'Subscribed' : 'Subscribe'}
@@ -445,7 +473,21 @@ export function CreatorPage() {
             <CopyButton text={creator.id} label="Copy creator id" small={false} />
           </div>
         </div>
+        {channelLinks.length > 0 && (
+          <div
+            className="row"
+            style={{ gap: 10, flexWrap: 'wrap', flexShrink: 0, justifyContent: 'flex-end', maxWidth: 240 }}
+            aria-label="External channel links"
+          >
+            {channelLinks.map((link) => (
+              <a key={link.url} className="link row small" href={link.url} target="_blank" rel="noreferrer" title={link.url}>
+                <ExternalLink size={13} /> {link.label}
+              </a>
+            ))}
+          </div>
+        )}
       </div>
+      <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} />
       {view.via && (
         <>
           <LinkAccounts creator={creator} nodeId={view.via} onSaved={load} />

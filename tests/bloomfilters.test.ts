@@ -133,19 +133,19 @@ describe('a client keeping track of what the user has seen', async () => {
   it('has the three filters in its settings, with their defaults and their own ranges', async () => {
     const { settings } = await api<{ settings: Settings }>('/api/state');
     assert.deepEqual(settings.selectedBloom, { enabled: true, bits: 10_000, expected: 10_000 });
-    assert.deepEqual(settings.previewBloom, { enabled: true, bits: 100_000, mode: 'hide', expected: 10_000 });
+    assert.deepEqual(settings.previewBloom, { enabled: true, bits: 100_000, expected: 10_000 });
     assert.deepEqual(settings.nodeBloom, { enabled: false, bits: 10_000, inline: true, expected: 10_000 });
+    assert.equal(settings.seenContentMode, 'hide', 'seen content is eliminated from the results by default');
 
     // The slider stops snap to 1, 10, 100, … bits within each range.
     const saved = await api<Settings>('/api/settings', {
       method: 'PATCH',
-      body: { selectedBloom: { enabled: true, bits: 12_345 }, previewBloom: { enabled: true, bits: 1_000_000_000_000, mode: 'hide' } },
+      body: { selectedBloom: { enabled: true, bits: 12_345 }, previewBloom: { enabled: true, bits: 1_000_000_000_000 } },
     });
     assert.equal(saved.selectedBloom.bits, 10_000);
     assert.equal(saved.previewBloom.bits, 1_000_000_000, 'the preview filter goes up to 1,000,000,000 bits');
     await assert.rejects(api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 0 } } }), /400/);
-    await assert.rejects(api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100, mode: 'shuffle' } } }), /400/);
-    await api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100_000, mode: 'hide' } } });
+    await assert.rejects(api('/api/settings', { method: 'PATCH', body: { seenContentMode: 'shuffle' } }), /400/);
 
     // The number of items a filter is made for is configurable too (it sets the hashes).
     const tuned = await api<Settings>('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 10_000, expected: 2500.4 } } });
@@ -167,27 +167,38 @@ describe('a client keeping track of what the user has seen', async () => {
   });
 
   it('remembers previews it saw on screen: hiding them, or only pushing them down', async () => {
+    await api('/api/bloom/reset', { body: { scope: 'selected' } });
+    await api('/api/bloom/reset', { body: { scope: 'preview' } });
     const all = await browse();
     const target = all.items[0];
     assert.ok(!target.seen, 'nothing is guessed watched before it was seen');
     await api('/api/bloom/mark', { body: { scope: 'preview', id: target.id, contentId: target.contentId, link: target.link } });
 
-    // The content page marks it "*watched" — a probabilistic guess, on hover explained.
-    const view = await api<ContentView>(`/api/content/${encodeURIComponent(target.id)}`);
-    assert.equal(view.seen, true, 'the content page shows the watched guess');
+    // Opening it the first time shows no "*watched": it is watched from the second time
+    // on, and this is the first. A preview is not a watch.
+    const first = await api<ContentView>(`/api/content/${encodeURIComponent(target.id)}`);
+    assert.ok(!first.seen, 'the first open does not show the watched guess');
 
     const hidden = await browse();
     assert.ok(!hidden.items.some((item) => item.id === target.id), 'hidden completely by default');
 
-    await api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100_000, mode: 'demote' } } });
+    await api('/api/settings', { method: 'PATCH', body: { seenContentMode: 'rank' } });
     const demoted = await browse();
-    assert.ok(demoted.items.some((item) => item.id === target.id), 'still shown in demote mode');
-    assert.equal(demoted.items.at(-1)!.id, target.id, 'but last of the previews');
-    assert.equal(demoted.items.at(-1)!.seen, true, 'and marked as seen');
+    assert.ok(demoted.items.some((item) => item.id === target.id), 'still shown when only the ranking is altered');
+    assert.equal(demoted.items.at(-1)!.id, target.id, 'but pushed below everything the user has not seen');
+    assert.ok(!demoted.items.at(-1)!.seen, 'still no watched mark on content that was only previewed');
+
+    // Once it has been opened, this and any later time shows it as watched.
+    await api('/api/history', { body: { id: target.id, title: target.title, contentId: target.contentId, link: target.link } });
+    const again = await api<ContentView>(`/api/content/${encodeURIComponent(target.id)}`);
+    assert.equal(again.seen, true, 'the second open shows the watched guess');
+    const listed = await browse();
+    assert.equal(listed.items.at(-1)?.id, target.id, 'still demoted');
+    assert.equal(listed.items.at(-1)?.seen, true, 'and the feeds mark it watched from then on');
   });
 
   it('resets a filter behind a warning, forgetting everything it held', async () => {
-    await api('/api/settings', { method: 'PATCH', body: { previewBloom: { enabled: true, bits: 100_000, mode: 'hide' } } });
+    await api('/api/settings', { method: 'PATCH', body: { seenContentMode: 'hide' } });
     const before = await api<BloomStatus>('/api/bloom');
     assert.ok(before.preview.added > 0);
     const after = await api<BloomStatus>('/api/bloom/reset', { body: { scope: 'preview' } });
@@ -215,7 +226,7 @@ describe('a client keeping track of what the user has seen', async () => {
       method: 'PATCH',
       body: {
         selectedBloom: { enabled: false, bits: 10_000 },
-        previewBloom: { enabled: false, bits: 100_000, mode: 'hide' },
+        previewBloom: { enabled: false, bits: 100_000 },
         nodeBloom: { enabled: true, bits: 10_000, inline: true },
       },
     });
@@ -255,5 +266,36 @@ describe('a client keeping track of what the user has seen', async () => {
     // A filter bigger than every tier is refused.
     await api('/api/settings', { method: 'PATCH', body: { nodeBloom: { enabled: true, bits: 1_000_000, inline: true } } });
     await assert.rejects(api(`/api/bloom/storage/${entry.id}`, { body: { tier: 'day' } }), /at most \d+ bits/);
+  });
+
+  it('pauses the whole history: viewing leaves no trace until it is back on', async () => {
+    await api('/api/settings', {
+      method: 'PATCH',
+      body: {
+        pauseHistory: true,
+        selectedBloom: { enabled: true, bits: 10_000, expected: 10_000 },
+        previewBloom: { enabled: true, bits: 100_000, expected: 10_000 },
+        nodeBloom: { enabled: true, bits: 10_000, expected: 10_000, inline: true },
+      },
+    });
+    const before = await api<BloomStatus>('/api/bloom');
+
+    // Viewing content now records nothing — neither history nor any of the filters.
+    await api('/api/history', { body: { id: 'yt:goat3', title: 'Mountain goat jumps' } });
+    await api('/api/bloom/mark', { body: { scope: 'preview', id: 'yt:goat3' } });
+    const library = await api<{ history: { id: string }[] }>('/api/library');
+    assert.ok(!library.history.some((h) => h.id === 'yt:goat3'), 'the history stands still');
+    const paused = await api<BloomStatus>('/api/bloom');
+    assert.equal(paused.selected.added, before.selected.added, 'no filter recorded anything');
+    assert.equal(paused.preview.added, before.preview.added);
+    assert.equal(paused.node.added, before.node.added);
+
+    // Back on, the same views count again.
+    await api('/api/settings', { method: 'PATCH', body: { pauseHistory: false } });
+    await api('/api/history', { body: { id: 'yt:goat3', title: 'Mountain goat jumps' } });
+    const library2 = await api<{ history: { id: string }[] }>('/api/library');
+    assert.equal(library2.history[0]?.id, 'yt:goat3');
+    const done = await api<BloomStatus>('/api/bloom');
+    assert.ok(done.selected.added > before.selected.added, 'and recording works again');
   });
 });

@@ -268,19 +268,25 @@ export class ClientNode {
       res.on('close', () => {
         closed = true;
       });
-      for await (const piece of answer.body) {
-        if (closed) break;
-        if (!res.write(piece)) {
-          await new Promise<void>((resolve) => {
-            const done = () => {
-              res.off('drain', done);
-              res.off('close', done);
-              resolve();
-            };
-            res.on('drain', done);
-            res.on('close', done);
-          });
+      try {
+        for await (const piece of answer.body) {
+          if (closed) break;
+          if (!res.write(piece)) {
+            await new Promise<void>((resolve) => {
+              const done = () => {
+                res.off('drain', done);
+                res.off('close', done);
+                resolve();
+              };
+              res.on('drain', done);
+              res.on('close', done);
+            });
+          }
         }
+      } catch (error) {
+        // A part stopped mid-stream (it could not be fetched again and verified): end here
+        // — content that does not match the expected cid is never sent on.
+        log.debug(`Stream of ${ctx.params.id} stopped early: ${(error as Error).message}`);
       }
       res.end();
     });

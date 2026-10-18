@@ -15,7 +15,7 @@ import type {
   PublishRequest,
   Settings,
 } from '../shared/clientapi.js';
-import type { BloomStatus } from '../shared/clientapi.js';
+import type { BloomStatus, SavedState, SearchHistoryItem } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
@@ -36,7 +36,7 @@ import {
   type SealKey,
 } from '../shared/profiles.js';
 import { SOFTWARE, claimSigningPayload, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
-import { bytesMatchCid } from '../shared/content.js';
+import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
@@ -44,7 +44,7 @@ import { embedFor, parseContentId, parseSource, platformOf, withSources } from '
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
 import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
-import { prepareClientSave } from './model.js';
+import { emptySavedState, prepareClientSave } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
 
@@ -157,22 +157,26 @@ export class ClientCore {
   }
 
   /**
-   * The local seen-content filters applied to a page: content the user has selected is
-   * never suggested again; previewed content is hidden again or only pushed down among
-   * the other previews, as the user chose. Colliding items are marked `seen`.
+   * The local seen-content filters applied to a page: what the user has opened and the
+   * previews they have seen both count as seen. Depending on the seen-content mode, seen
+   * content is either eliminated from the results completely, or kept with an altered
+   * ranking — pushed down below everything the user has not seen. The "*watched" mark
+   * only goes to content actually opened before (the selected filter): a preview is not
+   * a watch, so the first open of previewed content is never marked watched.
    */
   private applySeenFilters(items: FeedItem[]): FeedItem[] {
+    const rank = this.settings.seenContentMode === 'rank';
     const shown: FeedItem[] = [];
     const demoted: FeedItem[] = [];
     for (const item of items) {
       const identity = { id: item.id, contentId: item.contentId, link: item.link };
-      const seenSelected = this.blooms.sees('selected', identity);
-      const seenPreview = this.blooms.sees('preview', identity);
-      if (seenSelected) continue;
-      const marked = seenPreview ? { ...item, seen: true } : item;
-      if (seenPreview && this.settings.previewBloom.mode === 'hide') continue;
-      if (seenPreview && this.settings.previewBloom.mode === 'demote') demoted.push(marked);
-      else shown.push(marked);
+      const seen = this.blooms.sees('selected', identity) || this.blooms.sees('preview', identity);
+      if (!seen) {
+        shown.push(item);
+        continue;
+      }
+      const marked = this.blooms.sees('selected', identity) ? { ...item, seen: true } : item;
+      if (rank) demoted.push(marked);
     }
     return [...shown, ...demoted];
   }
@@ -182,6 +186,7 @@ export class ClientCore {
    * (round robin, without duplicates); "primary" uses the first node that answers.
    */
   async collect(kind: FeedKind, body: Record<string, unknown>, cursor?: string): Promise<FeedResponse> {
+    if (kind === 'search') this.rememberSearch(String(body.query ?? ''));
     const nodes = this.algorithmsFor(kind);
     const errors: FeedResponse['errors'] = [];
     if (!nodes.length) return { items: [], errors: [{ node: '', name: 'Client', error: 'No algorithm node is enabled' }] };
@@ -355,9 +360,11 @@ export class ClientCore {
       view.embeds = [];
       view.embedsDisabled = true;
     }
-    // The bloom filters may already know this content: shown as a guess of "watched".
+    // Whether this content was watched before is the selected filter's guess (the filter
+    // of what the user opened). A preview is not a watch: content only seen on screen shows
+    // no "*watched" on its first open — from the second open on it does.
     const identity = { id: view.id, contentId: view.item?.contentId, link: view.item?.link };
-    if (this.blooms.sees('selected', identity) || this.blooms.sees('preview', identity)) view.seen = true;
+    if (this.blooms.sees('selected', identity)) view.seen = true;
     return view;
   }
 
@@ -496,6 +503,8 @@ export class ClientCore {
       subscriptions: data.subscriptions,
       library: data.library,
       history: data.history,
+      saved: data.saved ?? emptySavedState(),
+      searchHistory: data.searchHistory ?? [],
       blooms: data.blooms ?? {},
     });
   }
@@ -514,6 +523,8 @@ export class ClientCore {
       subscriptions: data.subscriptions,
       library: data.library,
       history: data.history,
+      saved: data.saved ?? emptySavedState(),
+      searchHistory: data.searchHistory ?? [],
       blooms: data.blooms ?? {},
     };
     if (record.hidden) {
@@ -527,6 +538,8 @@ export class ClientCore {
       record.subscriptions = [];
       record.library = [];
       record.history = [];
+      record.saved = emptySavedState();
+      record.searchHistory = [];
       record.blooms = {};
       void this.store.hideIdentity?.();
     } else {
@@ -536,6 +549,8 @@ export class ClientCore {
       record.subscriptions = payload.subscriptions;
       record.library = payload.library;
       record.history = payload.history;
+      record.saved = payload.saved;
+      record.searchHistory = payload.searchHistory;
       record.blooms = payload.blooms;
     }
   }
@@ -550,6 +565,8 @@ export class ClientCore {
       subscriptions: record.subscriptions,
       library: record.library,
       history: record.history,
+      saved: record.saved ?? emptySavedState(),
+      searchHistory: record.searchHistory ?? [],
       blooms: record.blooms ?? {},
     };
   }
@@ -564,12 +581,16 @@ export class ClientCore {
     record.subscriptions = payload.subscriptions;
     record.library = payload.library;
     record.history = payload.history;
+    record.saved = payload.saved ?? emptySavedState();
+    record.searchHistory = payload.searchHistory ?? [];
     record.blooms = payload.blooms ?? {};
     data.nodes = payload.nodes;
     data.settings = normalizeSettings(payload.settings);
     data.subscriptions = payload.subscriptions;
     data.library = payload.library;
     data.history = payload.history;
+    data.saved = payload.saved ?? emptySavedState();
+    data.searchHistory = payload.searchHistory ?? [];
     data.blooms = payload.blooms ?? {};
     data.activeProfile = record.id;
     this.blooms.reloaded();
@@ -607,6 +628,8 @@ export class ClientCore {
         subscriptions: data.subscriptions,
         library: data.library,
         history: data.history,
+        saved: data.saved ?? emptySavedState(),
+        searchHistory: data.searchHistory ?? [],
         blooms: data.blooms ?? {},
       },
       key
@@ -675,6 +698,8 @@ export class ClientCore {
       subscriptions: [],
       library: [],
       history: [],
+      saved: emptySavedState(),
+      searchHistory: [],
       blooms: {},
     };
     if (hidden) {
@@ -695,6 +720,8 @@ export class ClientCore {
         subscriptions: [],
         library: [],
         history: [],
+        saved: emptySavedState(),
+        searchHistory: [],
         blooms: {},
       });
     } else {
@@ -810,6 +837,8 @@ export class ClientCore {
           subscriptions: [],
           library: [],
           history: [],
+          saved: emptySavedState(),
+          searchHistory: [],
           blooms: {},
         };
         // The fresh start is an ordinary public profile (drop any hidden/locked state).
@@ -925,19 +954,20 @@ export class ClientCore {
 
   /**
    * Fetches content from a link a provider offered (a provider sends a link instead of
-   * the bytes when it does not hold them). The data is accepted only when the bytes hash
-   * to the requested cid exactly.
+   * the bytes when it does not hold them). The retrieved content is accepted only when
+   * its bytes hash to the requested cid exactly — otherwise the answer says the
+   * downloaded content from the node/link does not match the expected cid.
    */
-  async fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number }> {
+  async fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number; error?: string }> {
     let data: Uint8Array;
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) return { ok: false, size: 0 };
+      if (!response.ok) return { ok: false, size: 0, error: `The link answered ${response.status}` };
       data = new Uint8Array(await response.arrayBuffer());
     } catch {
-      return { ok: false, size: 0 };
+      return { ok: false, size: 0, error: 'The link could not be reached' };
     }
-    if (!bytesMatchCid(data, cid)) return { ok: false, size: 0 }; // only accept an exact cid match
+    if (!bytesMatchCid(data, cid)) return { ok: false, size: 0, error: CID_MISMATCH }; // only an exact cid match
     return { ok: true, size: data.length };
   }
 
@@ -982,6 +1012,9 @@ export class ClientCore {
 
   remember(body: { id?: string; title?: string; contentId?: string; link?: string }) {
     if (!body.id) throw badRequest('id is required');
+    // History paused: what the user views now leaves no trace in the history or the
+    // bloom filters — both stand still until the pause is lifted.
+    if (this.settings.pauseHistory) return { ok: true, paused: true };
     const history = this.store.data.data.history.filter((h) => h.id !== body.id);
     history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
     this.store.data.data.history = history.slice(0, 200);
@@ -996,6 +1029,131 @@ export class ClientCore {
     this.store.data.data.history = [];
     this.store.changed();
     return { ok: true };
+  }
+
+  /** The queries the user searched for, most recent first (the search bar suggests from these). */
+  searchHistoryItems(): SearchHistoryItem[] {
+    this.store.data.data.searchHistory ??= [];
+    return this.store.data.data.searchHistory;
+  }
+
+  /** Remembers one search — only while the user keeps a search history (and it is not paused). */
+  private rememberSearch(query: string): void {
+    const text = String(query ?? '').trim().slice(0, 200);
+    if (!text || !this.settings.searchHistory || this.settings.pauseHistory) return;
+    const items = this.searchHistoryItems().filter((item) => item.query !== text);
+    items.unshift({ query: text, at: new Date().toISOString() });
+    this.store.data.data.searchHistory = items.slice(0, 200);
+    this.store.changed();
+  }
+
+  /** Clears the search history — all of it, or just the entries of one query. */
+  clearSearchHistory(query?: string): { items: SearchHistoryItem[] } {
+    const data = this.store.data.data;
+    data.searchHistory = query ? (data.searchHistory ?? []).filter((item) => item.query !== query) : [];
+    this.store.changed();
+    return { items: data.searchHistory };
+  }
+
+  // -------------------------------------------------------------------------
+  // Saved cids: the user saves any cid and sorts it into their own collections
+  // (one saved cid may sit in several collections at once).
+
+  /** The saved cids and their collections (the saved screen). */
+  savedState(): SavedState {
+    const data = this.store.data.data;
+    data.saved ??= emptySavedState();
+    data.saved.collections ??= [];
+    data.saved.items ??= [];
+    return data.saved;
+  }
+
+  /**
+   * Resolves collection names-or-ids to ids, making the named ones as needed —
+   * saving into a collection that does not exist yet simply creates it.
+   */
+  private collectionsFor(entries: unknown, saved: SavedState): string[] {
+    const ids: string[] = [];
+    for (const entry of Array.isArray(entries) ? entries.slice(0, 32) : []) {
+      const text = String(entry ?? '').trim().slice(0, 60);
+      if (!text) continue;
+      const found = saved.collections.find((c) => c.id === text || c.name.toLowerCase() === text.toLowerCase());
+      const collection = found ?? { id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, name: text, addedAt: new Date().toISOString() };
+      if (!found) saved.collections.push(collection);
+      if (!ids.includes(collection.id)) ids.push(collection.id);
+    }
+    return ids;
+  }
+
+  /** Saves a cid into the saved list, assigning it to the given collections. */
+  saveCid(body: { id?: string; title?: string; collections?: unknown }): SavedState {
+    const id = String(body.id ?? '').trim().slice(0, 4096);
+    if (!id) throw badRequest('id is required');
+    const saved = this.savedState();
+    const title = String(body.title ?? '').trim().slice(0, 300) || id;
+    const existing = saved.items.find((item) => item.id === id);
+    if (existing) {
+      existing.title = title;
+      if (body.collections !== undefined) existing.collections = this.collectionsFor(body.collections, saved);
+    } else {
+      saved.items.unshift({ id, title, addedAt: new Date().toISOString(), collections: this.collectionsFor(body.collections, saved) });
+    }
+    this.store.changed();
+    return saved;
+  }
+
+  /** Assigns a saved cid to different cid collections (or takes it out of some). */
+  assignSavedCid(id: string, body: { title?: string; collections?: unknown }): SavedState {
+    const saved = this.savedState();
+    const item = saved.items.find((entry) => entry.id === id);
+    if (!item) throw notFound('No such saved cid');
+    if (body.title !== undefined) item.title = String(body.title ?? '').trim().slice(0, 300) || item.title;
+    if (body.collections !== undefined) item.collections = this.collectionsFor(body.collections, saved);
+    this.store.changed();
+    return saved;
+  }
+
+  /** Takes a cid out of the saved list; it leaves every collection with it. */
+  unsaveCid(id: string): SavedState {
+    const saved = this.savedState();
+    saved.items = saved.items.filter((item) => item.id !== id);
+    this.store.changed();
+    return saved;
+  }
+
+  /** Makes a cid collection of the user's own (saving into a name makes it too). */
+  addCidCollection(body: { name?: string }): SavedState {
+    const saved = this.savedState();
+    const name = String(body.name ?? '').trim().slice(0, 60);
+    if (!name) throw badRequest('A collection name is required');
+    if (saved.collections.some((c) => c.name.toLowerCase() === name.toLowerCase())) throw badRequest('There is already a collection with that name');
+    saved.collections.push({ id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, name, addedAt: new Date().toISOString() });
+    this.store.changed();
+    return saved;
+  }
+
+  /** Renames one of the user's cid collections. */
+  renameCidCollection(id: string, body: { name?: string }): SavedState {
+    const saved = this.savedState();
+    const collection = saved.collections.find((c) => c.id === id);
+    if (!collection) throw notFound('No such collection');
+    const name = String(body.name ?? '').trim().slice(0, 60);
+    if (!name) throw badRequest('A collection name is required');
+    if (saved.collections.some((c) => c.id !== id && c.name.toLowerCase() === name.toLowerCase())) {
+      throw badRequest('There is already a collection with that name');
+    }
+    collection.name = name;
+    this.store.changed();
+    return saved;
+  }
+
+  /** Removes a collection; the cids saved in it stay saved (they just leave it). */
+  removeCidCollection(id: string): SavedState {
+    const saved = this.savedState();
+    saved.collections = saved.collections.filter((c) => c.id !== id);
+    for (const item of saved.items) item.collections = item.collections.filter((c) => c !== id);
+    this.store.changed();
+    return saved;
   }
 
   /**

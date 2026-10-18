@@ -255,6 +255,53 @@ code,
   outline: none;
 }
 
+/* The search bar's dropdown of matching past searches (Settings → Seen turns it off). */
+.searchbox-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  max-width: 640px;
+  display: flex;
+}
+
+.search-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 6px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-suggest button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-suggest button:hover,
+.search-suggest button.active {
+  background: var(--bg-hover);
+}
+
 .status-pill {
   display: flex;
   align-items: center;
@@ -581,6 +628,47 @@ label.field > span.hint,
 .card h2 + p {
   margin-top: 6px;
   color: var(--text-dim);
+}
+
+/* The related-accounts carousel on the creator page: fixed-width cards in a row that
+   scrolls sideways. Long handles and labels are cut off with an ellipsis — they never
+   spill out of the card or stretch it. */
+.carousel {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.carousel-card {
+  flex: 0 0 auto;
+  width: 152px;
+  margin: 0;
+  padding: 14px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.carousel-handle,
+.carousel-line {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.carousel-handle {
+  font-weight: 600;
+}
+
+.carousel-line {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-faint);
 }
 
 .muted {

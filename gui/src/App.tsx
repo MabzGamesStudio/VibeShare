@@ -1,8 +1,9 @@
-import { Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
+import { BookMarked, Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { NodeEntry } from '../../src/shared/clientapi';
+import type { NodeEntry, SearchHistoryItem } from '../../src/shared/clientapi';
 import { newPageId, presetPage } from '../../src/shared/clientdefaults';
+import { api } from './api';
 import { PageIconView } from './components/feed/icons';
 import { PageEditor, pagePath } from './components/feed/PageEditor';
 import { PageView } from './components/feed/PageView';
@@ -11,6 +12,7 @@ import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
 import { DualPage } from './pages/Dual';
 import { EarnPage } from './pages/Earn';
+import { HistoryPage } from './pages/History';
 import { LibraryPage } from './pages/Library';
 import { NodesPage } from './pages/Nodes';
 import { PublishPage } from './pages/Publish';
@@ -36,25 +38,89 @@ function NavItem({ to, icon, label, count }: { to: string; icon: React.ReactNode
 function TopSearch() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { state } = useApp();
   const [query, setQuery] = useState('');
+  const [past, setPast] = useState<SearchHistoryItem[]>([]);
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const suggest = Boolean(state?.settings.searchSuggestions);
   useEffect(() => {
     if (location.pathname === '/search') setQuery(new URLSearchParams(location.search).get('q') ?? '');
   }, [location]);
+  useEffect(() => {
+    if (!suggest) return setPast([]);
+    api<{ items: SearchHistoryItem[] }>('/api/search-history')
+      .then((answer) => setPast(answer.items))
+      .catch(() => setPast([]));
+  }, [location.pathname, location.search, suggest]);
+
+  // Matching past searches under the search box, most relevant first (recent ones lead).
+  const needle = query.trim().toLowerCase();
+  const shown = (needle ? past.filter((item) => item.query.toLowerCase().includes(needle)) : past).slice(0, 8);
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const text = query.trim();
+    const picked = open && active >= 0 ? shown[active]?.query : undefined;
+    const text = (picked ?? query).trim();
+    setOpen(false);
     // Pasting a content id or link opens it directly.
     if (parseContentId(text)) navigate(watchPath(text));
     else navigate(`/search?q=${encodeURIComponent(text)}`);
   };
   return (
-    <form className="searchbox" onSubmit={submit} role="search">
-      <SearchIcon size={18} className="faint" />
-      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search, or paste a content id" aria-label="Search" />
-      <button type="submit" className="ghost small round">
-        Search
-      </button>
-    </form>
+    <div className="searchbox-wrap">
+      <form className="searchbox" onSubmit={submit} role="search">
+        <SearchIcon size={18} className="faint" />
+        <input
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+            setActive(-1);
+          }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setOpen(false);
+            if (!open || !shown.length) return;
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setActive((at) => (at + 1) % shown.length);
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setActive((at) => (at <= 0 ? shown.length - 1 : at - 1));
+            }
+          }}
+          placeholder="Search, or paste a content id"
+          aria-label="Search"
+        />
+        <button type="submit" className="ghost small round">
+          Search
+        </button>
+      </form>
+      {suggest && open && shown.length > 0 && (
+        <div className="search-suggest" role="listbox" aria-label="Past searches">
+          {shown.map((item, index) => (
+            <button
+              key={item.query}
+              type="button"
+              role="option"
+              aria-selected={index === active}
+              className={index === active ? 'active' : ''}
+              title={item.query}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setQuery(item.query);
+                setOpen(false);
+                navigate(`/search?q=${encodeURIComponent(item.query)}`);
+              }}
+            >
+              <SearchIcon size={13} className="faint" /> {item.query}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -151,7 +217,8 @@ export function App() {
           <div className="nav-divider" />
           <NavItem to="/search" icon={<Compass size={19} />} label="Explore" />
           <NavItem to="/subscriptions" icon={<Users size={19} />} label="Subscriptions" count={state?.subscriptions.length} />
-          <NavItem to="/library" icon={<History size={19} />} label="Library" />
+          <NavItem to="/library" icon={<BookMarked size={19} />} label="Library" />
+          <NavItem to="/history" icon={<History size={19} />} label="History" />
           <NavItem to="/publish" icon={<Upload size={19} />} label="Publish" />
           <div className="nav-section">Network</div>
           <NavItem to="/nodes" icon={<Network size={19} />} label="Nodes" count={state?.nodes.length} />
@@ -214,6 +281,7 @@ export function App() {
               <Route path="/creator/:id" element={<CreatorPage />} />
               <Route path="/publish" element={<PublishPage />} />
               <Route path="/library" element={<LibraryPage />} />
+              <Route path="/history" element={<HistoryPage />} />
               <Route path="/nodes" element={<NodesPage />} />
               <Route path="/wallet" element={<WalletPage />} />
               <Route path="/earn" element={<EarnPage />} />

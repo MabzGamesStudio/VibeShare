@@ -34,6 +34,8 @@ import { api, errorMessage, uploadFile } from '../api';
 import { FormatIcon } from '../components/ContentCard';
 import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
+import { DownloadButton } from '../components/Download';
+import { SaveCidButton } from '../components/SaveCid';
 import { ShareButton } from '../components/Share';
 import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
 import { useApp } from '../state';
@@ -169,15 +171,6 @@ function NativePlayer({
         </a>
       </div>
     </div>
-  );
-}
-
-function DownloadButton({ url, name }: { url: string; name?: string }) {
-  const href = useMediaSrc(url);
-  return (
-    <a className="button" href={href} download={name}>
-      <Download size={16} /> Download
-    </a>
   );
 }
 
@@ -982,7 +975,7 @@ export function WatchPage() {
             {creator && (
               <div className="row" style={{ marginRight: 12 }}>
                 <Link to={creatorPath(creator.id)}>
-                  <Avatar name={creator.name} id={creator.id} />
+                  <Avatar name={creator.name} id={creator.id} icon={creator.icon} />
                 </Link>
                 <div>
                   <Link to={creatorPath(creator.id)} style={{ fontWeight: 600 }}>
@@ -1012,6 +1005,7 @@ export function WatchPage() {
             <button onClick={() => setClaiming(true)} title="Report the numbers you see on its platform (views, likes, comments…)">
               <BarChart3 size={16} /> Report stats
             </button>
+            <SaveCidButton id={view.id} title={title} />
             {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
             <ShareButton target={{ id: view.id, title }} className="" label="Share" />
             <CopyButton text={view.id} label="Copy id" small={false} />

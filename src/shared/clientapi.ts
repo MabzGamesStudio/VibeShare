@@ -18,10 +18,7 @@ export interface BloomFilterSettings {
 }
 
 /** Content previews the user has seen on screen (separate from content actually selected). */
-export interface PreviewBloomSettings extends BloomFilterSettings {
-  /** Completely hide previewed content again, or only push it down among other previews. */
-  mode: 'hide' | 'demote';
-}
+export interface PreviewBloomSettings extends BloomFilterSettings {}
 
 /**
  * The seen-content filter the client sends to search algorithm nodes, who then stop
@@ -50,7 +47,7 @@ export interface BloomFilterStatus {
 /** The state of all three seen-content filters (GET /api/bloom). */
 export interface BloomStatus {
   selected: BloomFilterStatus;
-  preview: BloomFilterStatus & { mode: 'hide' | 'demote' };
+  preview: BloomFilterStatus;
   node: BloomFilterStatus & { inline: boolean };
 }
 
@@ -244,12 +241,27 @@ export interface Settings {
   theme: 'system' | 'dark' | 'light';
   /** Tor, for the desktop app and `vibeshare client` (in a browser, use Tor Browser). */
   tor: TorSettings;
+  /**
+   * Pause recording what the user views: content search history and every bloom filter
+   * (selected, previewed, and the copy sent to search nodes) stand still until it is off.
+   */
+  pauseHistory: boolean;
+  /** Whether what the user searches for is kept as a search history at all. */
+  searchHistory: boolean;
+  /** Whether the search bar shows matching past searches under the search box. */
+  searchSuggestions: boolean;
   /** Content you have selected (opened): a local bloom filter of what you have already seen. */
   selectedBloom: BloomFilterSettings;
   /** Content previews you have seen on screen, without selecting them. */
   previewBloom: PreviewBloomSettings;
   /** The seen-content filter sent to search algorithm nodes (they stop suggesting what collides). */
   nodeBloom: NodeBloomSettings;
+  /**
+   * What the bloom filters do with content the user has seen, in feeds and in search
+   * results: `hide` eliminates it completely, `rank` only alters its ranking (it is
+   * pushed down among the results instead of being removed).
+   */
+  seenContentMode: 'hide' | 'rank';
 }
 
 export interface TorSettings {
@@ -284,6 +296,34 @@ export interface HistoryItem {
   id: string;
   title: string;
   at: string;
+}
+
+/** One search the user ran, kept for the search bar to suggest (when they want it). */
+export interface SearchHistoryItem {
+  query: string;
+  at: string;
+}
+
+/** A collection of saved cids the user made (one saved cid may sit in several). */
+export interface CidCollection {
+  id: string;
+  name: string;
+  addedAt: string;
+}
+
+/** A cid the user saved, assigned to any number of their cid collections. */
+export interface SavedCid {
+  id: string;
+  title: string;
+  addedAt: string;
+  /** Ids of the cid collections this saved cid is assigned to. */
+  collections: string[];
+}
+
+/** Saved cids and their collections, as the saved screen shows them. */
+export interface SavedState {
+  collections: CidCollection[];
+  items: SavedCid[];
 }
 
 /** A profile of this client, as the GUI lists them. */

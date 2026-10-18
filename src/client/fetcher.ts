@@ -1,4 +1,4 @@
-import { chunkIdOf, chunksForRange, contentIdOf, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { chunkIdOf, chunksForRange, CID_MISMATCH, contentIdOf, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import type { NodeEntry } from '../shared/clientapi.js';
 import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
@@ -52,12 +52,18 @@ export class Fetcher {
     const cached = this.manifests.get(cid);
     if (cached && this.nodes.get(cached.provider.id)?.enabled) return cached;
     const attempts: { node: string; name: string; error: string }[] = [];
+    let mismatched = false;
     const skipped = this.nodes.active('provider').filter((node) => !this.nodes.affordable(node, this.nodes.providerPrice(node)));
     for (const node of skipped) attempts.push({ node: node.id, name: node.name, error: 'Above your price limit' });
     for (const provider of this.candidates()) {
       try {
         const manifest = validateManifest(await this.nodes.client(provider).json(`/v1/content/${cid}`, { timeoutMs: 10000 }));
-        if (contentIdOf(manifest) !== cid) throw new Error('The provider sent a manifest that does not match the id');
+        // The retrieved content must match the cid the client asked for exactly: a manifest
+        // is only taken when its own hash is exactly that cid.
+        if (contentIdOf(manifest) !== cid) {
+          mismatched = true;
+          throw new Error(CID_MISMATCH);
+        }
         const hit = { manifest, provider };
         this.manifests.set(cid, hit);
         return hit;
@@ -66,7 +72,7 @@ export class Fetcher {
         attempts.push({ node: provider.id, name: provider.name, error: notHere ? 'Does not have it' : errorText(error) });
       }
     }
-    throw new FetchError('No provider node has this content', attempts);
+    throw new FetchError(mismatched ? CID_MISMATCH : 'No provider node has this content', attempts);
   }
 
   /** One verified chunk: from the cache, or from a provider (paying its price). */
@@ -85,11 +91,17 @@ export class Fetcher {
 
   private async download(cid: string, chunkId: string, preferred: string): Promise<Buffer> {
     const attempts: { node: string; name: string; error: string }[] = [];
+    let mismatched = false;
     for (const provider of this.candidates(preferred)) {
       try {
         const response = await this.nodes.client(provider).fetch(`/v1/chunks/${chunkId}?cid=${cid}`, { timeoutMs: 60000 });
         const data = Buffer.from(await response.arrayBuffer());
-        if (chunkIdOf(data) !== chunkId) throw new Error('Corrupt chunk');
+        // The downloaded content must match the expected id exactly (each chunk id is the
+        // hash of its bytes); anything else is not kept or sent on.
+        if (chunkIdOf(data) !== chunkId) {
+          mismatched = true;
+          throw new Error(CID_MISMATCH);
+        }
         await this.cache.put(chunkId, data);
         return data;
       } catch (error) {
@@ -97,7 +109,7 @@ export class Fetcher {
         log.debug(`Chunk ${chunkId.slice(0, 12)} from ${provider.name}: ${errorText(error)}`);
       }
     }
-    throw new FetchError('No provider could send this part of the content', attempts);
+    throw new FetchError(mismatched ? CID_MISMATCH : 'No provider could send this part of the content', attempts);
   }
 
   /** Estimated credits to fetch the whole content from a provider (ignoring free allowances and cache). */
@@ -146,6 +158,10 @@ export class Fetcher {
     if (download) headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(manifest.name)}`;
     if (size === 0) return { status: 200, headers, body: null };
     const { first, last, offset } = chunksForRange(manifest, start, end);
+    // A download is verified in full before answering: the manifest was only accepted when
+    // its hash is exactly the requested cid, and every chunk only when its bytes hash to
+    // its id — so what is then sent is exactly the content that cid names, or nothing.
+    if (download) for (let index = first; index <= last; index++) await this.chunk(cid, index);
     const firstChunk = await this.chunk(cid, first);
     return { status: partial ? 206 : 200, headers, body: this.pieces(cid, manifest, firstChunk, first, last, offset, end, download ? 4 : 2) };
   }

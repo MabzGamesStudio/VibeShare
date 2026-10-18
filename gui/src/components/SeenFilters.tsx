@@ -235,6 +235,46 @@ export function SeenFiltersSection() {
 
   return (
     <>
+      <div className="card form-stack" id="seen-mode">
+        <h2>Seen content</h2>
+        <label className="field">
+          What happens to content the filters say you have seen
+          <select value={s.seenContentMode} onChange={(e) => void updateSettings({ seenContentMode: e.target.value as Settings['seenContentMode'] })}>
+            <option value="hide">Completely eliminate it from feeds and search results</option>
+            <option value="rank">Only alter the ranking among the results, prioritizing content you have not seen</option>
+          </select>
+        </label>
+        <span className="hint">
+          Applies to everything the filters recognize — content you opened and previews you have seen — in every feed and every search result
+          list. The filters are probabilistic: now and then an unseen item is treated as seen.
+        </span>
+      </div>
+
+      <div className="card form-stack" id="history">
+        <h2>Search history</h2>
+        <Switch
+          checked={s.searchHistory}
+          onChange={(searchHistory) => void updateSettings({ searchHistory })}
+          label="Keep a history of what you search for"
+        />
+        <Switch
+          checked={s.searchSuggestions}
+          onChange={(searchSuggestions) => void updateSettings({ searchSuggestions })}
+          label="Suggest matching past searches under the search box"
+        />
+        <Switch
+          checked={s.pauseHistory}
+          onChange={(pauseHistory) => void updateSettings({ pauseHistory })}
+          label="Pause all history while I browse"
+        />
+        <span className="hint">
+          The search history is kept on this device only, and the History page lists it — one click clears it. While everything is paused, viewing
+          or searching leaves no trace: no history entries and every bloom filter below (what you opened, previews you have seen, and the copy sent
+          to search nodes) stands still. The filters keep hiding or demoting by what they already know — nothing you do now counts against anything
+          later.
+        </span>
+      </div>
+
       <div className="card form-stack" id="seen-selected">
         <div className="row">
           <MousePointerClick size={20} />
@@ -247,8 +287,8 @@ export function SeenFiltersSection() {
         />
         <span className="hint">
           A bloom filter on this device records each content you select by its content id and each of its links, hashed — never the ids
-          themselves. Content that collides with the filter counts as already seen and is left out of feeds and searches. Once a filter fills up
-          it can mistake other content for seen.
+          themselves. Content that collides with the filter counts as already seen, and the choice at the top decides what happens to it. Once
+          a filter fills up it can mistake other content for seen.
         </span>
         <BitsSlider stops={8} value={s.selectedBloom.bits} onChange={(bits) => patchSelected({ bits })} />
         <ExpectedInput value={s.selectedBloom.expected} onChange={(expected) => patchSelected({ expected })} />
@@ -270,15 +310,8 @@ export function SeenFiltersSection() {
         />
         <span className="hint">
           Kept apart from what you actually opened: this filter records every content whose preview you have seen while browsing, in its own
-          filter with its own size.
+          filter with its own size. The choice at the top decides what happens to it.
         </span>
-        <label className="field">
-          When a preview has been seen before
-          <select value={s.previewBloom.mode} onChange={(e) => patchPreview({ mode: e.target.value as Settings['previewBloom']['mode'] })}>
-            <option value="hide">Hide that content completely</option>
-            <option value="demote">Only push it down among the other previews</option>
-          </select>
-        </label>
         <BitsSlider stops={9} value={s.previewBloom.bits} onChange={(bits) => patchPreview({ bits })} />
         <ExpectedInput value={s.previewBloom.expected} onChange={(expected) => patchPreview({ expected })} />
         <FilterStatus status={status?.preview} />

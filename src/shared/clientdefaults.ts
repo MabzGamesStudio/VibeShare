@@ -87,9 +87,13 @@ export function defaultSettings(): Settings {
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
     theme: 'system',
     tor: { mode: 'onion', proxy: '' },
+    pauseHistory: false,
+    searchHistory: true,
+    searchSuggestions: true,
     selectedBloom: { enabled: true, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
-    previewBloom: { enabled: true, bits: 100_000, mode: 'hide', expected: BLOOM_EXPECTED_ITEMS },
+    previewBloom: { enabled: true, bits: 100_000, expected: BLOOM_EXPECTED_ITEMS },
     nodeBloom: { enabled: false, bits: 10_000, inline: true, expected: BLOOM_EXPECTED_ITEMS },
+    seenContentMode: 'hide',
   };
 }
 
@@ -145,6 +149,10 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     // Revision 2: titles are filtered by language, English only unless the user picked languages.
     if (!saved.preferences?.languages?.length) merged.preferences.languages = [...(base.preferences.languages ?? [])];
   }
+  // The preview filter's old hide/demote choice became the seen-content mode.
+  const legacyMode = (saved?.previewBloom as { mode?: string } | undefined)?.mode;
+  if (saved && saved.seenContentMode === undefined && legacyMode === 'demote') merged.seenContentMode = 'rank';
+  delete (merged.previewBloom as { mode?: string }).mode;
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -227,6 +235,9 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   }
   if (!['blend', 'primary'].includes(next.feedMode)) throw new Error('feedMode is blend or primary');
   if (!['warn', 'hide', 'allow'].includes(next.unknownContent)) throw new Error('unknownContent is warn, hide or allow');
+  next.pauseHistory = Boolean(next.pauseHistory);
+  next.searchHistory = Boolean(next.searchHistory);
+  next.searchSuggestions = Boolean(next.searchSuggestions);
   // Seen-content bloom filters: the size is one of 1, 10, 100, … bits; the preview filter
   // either hides what was previewed or only pushes it down among the other previews.
   try {
@@ -239,7 +250,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   } catch (error) {
     throw new Error((error as Error).message);
   }
-  if (!['hide', 'demote'].includes(next.previewBloom.mode)) throw new Error('Previewed content is hidden or demoted');
+  if (!['hide', 'rank'].includes(next.seenContentMode)) throw new Error('Seen content is hidden or ranked lower');
   next.selectedBloom.enabled = Boolean(next.selectedBloom.enabled);
   next.previewBloom.enabled = Boolean(next.previewBloom.enabled);
   next.nodeBloom.enabled = Boolean(next.nodeBloom.enabled);

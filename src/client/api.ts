@@ -222,6 +222,19 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/library', () => ({ published: core.store.data.data.library, history: core.store.data.data.history }));
   on('POST', '/api/history', async (request) => core.remember(await request.json()));
   on('DELETE', '/api/history', () => core.forgetHistory());
+  // Search history: what the search bar suggests from — viewable and clearable in History
+  on('GET', '/api/search-history', () => ({ items: core.searchHistoryItems() }));
+  on('DELETE', '/api/search-history', async (request) =>
+    core.clearSearchHistory((await request.json<{ query?: string }>().catch(() => ({ query: undefined }))).query)
+  );
+  // Saved cids and the collections the user sorts them into (a cid may be in several)
+  on('GET', '/api/saved', () => core.savedState());
+  on('POST', '/api/saved', async (request) => core.saveCid(await request.json()));
+  on('PATCH', '/api/saved/:id', async (request) => core.assignSavedCid(request.params.id, await request.json()));
+  on('DELETE', '/api/saved/:id', (request) => core.unsaveCid(request.params.id));
+  on('POST', '/api/cid-collections', async (request) => core.addCidCollection(await request.json()));
+  on('PATCH', '/api/cid-collections/:id', async (request) => core.renameCidCollection(request.params.id, await request.json()));
+  on('DELETE', '/api/cid-collections/:id', (request) => core.removeCidCollection(request.params.id));
 
   // Seen-content bloom filters: what was selected, what was previewed on screen, and the
   // copy whose bits go to search algorithm nodes (so they stop suggesting what collides).

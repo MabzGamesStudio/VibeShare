@@ -20,7 +20,7 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
     case 'creator':
       return item.creator ? (
         <Link to={creatorPath(item.creator.id)} className="field-creator" onClick={(e) => e.stopPropagation()}>
-          <Avatar name={item.creator.name} id={item.creator.id} icon={item.creator.icon} /> {item.creator.name}
+          {item.creator.name}
         </Link>
       ) : null;
     case 'platform': {
@@ -85,7 +85,7 @@ export function Fields({ item, fields, variant = 'card' }: { item: FeedItem; fie
     <div className={`fields fields-${variant}`}>
       {showAvatar && (
         <Link to={creatorPath(item.creator!.id)} className="fields-avatar">
-          <Avatar name={item.creator!.name} id={item.creator!.id} />
+          <Avatar name={item.creator!.name} id={item.creator!.id} icon={item.creator!.icon} />
         </Link>
       )}
       <div className="fields-body">

@@ -6,6 +6,8 @@ import { usePreviewSeen } from '../../bloom';
 import { aspectOf, imageFor } from '../../media';
 import { formatDuration, watchPath } from '../../util';
 import { ShareButton } from '../Share';
+import { PostDownload } from '../Download';
+import { SaveCidButton } from '../SaveCid';
 import { WatchedBadge } from '../ui';
 import { Fields } from './Fields';
 import { MediaView, Poster } from './Player';
@@ -49,6 +51,8 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
         </button>
         {share && (
           <span className="thumb-actions">
+            <SaveCidButton id={item.id} title={item.title} className="overlay-button" compact />
+            <PostDownload item={item} />
             <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
           </span>
         )}
@@ -69,6 +73,8 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
       </Link>
       {share && (
         <span className="thumb-actions">
+          <SaveCidButton id={item.id} title={item.title} className="overlay-button" compact />
+          <PostDownload item={item} />
           <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
         </span>
       )}
@@ -155,6 +161,8 @@ function MasonryTile({ item, page, inline }: { item: FeedItem; page: PageConfig;
       <div className="masonry-media" style={aspect ? { aspectRatio: String(aspect) } : undefined}>
         <TileMedia item={item} inline={inline} src={src} />
         <span className="thumb-actions">
+          <SaveCidButton id={item.id} title={item.title} className="overlay-button" compact />
+          <PostDownload item={item} />
           <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
         </span>
       </div>

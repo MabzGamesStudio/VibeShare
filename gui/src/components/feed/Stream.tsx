@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
 import { usePreviewSeen } from '../../bloom';
+import { PostDownload } from '../Download';
+import { SaveCidButton } from '../SaveCid';
 import { aspectOf, imageFor, playableFor } from '../../media';
 import { watchPath } from '../../util';
 import { ShareButton } from '../Share';
@@ -38,7 +40,11 @@ function StreamPost({ item, page, ipfsGateway }: { item: FeedItem; page: PageCon
       </div>
       <div className="post-footer">
         <Fields item={item} fields={page.fields} variant="card" />
-        <ShareButton target={{ id: item.id, title: item.title }} />
+        <div className="row">
+          <SaveCidButton id={item.id} title={item.title} className="ghost icon" compact />
+          <PostDownload item={item} className="ghost icon" />
+          <ShareButton target={{ id: item.id, title: item.title }} />
+        </div>
       </div>
     </article>
   );

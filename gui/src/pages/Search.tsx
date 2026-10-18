@@ -28,7 +28,7 @@ function CreatorResults({ query }: { query: string }) {
       <div className="page-list">
         {creators.map((creator) => (
           <Link key={creator.id} to={`/creator/${encodeURIComponent(creator.id)}`} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <Avatar name={creator.name} id={creator.id} />
+            <Avatar name={creator.name} id={creator.id} icon={creator.icon} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <strong>{creator.name}</strong>
               <div className="tiny faint">

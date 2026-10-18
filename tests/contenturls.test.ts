@@ -80,6 +80,30 @@ describe('downloadable content copies (URLs and base URLs)', async () => {
     assert.ok(!bytesMatchCid(tampered, cid), 'tampered bytes are not processed');
   });
 
+  it('accepts data from a link only on an exact cid match, and says so clearly when it does not match', async () => {
+    const { dir, cleanup } = tempDir();
+    const { client: node, api } = await startClient(dir);
+    try {
+      const data = randomBytesOf(512, 31);
+      const cid = bytesCid(data);
+      files.set('good.bin', data);
+      const tampered = Buffer.from(data);
+      tampered[0] ^= 0xff;
+      files.set('bad.bin', tampered);
+
+      const good = await api<{ ok: boolean; size: number }>(`/api/content-link`, { method: 'POST', body: { url: `${origin}/good.bin`, cid } });
+      assert.equal(good.ok, true, 'the exact bytes are accepted');
+      assert.equal(good.size, data.length);
+
+      const bad = await api<{ ok: boolean; error: string }>(`/api/content-link`, { method: 'POST', body: { url: `${origin}/bad.bin`, cid } });
+      assert.equal(bad.ok, false, 'tampered bytes are refused');
+      assert.equal(bad.error, 'The downloaded content from the node/link does not match the expected cid');
+    } finally {
+      await node.stop();
+      cleanup();
+    }
+  });
+
   it('caps how many content URLs and base URLs a client may add', async () => {
     await assert.rejects(client.json('/v1/content-urls', { body: { baseUrl: `${origin}/base` } }), /at most 1 base URLs/);
     await assert.rejects(client.json('/v1/content-urls', { body: { cid: bytesCid(randomBytesOf(16, 9)), url: `${origin}/x` } }), /at most 1 content URLs/);

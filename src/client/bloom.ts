@@ -70,6 +70,8 @@ export class BloomBook {
 
   /** Records one content in the given filters (only those that are on). Keys added anywhere. */
   mark(input: ContentIdentity, scopes: BloomScope[]): number {
+    // History paused: viewing content must not touch any filter until it is unpaused.
+    if (this.store.data.data.settings.pauseHistory) return 0;
     let newKeys = 0;
     for (const scope of scopes) {
       if (!(this.setting(scope) as BloomFilterSettings).enabled) continue;
@@ -110,11 +112,10 @@ export class BloomBook {
         added: filter.added,
       };
     };
-    const preview = this.setting('preview') as PreviewBloomSettings;
     const node = this.store.data.data.settings.nodeBloom;
     return {
       selected: of('selected'),
-      preview: { ...of('preview'), mode: preview.mode },
+      preview: of('preview'),
       node: { ...of('node'), inline: node.inline },
     };
   }

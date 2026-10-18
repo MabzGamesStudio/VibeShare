@@ -67,6 +67,12 @@ export function bytesCid(data: Uint8Array): string {
   return NATIVE_PREFIX + base32Encode(sha256(data));
 }
 
+/**
+ * What the user is told when content retrieved or downloaded from a node or a link does
+ * not hash to the expected cid. Nothing is kept, played or saved in that case.
+ */
+export const CID_MISMATCH = 'The downloaded content from the node/link does not match the expected cid';
+
 /** True when these bytes hash to exactly this content id (a downloadable copy's cid). */
 export function bytesMatchCid(data: Uint8Array, cid: string): boolean {
   return cid === bytesCid(data) || cid === chunkIdOf(data);
