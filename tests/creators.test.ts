@@ -399,3 +399,45 @@ describe('an operator searching creators by name', async () => {
     assert.deepEqual(none.creators, []);
   });
 });
+
+describe('an operator editing creator details', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:solo', name: 'Solo Rider', kind: 'person' } });
+
+  it('sees every detail of a creator and can change any of them', async () => {
+    await admin(url, '/v1/admin/creators', {
+      method: 'PUT',
+      body: {
+        id: 'name:solo',
+        name: 'Solo Rider',
+        kind: 'person',
+        description: 'Rides alone, films everything.',
+        keys: ['vk1solo'],
+        links: ['https://solo.example'],
+        icon: 'data:image/png;base64,AAAA',
+        status: 'blocked',
+      },
+    });
+    const found = await admin<{ creators: (CreatorInfo & { status: string; addedAt: string })[] }>(url, '/v1/admin/creators?q=solo');
+    const solo = found.creators.find((creator) => creator.id === 'name:solo')!;
+    assert.equal(solo.name, 'Solo Rider');
+    assert.equal(solo.kind, 'person');
+    assert.equal(solo.description, 'Rides alone, films everything.');
+    assert.deepEqual(solo.keys, ['vk1solo']);
+    assert.deepEqual(solo.links, ['https://solo.example']);
+    assert.equal(solo.icon, 'data:image/png;base64,AAAA');
+    assert.equal(solo.status, 'blocked');
+    assert.ok(solo.addedAt, 'the record says when it was added');
+
+    // The console's save is authoritative: keys it leaves out are gone, and
+    // details it does not send along stay as they were.
+    await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:solo', name: 'Solo Rider', kind: 'person', keys: [] } });
+    const after = await admin<{ creators: (CreatorInfo & { status: string })[] }>(url, '/v1/admin/creators?q=solo');
+    const saved = after.creators.find((creator) => creator.id === 'name:solo')!;
+    assert.deepEqual(saved.keys, []);
+    assert.equal(saved.description, 'Rides alone, films everything.');
+    assert.equal(saved.status, 'blocked');
+  });
+});

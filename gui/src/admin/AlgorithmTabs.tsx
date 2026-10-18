@@ -987,8 +987,11 @@ interface Creator {
   kind: CreatorKind;
   description?: string;
   keys?: string[];
+  links?: string[];
+  icon?: string;
   accounts?: { platform: string; handle: string; url?: string }[];
   status: 'listed' | 'blocked';
+  addedAt?: string;
 }
 
 function Creators() {
@@ -1046,7 +1049,7 @@ function Creators() {
           <table className="table">
             <tbody>
               {creators.map((c) => (
-                <tr key={c.id}>
+                <tr key={c.id} style={{ cursor: 'pointer' }} title="Open details" onClick={() => setEditing(c)}>
                   <td>
                     <strong>{c.name}</strong>
                     <div className="mono tiny faint">{c.id}</div>
@@ -1107,6 +1110,7 @@ function Creators() {
           }
         >
           <div className="form-stack">
+            {editing.addedAt && <div className="hint">Added {new Date(editing.addedAt).toLocaleString()}</div>}
             <label className="field">
               Id <span className="hint">A key id (vk1…) or any name like name:my-studio</span>
               <input type="text" className="mono" value={editing.id ?? ''} onChange={(e) => setEditing({ ...editing, id: e.target.value })} />
@@ -1139,6 +1143,36 @@ function Creators() {
               <textarea value={editing.description ?? ''} onChange={(e) => setEditing({ ...editing, description: e.target.value })} rows={3} />
             </label>
             <label className="field">
+              Keys <span className="hint">One per line: the key ids (vk1…) whose signatures prove this creator</span>
+              <textarea
+                className="mono"
+                rows={2}
+                value={(editing.keys ?? []).join('\n')}
+                onChange={(e) => {
+                  const keys = e.target.value.split('\n').map((line) => line.trim()).filter(Boolean);
+                  setEditing({ ...editing, keys });
+                }}
+              />
+            </label>
+            <label className="field">
+              Links <span className="hint">One per line: links to the creator's own pages</span>
+              <textarea
+                rows={2}
+                value={(editing.links ?? []).join('\n')}
+                onChange={(e) => {
+                  const links = e.target.value.split('\n').map((line) => line.trim()).filter(Boolean);
+                  setEditing({ ...editing, links });
+                }}
+              />
+            </label>
+            <label className="field">
+              Icon <span className="hint">A small picture of the creator: a data: URL of an image up to 200 kB</span>
+              <input type="text" className="mono" value={editing.icon ?? ''} onChange={(e) => setEditing({ ...editing, icon: e.target.value })} />
+              {editing.icon && (
+                <img src={editing.icon} alt="" style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, marginTop: 6 }} />
+              )}
+            </label>
+            <label className="field">
               Linked accounts <span className="hint">One per line: platform handle [url] — e.g. yt @channel https://youtube.com/@channel</span>
               <textarea
                 rows={3}
@@ -1152,7 +1186,7 @@ function Creators() {
                       const [platform, handle, url] = line.split(/\s+/);
                       return { platform, handle, ...(url ? { url } : {}) };
                     });
-                  setEditing({ ...editing, accounts: accounts.length ? accounts : undefined });
+                  setEditing({ ...editing, accounts });
                 }}
               />
             </label>

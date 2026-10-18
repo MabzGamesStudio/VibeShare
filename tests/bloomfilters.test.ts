@@ -120,6 +120,39 @@ describe('a search node filtering content the user has seen', async () => {
     const back = await account.json<Page<ContentItem>>('/v1/search', { body: { query: 'holes' } });
     assert.ok(back.items.some((item) => item.title === 'Black holes'));
   });
+
+  it('shows the operator every stored filter, and drops one on request', async () => {
+    const account = clientFor(url, 'pseudonym');
+    await account.json('/v1/bloom', { method: 'PUT', body: { tier: 'tiny', filter: seen.toJSON() } });
+    const listed = await admin<{ stored: { account: string; bits: number; expected: number; hashes: number; expiresAt: string }[] }>(url, '/v1/admin/bloom');
+    assert.equal(listed.stored.length, 1, 'expired copies are swept up while listing');
+    const entry = listed.stored[0];
+    assert.equal(entry.bits, 1_024);
+    assert.ok(entry.hashes >= 1);
+    assert.ok(Date.parse(entry.expiresAt) > Date.now(), 'the operator sees how long it is kept');
+
+    await admin(url, `/v1/admin/bloom/${encodeURIComponent(entry.account)}`, { method: 'DELETE' });
+    const after = await admin<{ stored: unknown[] }>(url, '/v1/admin/bloom');
+    assert.deepEqual(after.stored, [], 'gone once the operator dropped it');
+    assert.equal((await account.json<BloomStorageState>('/v1/bloom')).filter, undefined, 'the client is told its copy is gone');
+  });
+
+  it('lets the operator change the time periods and credits of filter storage', async () => {
+    const before = await admin<{ bloom: { inlineMaxBits: number } }>(url, '/v1/admin/config');
+    await admin(url, '/v1/admin/config', {
+      method: 'PUT',
+      body: { bloom: { storage: { tiers: [{ id: 'test', label: 'Test', maxBits: 2_048, durationSeconds: 60, price: 7 }] } } },
+    });
+    const config = await admin<{ bloom: { inlineMaxBits: number; storage: { tiers: { id: string; durationSeconds: number; price: number }[] } } }>(
+      url,
+      '/v1/admin/config'
+    );
+    assert.deepEqual(
+      config.bloom.storage.tiers.map((tier) => [tier.id, tier.durationSeconds, tier.price]),
+      [['test', 60, 7]]
+    );
+    assert.equal(config.bloom.inlineMaxBits, before.bloom.inlineMaxBits, 'the rest of the settings stay as they were');
+  });
 });
 
 describe('a client keeping track of what the user has seen', async () => {

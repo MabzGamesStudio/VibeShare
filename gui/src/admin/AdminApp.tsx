@@ -1,5 +1,5 @@
 import { LogOut, Sparkles } from 'lucide-react';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import type { NodeInfo } from '../../../src/shared/protocol';
 import { CodeBox, Loading, Modal, Spinner } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
@@ -404,11 +404,15 @@ export interface FieldDef {
 const COMMON_FIELDS: FieldDef[] = [
   { path: 'name', label: 'Name', type: 'text' },
   { path: 'description', label: 'Description', type: 'text' },
+  { path: 'host', label: 'Listen address', type: 'text', hint: 'Address and port take effect after a restart' },
+  { path: 'port', label: 'Listen port', type: 'number' },
+  { path: 'trustProxy', label: 'Behind a reverse proxy', type: 'bool', hint: 'Trust X-Forwarded-For headers when counting signups per address' },
   { path: 'publicUrl', label: 'Public URL', type: 'text', hint: 'How clients reach this node (https://…). Used in the reference.' },
   { path: 'contact', label: 'Contact', type: 'text' },
   { path: 'signup.grant', label: 'Credits for new accounts', type: 'number' },
   { path: 'signup.powBits', label: 'Proof of work for new accounts (bits)', type: 'number', hint: '0 = none; 16–20 slows down account farming' },
   { path: 'signup.anonymous', label: 'Allow anonymous accounts', type: 'bool' },
+  { path: 'signup.perIpPerHour', label: 'New accounts per address per hour', type: 'number', hint: '0 = unlimited' },
   { path: 'peers', label: 'Recommended nodes', type: 'list', hint: 'Node references, comma separated' },
   {
     path: 'tor.onionService',
@@ -527,6 +531,7 @@ function SettingsTab({ groups }: { groups: FieldGroup[] }) {
           })}
         </div>
       </div>
+      {active.extra?.(config, save)}
       <div className="card form-stack">
         <h3>Full configuration</h3>
         <p className="small muted">
@@ -551,6 +556,129 @@ function SettingsTab({ groups }: { groups: FieldGroup[] }) {
           <button onClick={load}>Revert</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** One price for keeping a client's seen-content filter here. */
+interface Tier {
+  id: string;
+  label?: string;
+  maxBits: number;
+  durationSeconds: number;
+  price: number;
+}
+
+interface StoredFilter {
+  account: string;
+  bits: number;
+  expected: number;
+  hashes: number;
+  expiresAt: string;
+}
+
+/** The storage tiers the operator sells, and the client filters kept here right now. */
+function BloomStorage({ config, save }: { config: Record<string, unknown>; save: (patch: Record<string, unknown>) => Promise<void> }) {
+  const tiers = ((get(config, 'bloom.storage.tiers') as Tier[] | undefined) ?? []).map((tier) => ({ ...tier }));
+  const [stored, setStored] = useState<StoredFilter[] | null>(null);
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<{ stored: StoredFilter[] }>('/v1/admin/bloom')
+      .then((result) => setStored(result.stored))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const commit = (next: Tier[]) => void save({ bloom: { storage: { tiers: next } } });
+
+  return (
+    <div className="card form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <h3>Storage tiers</h3>
+      <p className="small muted">
+        Clients pay to keep their seen-content filter on this node; whatever collides with it is never suggested again to them. Each tier is one
+        price: how big a filter may be, for how long, at what cost in credits.
+      </p>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Id</th>
+            <th>Biggest filter (bits)</th>
+            <th>Duration (seconds)</th>
+            <th>Credits</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {tiers.map((tier, index) => {
+            const change = (patch: Partial<Tier>) => commit(tiers.map((t, i) => (i === index ? { ...t, ...patch } : t)));
+            return (
+              <tr key={`${index}:${JSON.stringify(tier)}`}>
+                <td>
+                  <input type="text" defaultValue={tier.label ?? ''} onBlur={(e) => change({ label: e.target.value })} />
+                </td>
+                <td>
+                  <input type="text" className="mono" defaultValue={tier.id} onBlur={(e) => change({ id: e.target.value })} />
+                </td>
+                <td>
+                  <input type="number" min={1} defaultValue={tier.maxBits} onBlur={(e) => change({ maxBits: Number(e.target.value) })} />
+                </td>
+                <td>
+                  <input type="number" min={0} defaultValue={tier.durationSeconds} onBlur={(e) => change({ durationSeconds: Number(e.target.value) })} />
+                </td>
+                <td>
+                  <input type="number" min={0} defaultValue={tier.price} onBlur={(e) => change({ price: Number(e.target.value) })} />
+                </td>
+                <td>
+                  <button className="small" onClick={() => commit(tiers.filter((_, i) => i !== index))}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div>
+        <button onClick={() => commit([...tiers, { id: `tier${tiers.length + 1}`, maxBits: 32_768, durationSeconds: 86_400, price: 1 }])}>
+          Add tier
+        </button>
+      </div>
+      <h3>Filters kept right now</h3>
+      {!stored ? (
+        <Loading />
+      ) : stored.length === 0 ? (
+        <p className="small muted">None.</p>
+      ) : (
+        <table className="table">
+          <tbody>
+            {stored.map((entry) => (
+              <tr key={entry.account}>
+                <td>
+                  <div className="mono tiny">{entry.account}</div>
+                </td>
+                <td className="small">
+                  {entry.bits} bits · made for {entry.expected} items · {entry.hashes} hashes
+                </td>
+                <td className="tiny faint">until {new Date(entry.expiresAt).toLocaleString()}</td>
+                <td>
+                  <button
+                    className="small"
+                    onClick={async () => {
+                      await admin(`/v1/admin/bloom/${encodeURIComponent(entry.account)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                      load();
+                    }}
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
@@ -644,6 +772,8 @@ export interface FieldGroup {
   id: string;
   label: string;
   fields: FieldDef[];
+  /** A panel of its own under the fields, for settings that are more than one field. */
+  extra?: (config: Record<string, unknown>, save: (patch: Record<string, unknown>) => Promise<void>) => ReactNode;
 }
 
 const PROVIDER_GROUPS: FieldGroup[] = [
@@ -660,12 +790,49 @@ const PROVIDER_GROUPS: FieldGroup[] = [
       { path: 'pricing.upload.perMiB', label: 'Upload price per MiB (paid mode)', type: 'number' },
       { path: 'pricing.upload.maxBytes', label: 'Largest upload (bytes)', type: 'number' },
       { path: 'storage.replication', label: 'Copies of each chunk', type: 'number', hint: 'Across writable storage backends' },
+      { path: 'storage.cacheMiB', label: 'Chunk cache (MiB)', type: 'number', hint: 'Hot chunks kept in memory' },
+      { path: 'storage.cacheFetched', label: 'Keep chunks fetched from others', type: 'bool', hint: 'Copy chunks read from read-only backends or peers into writable backends' },
       { path: 'storage.usePeers', label: 'Fetch missing chunks from client storage', type: 'bool' },
       { path: 'catalog', label: 'Publish catalog', type: 'bool' },
+    ],
+  },
+  {
+    id: 'rewards',
+    label: 'Rewards',
+    fields: [
+      { path: 'rewards.report', label: 'Reward per reported content id', type: 'number' },
+      { path: 'rewards.reportDailyCap', label: 'Rewarded reports per day', type: 'number' },
+      { path: 'rewards.suggestion', label: 'Reward per accepted suggestion', type: 'number' },
+      { path: 'rewards.suggestionDailyCap', label: 'Rewarded suggestions per day', type: 'number' },
+    ],
+  },
+  {
+    id: 'links',
+    label: 'Content URLs',
+    fields: [
+      { path: 'contentUrls.autoAccept', label: 'Accept client URLs without review', type: 'bool', hint: 'Otherwise the operator reviews each link in Content' },
+      { path: 'contentUrls.maxUrlsPerClient', label: 'Single URLs per client', type: 'number' },
+      { path: 'contentUrls.maxBaseUrlsPerClient', label: 'Base URLs per client', type: 'number' },
+      { path: 'contentUrls.creditPerDownload', label: 'Credits per verified download', type: 'number' },
+    ],
+  },
+  {
+    id: 'storage-service',
+    label: 'Storage service',
+    fields: [
       { path: 'storageService.enabled', label: 'Storage service for clients', type: 'bool' },
+      { path: 'storageService.challengeIntervalSeconds', label: 'Seconds between challenges', type: 'number' },
+      { path: 'storageService.minPassRatio', label: 'Passing answers needed (0–1)', type: 'number' },
+      { path: 'storageService.offlineGraceSeconds', label: 'Seconds before a holder counts offline', type: 'number' },
+      { path: 'storageService.taskTimeoutSeconds', label: 'Seconds until a storage task expires', type: 'number' },
       { path: 'storageService.auto.enabled', label: 'Storage job for every upload', type: 'bool' },
       { path: 'storageService.auto.replicas', label: 'Client copies per upload', type: 'number' },
       { path: 'storageService.auto.durationDays', label: 'Storage term (days)', type: 'number' },
+      { path: 'storageService.auto.requireIdentity', label: 'Only key accounts may hold data', type: 'bool' },
+      { path: 'storageService.auto.rewards.upfront', label: 'Credits when hired', type: 'number' },
+      { path: 'storageService.auto.rewards.perRetrieval', label: 'Credits per retrieval', type: 'number' },
+      { path: 'storageService.auto.rewards.perChallenge', label: 'Credits per passed challenge', type: 'number' },
+      { path: 'storageService.auto.rewards.completion', label: 'Credits at the end of the term', type: 'number' },
     ],
   },
 ];
@@ -683,6 +850,8 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
       { path: 'ranking.weights.recency', label: 'Weight: freshness', type: 'number' },
       { path: 'ranking.weights.preference', label: 'Weight: favourite topics', type: 'number' },
       { path: 'ranking.weights.discovery', label: 'Weight: discovery', type: 'number' },
+      { path: 'ranking.halfLifeHours', label: 'Freshness half-life (hours)', type: 'number', hint: 'After this long a new item is worth half as much for being new' },
+      { path: 'ranking.gravity', label: 'Gravity (hot ranking)', type: 'number', hint: 'How steeply older items fall in the hot ranking' },
     ],
   },
   {
@@ -728,6 +897,7 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
         hint: 'Anyone may propose external links to a creator; you decide in Review whether they are linked',
       },
       { path: 'pageSize', label: 'Items per page', type: 'number' },
+      { path: 'topics', label: 'Topics offered to clients', type: 'list', hint: 'Comma separated' },
     ],
   },
   {
@@ -741,6 +911,14 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
     ],
   },
   {
+    id: 'peering',
+    label: 'Peering',
+    fields: [
+      { path: 'peering.bootstrap', label: 'Bootstrap nodes', type: 'list', hint: 'Seed node references a new node peers with first, comma separated' },
+      { path: 'peering.maxPeers', label: 'Most peers kept', type: 'number', hint: 'The widest reach this node holds at once' },
+    ],
+  },
+  {
     id: 'seen',
     label: 'Seen-content filters',
     fields: [
@@ -748,9 +926,10 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
         path: 'bloom.inlineMaxBits',
         label: 'Largest filter inside a request (bits)',
         type: 'number',
-        hint: 'Clients may also pay to keep their filter here: the prices (bits, duration, credits) are the storage tiers in the full configuration below. Whatever collides is never suggested again',
+        hint: 'Clients may also pay to keep their filter here — the prices are the storage tiers below. Whatever collides is never suggested again',
       },
     ],
+    extra: (config, save) => <BloomStorage config={config} save={save} />,
   },
   {
     id: 'console',

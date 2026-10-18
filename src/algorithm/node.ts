@@ -1750,6 +1750,35 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       admin(ctx);
       return { removed: this.registry.remove(ctx.params.id) };
     });
+    // The seen-content filters kept here for accounts: the operator may see them all and
+    // drop any of them. Expired ones are swept up while listing.
+    router.get('/v1/admin/bloom', (ctx) => {
+      admin(ctx);
+      const stored: { account: string; bits: number; expected: number; hashes: number; expiresAt: string }[] = [];
+      for (const [account, record] of Object.entries(this.blooms.data.stored)) {
+        if (Date.parse(record.expiresAt) <= Date.now()) {
+          delete this.blooms.data.stored[account];
+          this.blooms.changed();
+          continue;
+        }
+        stored.push({
+          account,
+          bits: record.filter.m,
+          expected: record.filter.n ?? BLOOM_EXPECTED_ITEMS,
+          hashes: record.filter.k,
+          expiresAt: record.expiresAt,
+        });
+      }
+      return { stored };
+    });
+    router.delete('/v1/admin/bloom/:account', (ctx) => {
+      admin(ctx);
+      const account = decodeURIComponent(ctx.params.account);
+      const existed = Boolean(this.blooms.data.stored[account]);
+      delete this.blooms.data.stored[account];
+      if (existed) this.blooms.changed();
+      return { removed: existed };
+    });
     router.get('/v1/admin/creators', (ctx) => {
       admin(ctx);
       const q = (ctx.query.get('q') ?? '').trim().slice(0, 100);
@@ -1774,7 +1803,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (Array.isArray(body.accounts) && body.accounts.length > Math.max(0, this.config.maxCreatorAccounts)) {
         throw badRequest(`A creator may link at most ${this.config.maxCreatorAccounts} accounts`);
       }
-      return this.registry.upsertCreator(body);
+      // The console edits the whole record: what it leaves out of keys is gone.
+      return this.registry.upsertCreator(body, { replaceKeys: true });
     });
     router.get('/v1/admin/suggestions', (ctx) => {
       admin(ctx);

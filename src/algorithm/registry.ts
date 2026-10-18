@@ -247,7 +247,11 @@ export class Registry {
     return true;
   }
 
-  upsertCreator(input: Partial<CreatorRecord> & { id: string }): CreatorRecord {
+  /**
+   * Stores a creator. Callers that bring new proof keys only add to the keys on file;
+   * the operator's console saves the whole record and may replace them (`replaceKeys`).
+   */
+  upsertCreator(input: Partial<CreatorRecord> & { id: string }, options?: { replaceKeys?: boolean }): CreatorRecord {
     if (!input.id || input.id.length > 128) throw badRequest('A creator needs an id');
     const existing = this.store.data.creators[input.id];
     const kind = (input.kind ?? existing?.kind ?? 'unknown') as CreatorKind;
@@ -256,11 +260,11 @@ export class Registry {
       id: input.id,
       name: (input.name ?? existing?.name ?? input.id).slice(0, 120),
       kind,
-      description: (input.description ?? existing?.description)?.slice(0, 2000),
-      keys: [...new Set([...(existing?.keys ?? []), ...(input.keys ?? [])])],
+      description: (input.description ?? existing?.description)?.slice(0, 2000) || undefined,
+      keys: [...new Set(options?.replaceKeys ? (input.keys ?? existing?.keys ?? []) : [...(existing?.keys ?? []), ...(input.keys ?? [])])],
       links: input.links ?? existing?.links,
       accounts: input.accounts ?? existing?.accounts,
-      icon: input.icon !== undefined ? input.icon : existing?.icon,
+      icon: (input.icon !== undefined ? input.icon : existing?.icon) || undefined,
       status: input.status ?? existing?.status ?? 'listed',
       addedAt: existing?.addedAt ?? new Date().toISOString(),
     };
