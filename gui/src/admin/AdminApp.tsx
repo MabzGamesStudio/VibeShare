@@ -722,6 +722,7 @@ export function AdminApp() {
           ['apis', 'API keys'],
           ['sources', 'Sources'],
           ['creators', 'Creators'],
+          ['comments', 'Comments'],
         ] as [string, string][])),
     ['accounts', 'Accounts'],
     ['payments', 'Payments'],
@@ -930,6 +931,22 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
       },
     ],
     extra: (config, save) => <BloomStorage config={config} save={save} />,
+  },
+  {
+    id: 'comments',
+    label: 'Comments',
+    fields: [
+      { path: 'comments.maxPerHour', label: 'Comments per account per hour', type: 'number', hint: 'The rate limit for one account (0 = unlimited)' },
+      { path: 'comments.maxLength', label: 'Longest comment (characters)', type: 'number' },
+      {
+        path: 'comments.storage',
+        label: 'Where comment data is kept',
+        type: 'select',
+        options: ['node', 'provider'],
+        hint: 'The block headers always stay here. "provider" sends the comment data to a content provider instead',
+      },
+      { path: 'comments.provider.url', label: 'Content provider for comment data', type: 'text', hint: 'The provider node reference or URL; needed when comment data is kept on a provider' },
+    ],
   },
   {
     id: 'console',

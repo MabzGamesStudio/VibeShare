@@ -1454,5 +1454,168 @@ export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'review') return <Review />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;
+  if (tab === 'comments') return <CommentsTab />;
   return null;
+}
+
+interface CommentSectionSummary {
+  content: string;
+  blocks: number;
+  hidden: number;
+  shown: boolean;
+}
+
+interface AdminComment {
+  id: string;
+  text: string;
+  key?: string;
+  time: string;
+  replyFrom: string;
+  hidden: boolean;
+  likes: number;
+  dislikes: number;
+}
+
+interface AdminCommentsView {
+  content: string;
+  shown: boolean;
+  blocks: number;
+  comments: AdminComment[];
+}
+
+/**
+ * The comment sections of content pages: the operator opens one by its content id (or
+ * from the list), reads what was said, and decides whether the page shows its comments
+ * at all. Hiding a section — or one comment — keeps the block headers but sends no data;
+ * clients then show that the node operator removed something.
+ */
+function CommentsTab() {
+  const [sections, setSections] = useState<CommentSectionSummary[] | null>(null);
+  const [open, setOpen] = useState<AdminCommentsView | null>(null);
+  const [pick, setPick] = useState('');
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<{ sections: CommentSectionSummary[] }>('/v1/admin/comments')
+      .then((result) => setSections(result.sections))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const openSection = async (id: string) => {
+    try {
+      setOpen(await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(id)}`));
+    } catch (e) {
+      show(message(e));
+    }
+  };
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <p className="small muted">
+        What people say on each content page, as one hash-chained log. Turning a page's comments off keeps the block headers but sends no
+        comment data: clients see that something was removed here. Comments hidden one by one stay that way until shown again.
+      </p>
+      <div className="row">
+        <input
+          type="text"
+          value={pick}
+          placeholder="Open a comment section by content id"
+          onChange={(e) => setPick(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && pick.trim()) void openSection(pick.trim());
+          }}
+          style={{ flex: 1 }}
+        />
+        <button className="primary" disabled={!pick.trim()} onClick={() => void openSection(pick.trim())}>
+          Open
+        </button>
+      </div>
+      {!sections ? (
+        <Loading />
+      ) : sections.length === 0 ? (
+        <p className="small muted">No comment sections yet.</p>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          <table className="table">
+            <tbody>
+              {sections.map((section) => (
+                <tr key={section.content} style={{ cursor: 'pointer' }} title="Open details" onClick={() => void openSection(section.content)}>
+                  <td className="mono small">{section.content}</td>
+                  <td className="small">
+                    {section.blocks} blocks · {section.hidden} hidden
+                  </td>
+                  <td>
+                    <span className={`badge ${section.shown ? 'ok' : 'danger'}`}>{section.shown ? 'shown' : 'data kept back'}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {open && (
+        <div className="card form-stack">
+          <div className="row between">
+            <h3 style={{ margin: 0 }}>{open.content}</h3>
+            <button
+              className={open.shown ? '' : 'primary'}
+              onClick={async () => {
+                try {
+                  setOpen(
+                    await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(open.content)}`, {
+                      method: 'PUT',
+                      body: { shown: !open.shown },
+                    })
+                  );
+                  load();
+                } catch (e) {
+                  show(message(e));
+                }
+              }}
+            >
+              {open.shown ? 'Turn comments off (keep headers only)' : 'Turn comments on'}
+            </button>
+          </div>
+          <p className="small muted">
+            {open.blocks} blocks in the chain. Clients verify every header; {open.comments.length} comments carry data here.
+          </p>
+          {open.comments.map((comment) => (
+            <div key={comment.id} style={{ borderTop: '1px solid var(--border, #eee)', paddingTop: 10 }}>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <strong className="small">{comment.key ? `${comment.key.slice(0, 14)}…` : 'Anonymous'}</strong>
+                {comment.time && <span className="tiny faint">{comment.time}</span>}
+                <span className="tiny faint">
+                  {comment.likes} likes · {comment.dislikes} dislikes
+                  {comment.replyFrom !== '0' ? ' · a reply' : ''}
+                </span>
+                {comment.hidden && <span className="badge danger">hidden</span>}
+              </div>
+              <div style={{ margin: '6px 0' }}>{comment.text}</div>
+              <button
+                className="small"
+                onClick={async () => {
+                  try {
+                    setOpen(
+                      await admin<AdminCommentsView>(
+                        `/v1/admin/comments/${encodeURIComponent(open.content)}/${encodeURIComponent(comment.id)}/${comment.hidden ? 'show' : 'hide'}`,
+                        { method: 'POST', body: {} }
+                      )
+                    );
+                    load();
+                  } catch (e) {
+                    show(message(e));
+                  }
+                }}
+              >
+                {comment.hidden ? 'Show again' : 'Hide (keep the header only)'}
+              </button>
+            </div>
+          ))}
+          {open.comments.length === 0 && <p className="small muted">No comment data here (every block may be hidden, or none were written).</p>}
+        </div>
+      )}
+    </div>
+  );
 }

@@ -32,6 +32,7 @@ import {
 } from '../../../src/shared/taxonomy';
 import { api, errorMessage, uploadFile } from '../api';
 import { FormatIcon } from '../components/ContentCard';
+import { Comments } from '../components/Comments';
 import { useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
 import { DownloadButton } from '../components/Download';
@@ -1108,6 +1109,7 @@ export function WatchPage() {
           )}
         </aside>
       </div>
+      <Comments contentId={view.id} />
       {suggesting && (
         <SuggestDialog view={view} nodeId={view.decidedBy?.id ?? ''} mediaRef={mediaRef} onClose={() => setSuggesting(false)} />
       )}

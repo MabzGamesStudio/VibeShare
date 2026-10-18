@@ -1,7 +1,7 @@
 // The client's local API (what the GUI calls), as a table of routes on top of
 // ClientCore. The daemon mounts it on its HTTP server; the web client answers the same
 // routes in a service worker. Browser-safe.
-import type { ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
+import type { CommentPostRequest, ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
 import { MiB } from '../shared/content.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, Preferences } from '../shared/protocol.js';
@@ -129,6 +129,17 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   });
   on('GET', '/api/content/:id', (request) => core.content(request.params.id));
   on('GET', '/api/creators/:id', (request) => core.creator(request.params.id));
+
+  // Comments on a content page: the hash-chained history the node holds (the GUI verifies
+  // it itself), and writing to it — a comment, a reply, an edit, a vote, a removal ask.
+  on('GET', '/api/comments/:id', (request) => core.comments(request.params.id));
+  on('POST', '/api/comments/:id', async (request) => core.comment(request.params.id, await request.json<CommentPostRequest>()));
+  on('POST', '/api/comments/:id/:comment/vote', async (request) => {
+    const body = await request.json<{ vote?: number }>();
+    const vote = body.vote === 1 || body.vote === -1 ? body.vote : 0;
+    return core.voteComment(request.params.id, request.params.comment, vote);
+  });
+  on('POST', '/api/comments/:id/:comment/remove', (request) => core.removeComment(request.params.id, request.params.comment));
 
   // Creators: searching them (Explore), linking their platform accounts (proven with the
   // creator key), and suggesting content that is related to one.

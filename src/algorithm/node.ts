@@ -1,8 +1,18 @@
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Account } from '../commerce/ledger.js';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import { isKeyId, randomId, verifySignature } from '../shared/crypto.js';
-import { contentIdOf, validateManifest } from '../shared/content.js';
+import { buildManifestFromBuffer, contentIdOf, validateManifest } from '../shared/content.js';
+import {
+  blockHash,
+  commentDataHash,
+  commentRemovePayload,
+  commentSigningPayload,
+  type CommentBlock,
+  type CommentData,
+  type CommentTimePrecision,
+} from '../shared/comments.js';
 import { badRequest, forbidden, HttpError, notFound, readJson, requestJson, type Ctx } from '../shared/http.js';
 import { log } from '../shared/log.js';
 import { parseNodeRef } from '../shared/noderef.js';
@@ -101,6 +111,21 @@ export interface AlgorithmConfig extends BaseConfig {
     inlineMaxBits: number;
     storage: { tiers: BloomStorageTier[] };
   };
+  /**
+   * Comments on content pages: a hash-chained log the clients verify themselves. The node
+   * writes the ids and times, rate limits each account, and may keep the data of a comment
+   * back while its block header stays.
+   */
+  comments: {
+    /** The most comment blocks one account may add per hour (0 = unlimited). */
+    maxPerHour: number;
+    /** The longest comment, in characters. */
+    maxLength: number;
+    /** Where comment data is kept: here (the default), or sent to a content provider. */
+    storage: 'node' | 'provider';
+    /** The content provider that keeps the comment data when storage is 'provider'. */
+    provider?: { url: string };
+  };
   /** Exchanging content metadata and discoveries with other nodes. */
   peering: {
     /**
@@ -177,6 +202,7 @@ export function algorithmDefaults(): AlgorithmConfig {
         ],
       },
     },
+    comments: { maxPerHour: 30, maxLength: 2_000, storage: 'node' },
     peering: {
       peers: [],
       job: { enabled: false, intervalMs: 3_600_000, adopt: true, limit: 50 },
@@ -222,6 +248,36 @@ interface ContributionData {
   iconSuggestions: Record<string, CreatorIconSuggestion>;
   /** Unsigned account links clients proposed for a creator, waiting for the operator. */
   accountLinks: Record<string, AccountLinkProposal>;
+}
+
+/** One content page's comment chain, kept here. */
+interface CommentSection {
+  /** The whole block chain, in order. */
+  blocks: CommentBlock[];
+  /** Whose account voted how, per comment id. */
+  votes: Record<string, Record<string, 1 | -1>>;
+  /** Comment ids whose data the node keeps back (the author asked, or the operator hid it). */
+  hidden: string[];
+  /** Whether this section sends comment data at all (false: the headers only). */
+  shown: boolean;
+  /** When the data lives on a content provider instead: the content id that holds it. */
+  remote?: string;
+}
+
+interface CommentsData {
+  sections: Record<string, CommentSection>;
+  /** When each account last added a block, for the rate limit. */
+  recent: Record<string, number[]>;
+}
+
+interface CommentPostBody {
+  text?: string;
+  replyFrom?: string;
+  editOf?: string;
+  anonymous?: boolean;
+  timePrecision?: CommentTimePrecision;
+  key?: string;
+  sig?: string;
 }
 
 function offsetOf(cursor: string | undefined): number {
@@ -279,6 +335,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private contributions: JsonFile<ContributionData>;
   /** Seen-content bloom filters kept for accounts (a paid copy, until it expires). */
   private blooms: JsonFile<{ stored: Record<string, { filter: BloomFilterData; expiresAt: string }> }>;
+  /** Comments on content pages: one hash-chained log per content id. */
+  private comments: JsonFile<CommentsData>;
 
   readonly crawler: Crawler;
   private lastPrune = 0;
@@ -297,6 +355,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       accountLinks: {},
     }));
     this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
+    this.comments = new JsonFile(this.path('comments.json'), () => ({ sections: {}, recent: {} }));
     this.crawler = new Crawler(
       () => this.config.crawler,
       this.path('crawler.json'),
@@ -393,6 +452,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     for (const [key, value] of Object.entries(config.sources?.priorities ?? {})) {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 10) throw badRequest(`Priority of ${key} must be 0–10`);
+    }
+    if (!['node', 'provider'].includes(config.comments?.storage)) throw badRequest('comments.storage is node or provider');
+    if (config.comments.storage === 'provider' && !config.comments.provider?.url) {
+      throw badRequest('comments.storage provider needs comments.provider.url');
     }
     const crawler = config.crawler;
     if (!Array.isArray(crawler.blockedSources) || crawler.blockedSources.some((key) => typeof key !== 'string')) {
@@ -535,6 +598,254 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Comments: one hash-chained log per content page. Every comment is a block whose
+  // header hashes the previous header (when there is one) and the hash of the comment
+  // data. The node makes up the ids and writes the times down as precisely as each
+  // commenter allows; it keeps the data of a comment back on request while its header
+  // stays, so clients can still verify the chain. Clients verify everything themselves.
+
+  private commentSection(id: string): { key: string; section: CommentSection } {
+    const key = baseId(id);
+    const sections = this.comments.data.sections;
+    if (!sections[key]) sections[key] = { blocks: [], votes: {}, hidden: [], shown: true };
+    return { key, section: sections[key] };
+  }
+
+  /** How much of the posting time is written down: exactly what the commenter allows. */
+  private commentTime(precision: CommentTimePrecision | undefined): string {
+    const now = new Date();
+    if (precision === 'date') return now.toISOString().slice(0, 10);
+    if (precision === 'year') return String(now.getUTCFullYear());
+    if (precision === 'none') return '';
+    return now.toISOString();
+  }
+
+  /** The precision of a written time, so an edit keeps what the comment already chose. */
+  private precisionOf(time: string): CommentTimePrecision {
+    if (time.length >= 20) return 'datetime';
+    if (time.length >= 8) return 'date';
+    if (time.length >= 4) return 'year';
+    return 'none';
+  }
+
+  private appendCommentBlock(section: CommentSection, data: CommentData): CommentBlock {
+    const prev = section.blocks.at(-1)?.hash ?? '';
+    const dataHash = commentDataHash(data);
+    const block: CommentBlock = { prev, dataHash, hash: blockHash(prev, dataHash), data };
+    section.blocks.push(block);
+    return block;
+  }
+
+  /** The comment data this node holds, or reads back from the content provider. */
+  private async commentDataOf(section: CommentSection): Promise<(CommentData | null)[]> {
+    if (!section.remote) return section.blocks.map((block) => block.data ?? null);
+    return this.fetchCommentData(section.remote);
+  }
+
+  /** The chain as clients get it: every header, and the data except what is kept back. */
+  private async servedComments(section: CommentSection): Promise<CommentBlock[]> {
+    const data = await this.commentDataOf(section);
+    const hidden = new Set(section.hidden);
+    return section.blocks.map((block, index) => {
+      const comment = data[index];
+      return section.shown && comment && !hidden.has(comment.id)
+        ? { ...block, data: comment }
+        : { prev: block.prev, dataHash: block.dataHash, hash: block.hash };
+    });
+  }
+
+  /** Where the votes on each comment stand, including the asking account's own. */
+  private commentVotes(
+    section: CommentSection,
+    account: string | undefined
+  ): Record<string, { likes: number; dislikes: number; mine?: 1 | -1 | 0 }> {
+    const out: Record<string, { likes: number; dislikes: number; mine?: 1 | -1 | 0 }> = {};
+    for (const [id, votes] of Object.entries(section.votes)) {
+      let likes = 0;
+      let dislikes = 0;
+      for (const vote of Object.values(votes)) {
+        if (vote === 1) likes++;
+        else dislikes++;
+      }
+      out[id] = account && votes[account] ? { likes, dislikes, mine: votes[account] } : { likes, dislikes };
+    }
+    return out;
+  }
+
+  /** The rate limit: how many blocks one account may add per hour. */
+  private noteCommentBlock(account: string): void {
+    const limit = this.config.comments.maxPerHour;
+    const recent = this.comments.data.recent;
+    const times = (recent[account] ?? []).filter((at) => Date.now() - at < 3600_000);
+    if (limit > 0 && times.length >= limit) throw badRequest(`At most ${limit} comments per hour`);
+    times.push(Date.now());
+    recent[account] = times;
+  }
+
+  private async saveComments(section: CommentSection): Promise<void> {
+    this.comments.changed();
+    if (this.config.comments.storage === 'provider') await this.offloadComments(section);
+  }
+
+  /** Appends a comment (or an edit of one) to a content page's chain. */
+  private async postComment(contentId: string, account: Account, body: CommentPostBody): Promise<CommentBlock> {
+    const text = String(body.text ?? '').trim();
+    const maxLength = this.config.comments.maxLength;
+    if (!text) throw badRequest('A comment needs text');
+    if (text.length > maxLength) throw badRequest(`A comment is at most ${maxLength} characters`);
+    const { section } = this.commentSection(contentId);
+    const data = await this.commentDataOf(section);
+    this.noteCommentBlock(account.id);
+
+    if (body.editOf) {
+      // A block may carry an existing comment's id only to edit it, and only the same
+      // exact commenter may: the same key, proven again on the new text.
+      const original = data.filter((comment) => comment?.id === body.editOf).at(-1);
+      if (!original) throw notFound('No such comment');
+      if (!original.key || body.anonymous) throw forbidden('Anonymous comments cannot be edited');
+      const replyFrom = original.replyFrom;
+      if (
+        body.key !== original.key ||
+        !body.sig ||
+        !verifySignature(original.key, commentSigningPayload({ key: original.key, replyFrom, text }), body.sig)
+      ) {
+        throw forbidden("Only the comment's own key may edit it");
+      }
+      const block = this.appendCommentBlock(section, {
+        id: original.id,
+        text,
+        key: original.key,
+        sig: body.sig,
+        time: this.commentTime(body.timePrecision ?? this.precisionOf(original.time)),
+        replyFrom,
+      });
+      await this.saveComments(section);
+      return block;
+    }
+
+    const replyFrom = String(body.replyFrom ?? '0');
+    if (replyFrom !== '0' && !data.some((comment) => comment?.id === replyFrom)) throw badRequest('A comment replies to one that exists');
+    if (body.anonymous) {
+      // Anonymous comments carry no key: they can never be edited or removed later.
+      const block = this.appendCommentBlock(section, { id: randomUUID(), text, time: this.commentTime(body.timePrecision), replyFrom });
+      await this.saveComments(section);
+      return block;
+    }
+    if (!body.key || !isKeyId(body.key) || !body.sig || !verifySignature(body.key, commentSigningPayload({ key: body.key, replyFrom, text }), body.sig)) {
+      throw forbidden("A comment needs a signature by its commenter's key");
+    }
+    const block = this.appendCommentBlock(section, {
+      id: randomUUID(),
+      text,
+      key: body.key,
+      sig: body.sig,
+      time: this.commentTime(body.timePrecision),
+      replyFrom,
+    });
+    await this.saveComments(section);
+    return block;
+  }
+
+  /** The author asking for their comment to go: the data goes, the headers stay. */
+  private async removeComment(contentId: string, commentId: string, body: { key?: string; sig?: string }): Promise<void> {
+    const { section } = this.commentSection(contentId);
+    const data = await this.commentDataOf(section);
+    const original = data.filter((comment) => comment?.id === commentId).at(-1);
+    if (!original) throw notFound('No such comment');
+    if (!original.key) throw forbidden('Anonymous comments cannot be removed');
+    if (body.key !== original.key || !body.sig || !verifySignature(original.key, commentRemovePayload(commentId), body.sig)) {
+      throw forbidden("Only the comment's own key may remove it");
+    }
+    if (!section.hidden.includes(commentId)) section.hidden.push(commentId);
+    await this.saveComments(section);
+  }
+
+  private voteComment(contentId: string, commentId: string, account: Account, vote: number): void {
+    const { section } = this.commentSection(contentId);
+    const votes = (section.votes[commentId] ??= {});
+    if (vote === 1 || vote === -1) votes[account.id] = vote;
+    else delete votes[account.id];
+    if (!Object.keys(votes).length) delete section.votes[commentId];
+    this.comments.changed();
+  }
+
+  /** Everything the operator's console shows about one comment section. */
+  private async adminComments(id: string): Promise<Record<string, unknown>> {
+    const { key, section } = this.commentSection(id);
+    const data = await this.commentDataOf(section);
+    const hidden = new Set(section.hidden);
+    const votes = this.commentVotes(section, undefined);
+    const latest = new Map<string, CommentData>();
+    for (const comment of data) if (comment) latest.set(comment.id, comment);
+    return {
+      content: key,
+      shown: section.shown,
+      blocks: section.blocks.length,
+      votes,
+      comments: [...latest.values()].map((comment) => ({
+        ...comment,
+        hidden: hidden.has(comment.id),
+        likes: votes[comment.id]?.likes ?? 0,
+        dislikes: votes[comment.id]?.dislikes ?? 0,
+      })),
+    };
+  }
+
+  /** The content provider client that keeps comment data when storage is 'provider'. */
+  private commentProviderClient(url: string): NodeClient {
+    return new NodeClient({
+      url: url.replace(/\/$/, ''),
+      expectedType: 'provider',
+      auth: 'identity',
+      identity: this.identity,
+      transport: () => this.transport(url),
+    });
+  }
+
+  /** Sends a section's comment data to the content provider and keeps only headers here. */
+  private async offloadComments(section: CommentSection): Promise<void> {
+    const provider = this.config.comments.provider;
+    if (!provider?.url) return;
+    try {
+      const client = this.commentProviderClient(provider.url);
+      const payload = section.blocks.map((block) => block.data ?? null);
+      const chunks = new Map<string, Buffer>();
+      const manifest = await buildManifestFromBuffer(
+        Buffer.from(JSON.stringify(payload)),
+        { name: 'comments.json', mime: 'application/json' },
+        (id, chunk) => {
+          chunks.set(id, chunk);
+        }
+      );
+      const cid = contentIdOf(manifest);
+      const started = await client.json<{ missing: string[] }>('/v1/uploads', { method: 'POST', body: { manifest } });
+      for (const chunkId of started.missing) {
+        const chunk = chunks.get(chunkId);
+        if (chunk) await client.fetch(`/v1/uploads/${cid}/chunks/${chunkId}`, { method: 'PUT', body: chunk });
+      }
+      await client.json(`/v1/uploads/${cid}/commit`, { method: 'POST', body: {} });
+      section.remote = cid;
+      for (const block of section.blocks) delete block.data;
+    } catch (error) {
+      // The data stays here while the provider cannot take it.
+      log.debug(`Comment data upload: ${(error as Error).message}`);
+    }
+  }
+
+  private async fetchCommentData(remote: string): Promise<(CommentData | null)[]> {
+    const provider = this.config.comments.provider;
+    if (!provider?.url) return [];
+    const client = this.commentProviderClient(provider.url);
+    const manifest = await client.json<{ chunks: { id: string }[] }>(`/v1/content/${remote}`);
+    const parts: Buffer[] = [];
+    for (const chunk of manifest.chunks) {
+      const response = await client.fetch(`/v1/chunks/${chunk.id}?cid=${remote}`);
+      parts.push(Buffer.from(await response.arrayBuffer()));
+    }
+    return JSON.parse(Buffer.concat(parts).toString()) as (CommentData | null)[];
+  }
+
   protected registerRoutes(): void {
     const router = this.router;
 
@@ -627,6 +938,38 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       delete this.blooms.data.stored[account.id];
       this.blooms.changed();
       return { tiers: this.config.bloom.storage.tiers };
+    });
+
+    // Comments on a content page: the whole hash-chained history, always. Clients verify
+    // every block header and signature themselves before showing anything.
+    router.get('/v1/comments/:id', async (ctx) => {
+      const account = this.auth.account(ctx);
+      const { section } = this.commentSection(ctx.params.id);
+      return {
+        blocks: await this.servedComments(section),
+        votes: this.commentVotes(section, account?.id),
+        shown: section.shown,
+      };
+    });
+
+    router.post('/v1/comments/:id', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const block = await this.postComment(ctx.params.id, account, await readJson<CommentPostBody>(ctx.req));
+      return { block };
+    });
+
+    router.post('/v1/comments/:id/:comment/vote', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{ vote?: number }>(ctx.req);
+      this.voteComment(ctx.params.id, ctx.params.comment, account, Number(body.vote ?? 0));
+      const { section } = this.commentSection(ctx.params.id);
+      return { votes: this.commentVotes(section, account.id) };
+    });
+
+    router.post('/v1/comments/:id/:comment/remove', async (ctx) => {
+      this.auth.require(ctx);
+      await this.removeComment(ctx.params.id, ctx.params.comment, await readJson<{ key?: string; sig?: string }>(ctx.req));
+      return { removed: true };
     });
 
     router.get('/v1/thumbnails/:key', (ctx) => {
@@ -1778,6 +2121,41 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       delete this.blooms.data.stored[account];
       if (existed) this.blooms.changed();
       return { removed: existed };
+    });
+    // Comment sections: the operator sees them and decides whether one sends its comment
+    // data at all (the block headers always go out), or hides single comments.
+    router.get('/v1/admin/comments', (ctx) => {
+      admin(ctx);
+      return {
+        sections: Object.entries(this.comments.data.sections).map(([content, section]) => ({
+          content,
+          blocks: section.blocks.length,
+          hidden: section.hidden.length,
+          shown: section.shown,
+        })),
+      };
+    });
+    router.get('/v1/admin/comments/:id', async (ctx) => {
+      admin(ctx);
+      return this.adminComments(ctx.params.id);
+    });
+    router.put('/v1/admin/comments/:id', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ shown?: boolean }>(ctx.req);
+      const { section } = this.commentSection(ctx.params.id);
+      section.shown = body.shown !== false;
+      this.comments.changed();
+      return this.adminComments(ctx.params.id);
+    });
+    router.post('/v1/admin/comments/:id/:comment/:action', async (ctx) => {
+      admin(ctx);
+      if (ctx.params.action !== 'hide' && ctx.params.action !== 'show') throw badRequest('hide or show');
+      const { section } = this.commentSection(ctx.params.id);
+      const at = section.hidden.indexOf(ctx.params.comment);
+      if (ctx.params.action === 'hide' && at < 0) section.hidden.push(ctx.params.comment);
+      if (ctx.params.action === 'show' && at >= 0) section.hidden.splice(at, 1);
+      this.comments.changed();
+      return this.adminComments(ctx.params.id);
     });
     router.get('/v1/admin/creators', (ctx) => {
       admin(ctx);

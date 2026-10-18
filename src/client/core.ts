@@ -15,7 +15,7 @@ import type {
   PublishRequest,
   Settings,
 } from '../shared/clientapi.js';
-import type { BloomStatus, SavedState, SearchHistoryItem } from '../shared/clientapi.js';
+import type { BloomStatus, CommentPostRequest, CommentsResponse, SavedState, SearchHistoryItem } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
@@ -40,6 +40,7 @@ import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
+import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
@@ -407,6 +408,59 @@ export class ClientCore {
       if (found.size >= 24) break;
     }
     return { creators: [...found.values()].slice(0, 24) };
+  }
+
+  // -------------------------------------------------------------------------
+  // Comments: one hash-chained log per content page, hosted by the first enabled
+  // algorithm node. The user's key signs every comment, so only they may edit or remove
+  // it; anonymous ones carry no key and can never be changed.
+
+  private commentNode(): NodeEntry | undefined {
+    return this.nodes.active('algorithm')[0];
+  }
+
+  /** The whole comment chain of a content page, with the viewer's own votes and key. */
+  async comments(id: string): Promise<CommentsResponse> {
+    const node = this.commentNode();
+    if (!node) throw new Error('No algorithm node is enabled');
+    const data = await this.nodes.client(node).json<Omit<CommentsResponse, 'you'>>(`/v1/comments/${encodeURIComponent(id)}`, { timeoutMs: 8000 });
+    return { ...data, you: this.store.identity.id };
+  }
+
+  /** Writes a comment, a reply, or an edit of one's own (signed by the user's key). */
+  async comment(id: string, body: CommentPostRequest): Promise<unknown> {
+    const node = this.commentNode();
+    if (!node) throw new Error('No algorithm node is enabled');
+    const identity = this.store.identity;
+    const replyFrom = body.replyFrom ?? '0';
+    const signed = body.anonymous
+      ? {}
+      : { key: identity.id, sig: signData(identity, commentSigningPayload({ key: identity.id, replyFrom, text: body.text })) };
+    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body: { ...body, replyFrom, ...signed },
+    });
+  }
+
+  /** Votes on a comment: 1 like, -1 dislike, 0 takes the vote back. */
+  async voteComment(id: string, comment: string, vote: 1 | -1 | 0): Promise<unknown> {
+    const node = this.commentNode();
+    if (!node) throw new Error('No algorithm node is enabled');
+    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}/${encodeURIComponent(comment)}/vote`, {
+      method: 'POST',
+      body: { vote },
+    });
+  }
+
+  /** Asks for one's own comment to be removed (the node keeps its block header). */
+  async removeComment(id: string, comment: string): Promise<unknown> {
+    const node = this.commentNode();
+    if (!node) throw new Error('No algorithm node is enabled');
+    const identity = this.store.identity;
+    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}/${encodeURIComponent(comment)}/remove`, {
+      method: 'POST',
+      body: { key: identity.id, sig: signData(identity, commentRemovePayload(comment)) },
+    });
   }
 
   /**

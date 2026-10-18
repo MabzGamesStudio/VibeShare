@@ -1,11 +1,32 @@
 // Types of the client daemon's local API (GUI ⇄ daemon). Browser-safe: no Node imports.
 import type { NodeType } from './noderef.js';
 import type { Manifest } from './content.js';
+import type { CommentBlock, CommentVotes } from './comments.js';
 import type { ContentItem, CreatorInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
 import type { CreatorKind, Format, Rating } from './taxonomy.js';
 
 export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
+
+/** The whole comment chain of a content page, and the viewer's own key. */
+export interface CommentsResponse {
+  /** Every block of the chain; data is absent where the node keeps a comment back. */
+  blocks: CommentBlock[];
+  votes: Record<string, CommentVotes>;
+  /** Whether the section sends comment data at all (false: the block headers only). */
+  shown: boolean;
+  /** The viewer's key id, to tell their own comments apart. */
+  you: string;
+}
+
+/** Writing a comment: a new one, a reply, or an edit of one of one's own. */
+export interface CommentPostRequest {
+  text: string;
+  replyFrom?: string;
+  editOf?: string;
+  anonymous?: boolean;
+  timePrecision?: 'datetime' | 'date' | 'year' | 'none';
+}
 
 /** One bloom filter of content the user has seen, as the settings hold it. */
 export interface BloomFilterSettings {
