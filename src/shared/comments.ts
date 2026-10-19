@@ -20,7 +20,7 @@ export interface CommentData {
   sig?: string;
   /** When it was posted, as precisely as the commenter allowed ('' = not written down). */
   time: string;
-  /** '0' for a top level comment, otherwise the id of the comment it is a reply from. */
+  /** The page's root for a first level comment, otherwise the id of the comment it replies from. */
   replyFrom: string;
 }
 
@@ -95,12 +95,14 @@ export function blockHash(prev: string, dataHash: string, id: string): string {
 }
 
 /**
- * The node makes up comment ids deterministically: the hash of the page's root (its cid,
- * or its first link when it has no cid) and where the comment's block sits in the chain.
- * An edit reuses the id of the comment it edits.
+ * The node makes up comment ids deterministically: the hash of four hashes — of what the
+ * comment attaches to (the page's root: its cid, or its first link when it has no cid; for
+ * a reply, the id of the comment it replies from), of the commenter's key id (nothing when
+ * the comment is anonymous), of the comment text, and of the most recent block header
+ * ('0' when the comment starts the chain). An edit reuses the id of the comment it edits.
  */
-export function commentIdAt(root: string, index: number): string {
-  return sha256hex(`${root}\n${index}`);
+export function commentIdAt(replyTo: string, prevHeader: string, text: string, key?: string): string {
+  return sha256hex([sha256hex(replyTo), sha256hex(key ?? ''), sha256hex(text), prevHeader || '0'].join('\n'));
 }
 
 /**
@@ -119,6 +121,13 @@ export function checkCommentChain(
   let prev = '';
   for (const [index, block] of blocks.entries()) {
     if (block.prev !== prev) errors.push(`Block ${index + 1} does not link to the one before it`);
+    if (typeof block.id !== 'string') {
+      // Blocks written before the comment id moved into the header can never verify
+      // again; the operator may flush the page's comment data and start over.
+      errors.push(`Block ${index + 1} was written in an old format and no longer verifies (its header holds no comment id)`);
+      prev = block.hash;
+      continue;
+    }
     if (block.hash !== blockHash(block.prev, block.dataHash, block.id)) errors.push(`Block ${index + 1} header hash does not match its contents`);
     prev = block.hash;
     const data = block.data;

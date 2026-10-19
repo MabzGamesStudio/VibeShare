@@ -1515,7 +1515,8 @@ function CommentsTab() {
       {toast && <div className="banner info small">{toast}</div>}
       <p className="small muted">
         What people say on each content page, as one hash-chained log. Turning a page's comments off keeps the block headers but sends no
-        comment data: clients see that something was removed here. Comments hidden one by one stay that way until shown again.
+        comment data: clients see that something was removed here. Comments hidden one by one stay that way until shown again. Flushing a
+        page removes everything this node keeps about it. Pages without comments hold nothing and are not listed.
       </p>
       <div className="row">
         <input
@@ -1559,25 +1560,54 @@ function CommentsTab() {
         <div className="card form-stack">
           <div className="row between">
             <h3 style={{ margin: 0 }}>{open.content}</h3>
-            <button
-              className={open.shown ? '' : 'primary'}
-              onClick={async () => {
-                try {
-                  setOpen(
-                    await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(open.content)}`, {
-                      method: 'PUT',
-                      body: { shown: !open.shown },
-                    })
-                  );
-                  load();
-                } catch (e) {
-                  show(message(e));
-                }
-              }}
-            >
-              {open.shown ? 'Turn comments off (keep headers only)' : 'Turn comments on'}
-            </button>
+            <div className="row" style={{ gap: 8 }}>
+              {open.blocks > 0 && (
+                <>
+                  <button
+                    className="small"
+                    title="Remove every block, vote and hiding this node keeps for the page"
+                    onClick={async () => {
+                      try {
+                        await admin(`/v1/admin/comments/${encodeURIComponent(open.content)}`, { method: 'DELETE' });
+                        setOpen(null);
+                        show('All comment data of this page is gone.');
+                        load();
+                      } catch (e) {
+                        show(message(e));
+                      }
+                    }}
+                  >
+                    Flush all comment data
+                  </button>
+                  <button
+                    className={open.shown ? '' : 'primary'}
+                    onClick={async () => {
+                      try {
+                        setOpen(
+                          await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(open.content)}`, {
+                            method: 'PUT',
+                            body: { shown: !open.shown },
+                          })
+                        );
+                        load();
+                      } catch (e) {
+                        show(message(e));
+                      }
+                    }}
+                  >
+                    {open.shown ? 'Turn comments off (keep headers only)' : 'Turn comments on'}
+                  </button>
+                </>
+              )}
+              <button className="small ghost" onClick={() => setOpen(null)}>
+                Close
+              </button>
+            </div>
           </div>
+          {open.blocks === 0 ? (
+            <p className="small muted">No comments on this page.</p>
+          ) : (
+            <>
           <p className="small muted">
             {open.blocks} blocks in the chain. Clients verify every header; {open.comments.length} comments carry data here.
           </p>
@@ -1614,6 +1644,8 @@ function CommentsTab() {
             </div>
           ))}
           {open.comments.length === 0 && <p className="small muted">No comment data here (every block may be hidden, or none were written).</p>}
+            </>
+          )}
         </div>
       )}
     </div>

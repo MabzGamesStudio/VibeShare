@@ -356,6 +356,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }));
     this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
     this.comments = new JsonFile(this.path('comments.json'), () => ({ sections: {}, recent: {} }));
+    // Nothing is kept for a content page that has no comments: drop the empty sections
+    // that earlier versions left behind when a page was merely read.
+    for (const [key, section] of Object.entries(this.comments.data.sections)) {
+      if (!section.blocks.length) {
+        delete this.comments.data.sections[key];
+        this.comments.changed();
+      }
+    }
     this.crawler = new Crawler(
       () => this.config.crawler,
       this.path('crawler.json'),
@@ -612,6 +620,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     return { key, section: sections[key] };
   }
 
+  /** A content page's comment section, if one is kept yet: reading never stores anything. */
+  private findCommentSection(id: string): { key: string; section?: CommentSection } {
+    const key = baseId(id);
+    return { key, section: this.comments.data.sections[key] };
+  }
+
   /** How much of the posting time is written down: exactly what the commenter allows. */
   private commentTime(precision: CommentTimePrecision | undefined): string {
     const now = new Date();
@@ -727,10 +741,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
 
     // A first level comment replies to the page's root: its cid, or its first link when
-    // the page has no cid. The node makes up the id from that root and the block's place.
+    // the page has no cid. The node makes up the id from what the comment attaches to,
+    // the commenter's key (nothing, when the comment is anonymous), the hash of the text
+    // and the most recent block header ('0' when the comment starts the chain).
     const replyFrom = !body.replyFrom || body.replyFrom === '0' ? root : String(body.replyFrom);
     if (replyFrom !== root && !data.some((comment) => comment?.id === replyFrom)) throw badRequest('A comment replies to one that exists');
-    const id = commentIdAt(root, section.blocks.length);
+    const id = commentIdAt(replyFrom, section.blocks.at(-1)?.hash ?? '', text, body.anonymous ? undefined : body.key);
     if (body.anonymous) {
       // Anonymous comments carry no key: they can never be edited or removed later.
       const block = this.appendCommentBlock(section, { id, text, time: this.commentTime(body.timePrecision), replyFrom });
@@ -754,7 +770,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   /** The author asking for their comment to go: the data goes, the headers stay. */
   private async removeComment(contentId: string, commentId: string, body: { key?: string; sig?: string }): Promise<void> {
-    const { section } = this.commentSection(contentId);
+    const { section } = this.findCommentSection(contentId);
+    if (!section) throw notFound('No such comment');
     const data = await this.commentDataOf(section);
     const original = data.filter((comment) => comment?.id === commentId).at(-1);
     if (!original) throw notFound('No such comment');
@@ -767,7 +784,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   }
 
   private voteComment(contentId: string, commentId: string, account: Account, vote: number): void {
-    const { section } = this.commentSection(contentId);
+    const { section } = this.findCommentSection(contentId);
+    if (!section) throw notFound('No such comment');
     const votes = (section.votes[commentId] ??= {});
     if (vote === 1 || vote === -1) votes[account.id] = vote;
     else delete votes[account.id];
@@ -777,7 +795,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   /** Everything the operator's console shows about one comment section. */
   private async adminComments(id: string): Promise<Record<string, unknown>> {
-    const { key, section } = this.commentSection(id);
+    const { key, section } = this.findCommentSection(id);
+    if (!section) return { content: key, shown: true, blocks: 0, votes: {}, comments: [] };
     const data = await this.commentDataOf(section);
     const hidden = new Set(section.hidden);
     const votes = this.commentVotes(section, undefined);
@@ -795,6 +814,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         dislikes: votes[comment.id]?.dislikes ?? 0,
       })),
     };
+  }
+
+  /** Flushes all comment data the node keeps for one content page: blocks, votes and hides. */
+  private flushComments(id: string): boolean {
+    const { key } = this.findCommentSection(id);
+    const existed = Boolean(this.comments.data.sections[key]);
+    if (existed) {
+      delete this.comments.data.sections[key];
+      this.comments.changed();
+    }
+    return existed;
   }
 
   /** The content provider client that keeps comment data when storage is 'provider'. */
@@ -949,12 +979,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     // every block header and signature themselves before showing anything.
     router.get('/v1/comments/:id', async (ctx) => {
       const account = this.auth.account(ctx);
-      const { key: root, section } = this.commentSection(ctx.params.id);
+      // Reading a page never stores anything: a page without comments sends an empty chain.
+      const { key: root, section } = this.findCommentSection(ctx.params.id);
       return {
         root,
-        blocks: await this.servedComments(section),
-        votes: this.commentVotes(section, account?.id),
-        shown: section.shown,
+        blocks: section ? await this.servedComments(section) : [],
+        votes: section ? this.commentVotes(section, account?.id) : {},
+        shown: section?.shown ?? true,
       };
     });
 
@@ -2129,26 +2160,35 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return { removed: existed };
     });
     // Comment sections: the operator sees them and decides whether one sends its comment
-    // data at all (the block headers always go out), or hides single comments.
+    // data at all (the block headers always go out), or hides single comments. Pages that
+    // have no comments yet hold nothing here and are not listed at all.
     router.get('/v1/admin/comments', (ctx) => {
       admin(ctx);
       return {
-        sections: Object.entries(this.comments.data.sections).map(([content, section]) => ({
-          content,
-          blocks: section.blocks.length,
-          hidden: section.hidden.length,
-          shown: section.shown,
-        })),
+        sections: Object.entries(this.comments.data.sections)
+          .filter(([, section]) => section.blocks.length > 0)
+          .map(([content, section]) => ({
+            content,
+            blocks: section.blocks.length,
+            hidden: section.hidden.length,
+            shown: section.shown,
+          })),
       };
     });
     router.get('/v1/admin/comments/:id', async (ctx) => {
       admin(ctx);
       return this.adminComments(ctx.params.id);
     });
+    // Flushing a page's comment data: every block, vote and hiding goes, the page starts over.
+    router.delete('/v1/admin/comments/:id', (ctx) => {
+      admin(ctx);
+      return { flushed: this.flushComments(ctx.params.id) };
+    });
     router.put('/v1/admin/comments/:id', async (ctx) => {
       admin(ctx);
       const body = await readJson<{ shown?: boolean }>(ctx.req);
-      const { section } = this.commentSection(ctx.params.id);
+      const { section } = this.findCommentSection(ctx.params.id);
+      if (!section) throw notFound('No comment section on this page');
       section.shown = body.shown !== false;
       this.comments.changed();
       return this.adminComments(ctx.params.id);
@@ -2156,7 +2196,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     router.post('/v1/admin/comments/:id/:comment/:action', async (ctx) => {
       admin(ctx);
       if (ctx.params.action !== 'hide' && ctx.params.action !== 'show') throw badRequest('hide or show');
-      const { section } = this.commentSection(ctx.params.id);
+      const { section } = this.findCommentSection(ctx.params.id);
+      if (!section) throw notFound('No comment section on this page');
       const at = section.hidden.indexOf(ctx.params.comment);
       if (ctx.params.action === 'hide' && at < 0) section.hidden.push(ctx.params.comment);
       if (ctx.params.action === 'show' && at >= 0) section.hidden.splice(at, 1);

@@ -10,7 +10,7 @@ import {
   type CommentEntry,
 } from '../src/shared/comments.js';
 import { baseId } from '../src/shared/sources.js';
-import { generateIdentity, signData, type Identity } from '../src/shared/crypto.js';
+import { generateIdentity, sha256hex, signData, type Identity } from '../src/shared/crypto.js';
 import { admin, clientFor, startAlgorithm, startClient, startProvider, tempDir } from './helpers.js';
 import type { CommentsResponse } from '../src/shared/clientapi.js';
 
@@ -57,7 +57,12 @@ describe('comments on a content page, as a hash chain', async () => {
       body: { text: 'First!', ...sign(alice, '0', 'First!') },
     });
     assert.ok(first.block.data?.id, 'the node makes up the comment id');
-    assert.equal(first.block.data!.id, commentIdAt(root, 0), 'the id is the hash of the page root and the block index');
+    assert.equal(first.block.data!.id, commentIdAt(root, '0', 'First!', alice.id), 'the id hashes the page, the commenter, the text and the chain tip');
+    assert.equal(
+      first.block.data!.id,
+      sha256hex([sha256hex(root), sha256hex(alice.id), sha256hex('First!'), '0'].join('\n')),
+      'a first level id is the hash of the hashes of the content (cid, or first link), the commenter id, the text and the most recent header (0 when none)'
+    );
     assert.equal(first.block.data!.replyFrom, root, 'a first level comment replies to the page root (its cid, or first link)');
     const parentId = first.block.data!.id;
     await asAlice.json(`/v1/comments/${content}`, {
@@ -74,7 +79,11 @@ describe('comments on a content page, as a hash chain', async () => {
     assert.equal(top.replyFrom, root, 'a top level comment replies to the page root');
     assert.equal(reply.replyFrom, top.id, 'a reply names the comment it replies to');
     assert.equal(top.key, alice.id, "the commenter's key is on the comment");
-    assert.equal(answer.blocks[1].id, commentIdAt(root, 1), 'each block carries the comment id in its header');
+    assert.equal(
+      answer.blocks[1].id,
+      commentIdAt(parentId, answer.blocks[0].hash, 'A reply', alice.id),
+      'a reply hashes the id it replies from, with the block before it as the chain tip'
+    );
   });
 
   it('lets only the same exact key edit a comment, keeping the history', async () => {
@@ -205,6 +214,49 @@ describe('the operator moderating comments', async () => {
   });
 });
 
+describe('the operator flushing comment data, and pages without comments', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  const alice = generateIdentity();
+  const asAlice = clientFor(url, 'identity', alice);
+
+  it('keeps nothing at all for a page that has no comments', async () => {
+    const page = 'yt:nocommentshere';
+    for (let ask = 0; ask < 2; ask++) {
+      const answer = await asAlice.json<CommentsAnswer>(`/v1/comments/${page}`);
+      assert.deepEqual(answer.blocks, [], 'an empty chain comes back');
+    }
+    const view = await admin<{ sections: { content: string }[] }>(url, '/v1/admin/comments');
+    assert.ok(!view.sections.some((section) => section.content === page), 'reading a page never stores a comment section');
+    const open = await admin<{ blocks: number; comments: unknown[] }>(url, `/v1/admin/comments/${page}`);
+    assert.equal(open.blocks, 0, 'the operator sees no information about a page without comments');
+  });
+
+  it('flushes every block, vote and hiding of one content page', async () => {
+    await asAlice.json(`/v1/comments/${content}`, { method: 'POST', body: { text: 'Goes away', ...sign(alice, '0', 'Goes away') } });
+    const posted = await asAlice.json<CommentsAnswer>(`/v1/comments/${content}`);
+    assert.equal(posted.blocks.length, 1);
+    await asAlice.json(`/v1/comments/${content}/${posted.blocks[0].id}/vote`, { method: 'POST', body: { vote: 1 } });
+
+    assert.equal(
+      (await admin<{ flushed: boolean }>(url, `/v1/admin/comments/${content}`, { method: 'DELETE' })).flushed,
+      true,
+      'the flush finds the data it removes'
+    );
+    const gone = await asAlice.json<CommentsAnswer>(`/v1/comments/${content}`);
+    assert.deepEqual(gone.blocks, [], 'the chain is gone');
+    assert.deepEqual(gone.votes, {}, 'the votes are gone');
+    const view = await admin<{ sections: { content: string }[] }>(url, '/v1/admin/comments');
+    assert.ok(!view.sections.some((section) => section.content === baseId(content)), 'the page is not listed anymore');
+    assert.equal(
+      (await admin<{ flushed: boolean }>(url, `/v1/admin/comments/${content}`, { method: 'DELETE' })).flushed,
+      false,
+      'flushing a page twice is fine'
+    );
+  });
+});
+
 describe('a client checking the chain itself', async () => {
   const node = await startAlgorithm();
   const url = node.url();
@@ -250,6 +302,70 @@ describe('a search node limiting what comments may say', async () => {
       }),
       /at most 20/
     );
+  });
+});
+
+describe('a client posting a comment and reloading the section from the node', async () => {
+  const { dir, cleanup } = tempDir();
+  const node = await startAlgorithm();
+  const { client, api } = await startClient(dir);
+  await api('/api/nodes', { body: { text: node.reference() } });
+  after(async () => {
+    await client.stop();
+    await node.stop();
+    cleanup();
+  });
+
+  it('shows the posted comment in what the algorithm search node sends back', async () => {
+    await api(`/api/comments/${content}`, { body: { text: 'Posted from the client', anonymous: false, timePrecision: 'datetime' } });
+    // The comment section reloaded from the response of the algorithm search node.
+    const answer = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${content}`, { auth: false });
+    const chain = checkCommentChain(answer.blocks, answer.votes);
+    assert.deepEqual(chain.errors, [], JSON.stringify(answer.blocks));
+    const posted = chain.entries.find((entry) => !('removed' in entry) && entry.text === 'Posted from the client') as CommentEntry | undefined;
+    assert.ok(posted, 'the posted comment is in the section the node sends back');
+    assert.equal(posted.replyFrom, answer.root, 'it is a first level comment: it replies to the page root');
+    assert.equal(
+      posted.id,
+      commentIdAt(answer.root, '0', 'Posted from the client', client.store.identity.id),
+      'the id hashes the page root, the commenter key, the text and the chain tip'
+    );
+
+    // An anonymous comment carries no key, so none goes into its id either.
+    await api(`/api/comments/${content}`, { body: { text: 'Quietly', anonymous: true, timePrecision: 'none' } });
+    const withAnon = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${content}`, { auth: false });
+    const anon = checkCommentChain(withAnon.blocks, withAnon.votes).entries.find(
+      (entry) => !('removed' in entry) && entry.text === 'Quietly'
+    ) as CommentEntry | undefined;
+    assert.ok(anon, 'the anonymous comment is there too');
+    assert.equal(anon.anonymous, true);
+    assert.equal(
+      anon.id,
+      commentIdAt(withAnon.root, withAnon.blocks[0].hash, 'Quietly'),
+      'nothing takes the key’s place in the id of an anonymous comment'
+    );
+  });
+
+  it('keeps the chain clean through replies, edits and removals made from the client', async () => {
+    const page = 'vs1' + 'e'.repeat(52) + '~yt:clip1';
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Top level', timePrecision: 'date' } });
+    const before = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${encodeURIComponent(page)}`, { auth: false });
+    const top = checkCommentChain(before.blocks, before.votes).entries.find(
+      (entry) => !('removed' in entry) && entry.text === 'Top level'
+    ) as CommentEntry;
+    assert.ok(top, 'the first comment is in the section');
+    assert.equal(top.replyFrom, before.root, 'a page with a link id roots its first level comments in that link');
+
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'A reply', replyFrom: top.id } });
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Top level, fixed', editOf: top.id, replyFrom: top.replyFrom } });
+    await api(`/api/comments/${encodeURIComponent(page)}/${top.id}/remove`, { body: {} });
+
+    const answer = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${encodeURIComponent(page)}`, { auth: false });
+    const chain = checkCommentChain(answer.blocks, answer.votes);
+    assert.deepEqual(chain.errors, [], JSON.stringify(answer.blocks));
+    const kept = chain.entries.filter((entry) => !('removed' in entry)) as CommentEntry[];
+    assert.deepEqual(kept.map((entry) => entry.text), ['A reply'], 'only the reply carries data once the author removed their comment');
+    assert.equal(chain.entries.filter((entry) => 'removed' in entry).length, 2, 'the comment and its edit keep their headers only');
   });
 });
 
