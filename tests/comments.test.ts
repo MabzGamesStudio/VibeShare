@@ -2,27 +2,32 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import {
   checkCommentChain,
+  commentIdAt,
   commentRemovePayload,
   commentSigningPayload,
   type ChainEntry,
   type CommentBlock,
   type CommentEntry,
 } from '../src/shared/comments.js';
+import { baseId } from '../src/shared/sources.js';
 import { generateIdentity, signData, type Identity } from '../src/shared/crypto.js';
-import { admin, clientFor, startAlgorithm, startProvider } from './helpers.js';
+import { admin, clientFor, startAlgorithm, startClient, startProvider, tempDir } from './helpers.js';
+import type { CommentsResponse } from '../src/shared/clientapi.js';
 
 interface CommentsAnswer {
+  root: string;
   blocks: CommentBlock[];
   votes: Record<string, { likes: number; dislikes: number; mine?: 1 | -1 | 0 }>;
   shown: boolean;
 }
 
 const content = 'vs1' + 'c'.repeat(52);
+const root = baseId(content);
 
-/** What a commenter signs and sends along with their comment. */
+/** What a commenter signs and sends along with their comment ('0' means first level). */
 const sign = (key: Identity, replyFrom: string, text: string) => ({
   key: key.id,
-  sig: signData(key, commentSigningPayload({ key: key.id, replyFrom, text })),
+  sig: signData(key, commentSigningPayload({ key: key.id, replyFrom: replyFrom === '0' ? root : replyFrom, text })),
 });
 
 const resolved = (answer: CommentsAnswer) => {
@@ -52,6 +57,8 @@ describe('comments on a content page, as a hash chain', async () => {
       body: { text: 'First!', ...sign(alice, '0', 'First!') },
     });
     assert.ok(first.block.data?.id, 'the node makes up the comment id');
+    assert.equal(first.block.data!.id, commentIdAt(root, 0), 'the id is the hash of the page root and the block index');
+    assert.equal(first.block.data!.replyFrom, root, 'a first level comment replies to the page root (its cid, or first link)');
     const parentId = first.block.data!.id;
     await asAlice.json(`/v1/comments/${content}`, {
       method: 'POST',
@@ -60,12 +67,14 @@ describe('comments on a content page, as a hash chain', async () => {
 
     const answer = await asAlice.json<CommentsAnswer>(`/v1/comments/${content}`);
     assert.equal(answer.blocks.length, 2);
+    assert.equal(answer.root, root);
     const entries = resolved(answer);
     const top = comment(entries, 'First!');
     const reply = comment(entries, 'A reply');
-    assert.equal(top.replyFrom, '0', 'a top level comment replies to nothing');
+    assert.equal(top.replyFrom, root, 'a top level comment replies to the page root');
     assert.equal(reply.replyFrom, top.id, 'a reply names the comment it replies to');
     assert.equal(top.key, alice.id, "the commenter's key is on the comment");
+    assert.equal(answer.blocks[1].id, commentIdAt(root, 1), 'each block carries the comment id in its header');
   });
 
   it('lets only the same exact key edit a comment, keeping the history', async () => {
@@ -241,6 +250,36 @@ describe('a search node limiting what comments may say', async () => {
       }),
       /at most 20/
     );
+  });
+});
+
+describe('the client writing and reading comments through its daemon', async () => {
+  const { dir, cleanup } = tempDir();
+  const node = await startAlgorithm();
+  const { client, api } = await startClient(dir);
+  await api('/api/nodes', { body: { text: node.reference() } });
+  after(async () => {
+    await client.stop();
+    await node.stop();
+    cleanup();
+  });
+
+  it('posts a comment and the chain it reads back verifies', async () => {
+    await api(`/api/comments/${content}`, { body: { text: 'Through the daemon', timePrecision: 'datetime' } });
+    const answer = await api<CommentsResponse>(`/api/comments/${content}`);
+    const chain = checkCommentChain(answer.blocks, answer.votes);
+    assert.deepEqual(chain.errors, [], JSON.stringify(answer.blocks));
+  });
+
+  it('takes pasted text with stray whitespace, replies and edits without breaking the chain', async () => {
+    const page = 'vs1' + 'd'.repeat(52) + '~yt:black1';
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Pasted line\n', timePrecision: 'date' } });
+    const after = await api<CommentsResponse>(`/api/comments/${encodeURIComponent(page)}`);
+    const first = after.blocks[0].data!;
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: '  A reply  ', replyFrom: first.id } });
+    await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Fixed up ', editOf: first.id, replyFrom: first.replyFrom } });
+    const answer = await api<CommentsResponse>(`/api/comments/${encodeURIComponent(page)}`);
+    assert.deepEqual(checkCommentChain(answer.blocks, answer.votes).errors, [], JSON.stringify(answer.blocks));
   });
 });
 

@@ -10,6 +10,8 @@ export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
 
 /** The whole comment chain of a content page, and the viewer's own key. */
 export interface CommentsResponse {
+  /** The page's root (its cid, or its first link): what first level comments reply to. */
+  root: string;
   /** Every block of the chain; data is absent where the node keeps a comment back. */
   blocks: CommentBlock[];
   votes: Record<string, CommentVotes>;

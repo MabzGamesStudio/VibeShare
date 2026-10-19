@@ -41,7 +41,7 @@ import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
-import { embedFor, parseContentId, parseSource, platformOf, withSources } from '../shared/sources.js';
+import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
 import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
@@ -432,7 +432,9 @@ export class ClientCore {
     const node = this.commentNode();
     if (!node) throw new Error('No algorithm node is enabled');
     const identity = this.store.identity;
-    const replyFrom = body.replyFrom ?? '0';
+    // A first level comment replies to the page's root: its cid, or its first link. The
+    // text is signed exactly as it is sent, so the chain hashes the same bytes.
+    const replyFrom = !body.replyFrom || body.replyFrom === '0' ? baseId(id) : body.replyFrom;
     const signed = body.anonymous
       ? {}
       : { key: identity.id, sig: signData(identity, commentSigningPayload({ key: identity.id, replyFrom, text: body.text })) };

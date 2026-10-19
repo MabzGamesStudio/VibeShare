@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { Account } from '../commerce/ledger.js';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import { isKeyId, randomId, verifySignature } from '../shared/crypto.js';
@@ -7,6 +6,7 @@ import { buildManifestFromBuffer, contentIdOf, validateManifest } from '../share
 import {
   blockHash,
   commentDataHash,
+  commentIdAt,
   commentRemovePayload,
   commentSigningPayload,
   type CommentBlock,
@@ -632,7 +632,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private appendCommentBlock(section: CommentSection, data: CommentData): CommentBlock {
     const prev = section.blocks.at(-1)?.hash ?? '';
     const dataHash = commentDataHash(data);
-    const block: CommentBlock = { prev, dataHash, hash: blockHash(prev, dataHash), data };
+    const block: CommentBlock = { prev, dataHash, hash: blockHash(prev, dataHash, data.id), id: data.id, data };
     section.blocks.push(block);
     return block;
   }
@@ -651,7 +651,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const comment = data[index];
       return section.shown && comment && !hidden.has(comment.id)
         ? { ...block, data: comment }
-        : { prev: block.prev, dataHash: block.dataHash, hash: block.hash };
+        : { prev: block.prev, dataHash: block.dataHash, hash: block.hash, id: block.id };
     });
   }
 
@@ -690,11 +690,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   /** Appends a comment (or an edit of one) to a content page's chain. */
   private async postComment(contentId: string, account: Account, body: CommentPostBody): Promise<CommentBlock> {
-    const text = String(body.text ?? '').trim();
+    // The text is signed and hashed exactly as it comes: only its presence is checked, so
+    // a signature never covers other bytes than the chain ends up hashing.
+    const text = String(body.text ?? '');
     const maxLength = this.config.comments.maxLength;
-    if (!text) throw badRequest('A comment needs text');
+    if (!text.trim()) throw badRequest('A comment needs text');
     if (text.length > maxLength) throw badRequest(`A comment is at most ${maxLength} characters`);
-    const { section } = this.commentSection(contentId);
+    const { key: root, section } = this.commentSection(contentId);
     const data = await this.commentDataOf(section);
     this.noteCommentBlock(account.id);
 
@@ -724,11 +726,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return block;
     }
 
-    const replyFrom = String(body.replyFrom ?? '0');
-    if (replyFrom !== '0' && !data.some((comment) => comment?.id === replyFrom)) throw badRequest('A comment replies to one that exists');
+    // A first level comment replies to the page's root: its cid, or its first link when
+    // the page has no cid. The node makes up the id from that root and the block's place.
+    const replyFrom = !body.replyFrom || body.replyFrom === '0' ? root : String(body.replyFrom);
+    if (replyFrom !== root && !data.some((comment) => comment?.id === replyFrom)) throw badRequest('A comment replies to one that exists');
+    const id = commentIdAt(root, section.blocks.length);
     if (body.anonymous) {
       // Anonymous comments carry no key: they can never be edited or removed later.
-      const block = this.appendCommentBlock(section, { id: randomUUID(), text, time: this.commentTime(body.timePrecision), replyFrom });
+      const block = this.appendCommentBlock(section, { id, text, time: this.commentTime(body.timePrecision), replyFrom });
       await this.saveComments(section);
       return block;
     }
@@ -736,7 +741,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       throw forbidden("A comment needs a signature by its commenter's key");
     }
     const block = this.appendCommentBlock(section, {
-      id: randomUUID(),
+      id,
       text,
       key: body.key,
       sig: body.sig,
@@ -944,8 +949,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     // every block header and signature themselves before showing anything.
     router.get('/v1/comments/:id', async (ctx) => {
       const account = this.auth.account(ctx);
-      const { section } = this.commentSection(ctx.params.id);
+      const { key: root, section } = this.commentSection(ctx.params.id);
       return {
+        root,
         blocks: await this.servedComments(section),
         votes: this.commentVotes(section, account?.id),
         shown: section.shown,

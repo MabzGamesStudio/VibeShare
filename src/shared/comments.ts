@@ -30,8 +30,10 @@ export interface CommentBlock {
   prev: string;
   /** sha256 of the canonical comment data. */
   dataHash: string;
-  /** sha256 of (prev + dataHash): this block's header hash. */
+  /** sha256 of (prev + dataHash + id): this block's header hash. */
   hash: string;
+  /** The comment id, in the header: an edit reuses the id, and it stays when data goes. */
+  id: string;
   /** The comment data; absent when the node keeps only the header (removed or hidden). */
   data?: CommentData;
 }
@@ -41,6 +43,7 @@ export interface CommentEntry {
   id: string;
   text: string;
   time: string;
+  /** The comment it is a reply from; a first level comment replies to the page's root. */
   replyFrom: string;
   key?: string;
   anonymous: boolean;
@@ -56,6 +59,7 @@ export interface CommentEntry {
 /** A block whose data the node keeps back: the comment existed and was removed. */
 export interface RemovedEntry {
   removed: true;
+  id: string;
 }
 
 export type ChainEntry = CommentEntry | RemovedEntry;
@@ -85,8 +89,18 @@ export function commentDataHash(data: CommentData): string {
   return sha256hex(canonicalComment(data));
 }
 
-export function blockHash(prev: string, dataHash: string): string {
-  return sha256hex(prev + dataHash);
+/** A block's header hash: the previous header, the data hash and the comment id. */
+export function blockHash(prev: string, dataHash: string, id: string): string {
+  return sha256hex(prev + dataHash + id);
+}
+
+/**
+ * The node makes up comment ids deterministically: the hash of the page's root (its cid,
+ * or its first link when it has no cid) and where the comment's block sits in the chain.
+ * An edit reuses the id of the comment it edits.
+ */
+export function commentIdAt(root: string, index: number): string {
+  return sha256hex(`${root}\n${index}`);
 }
 
 /**
@@ -105,13 +119,14 @@ export function checkCommentChain(
   let prev = '';
   for (const [index, block] of blocks.entries()) {
     if (block.prev !== prev) errors.push(`Block ${index + 1} does not link to the one before it`);
-    if (block.hash !== blockHash(block.prev, block.dataHash)) errors.push(`Block ${index + 1} header hash does not match its contents`);
+    if (block.hash !== blockHash(block.prev, block.dataHash, block.id)) errors.push(`Block ${index + 1} header hash does not match its contents`);
     prev = block.hash;
     const data = block.data;
     if (!data) {
-      entries.push({ removed: true });
+      entries.push({ removed: true, id: block.id });
       continue;
     }
+    if (data.id !== block.id) errors.push(`The data of block ${index + 1} is not about the comment its header names`);
     if (commentDataHash(data) !== block.dataHash) {
       errors.push(`The data of block ${index + 1} does not match its hash`);
       continue;

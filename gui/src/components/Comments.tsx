@@ -31,11 +31,11 @@ const PRECISION_HINTS: Record<CommentTimePrecision, string> = {
 };
 
 /** How deep a comment sits in the reply chain (following replyFrom links). */
-function depthOf(entry: CommentEntry, byId: Map<string, CommentEntry>): number {
+function depthOf(entry: CommentEntry, byId: Map<string, CommentEntry>, root: string): number {
   let depth = 0;
   let current: CommentEntry | undefined = entry;
   const seen = new Set<string>();
-  while (current && current.replyFrom !== '0' && !seen.has(current.id)) {
+  while (current && current.replyFrom !== root && !seen.has(current.id)) {
     seen.add(current.id);
     current = byId.get(current.replyFrom);
     if (current) depth++;
@@ -157,16 +157,16 @@ export function Comments({ contentId }: { contentId: string }) {
       </div>
 
       <div className="form-stack">
-        {entries.map((entry, index) => {
+        {entries.map((entry) => {
           if ('removed' in entry) {
             return (
-              <div key={`removed-${index}`} className="small muted" style={{ fontStyle: 'italic' }}>
+              <div key={`removed-${entry.id}`} className="small muted" style={{ fontStyle: 'italic' }}>
                 A comment was removed by the node operator.
               </div>
             );
           }
           const mine = !entry.anonymous && entry.key === data?.you;
-          const depth = depthOf(entry, byId);
+          const depth = depthOf(entry, byId, data?.root ?? '');
           return (
             <div key={entry.id} style={{ marginLeft: depth * 24, borderTop: '1px solid var(--border, #eee)', paddingTop: 10 }}>
               <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
