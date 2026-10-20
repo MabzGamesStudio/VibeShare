@@ -67,7 +67,7 @@ export function defaultPages(): PageConfig[] {
 }
 
 /** Current settings format; older settings get the newer defaults once (normalizeSettings). */
-export const SETTINGS_REVISION = 2;
+export const SETTINGS_REVISION = 3;
 
 export function defaultSettings(): Settings {
   return {
@@ -92,7 +92,8 @@ export function defaultSettings(): Settings {
     searchSuggestions: true,
     selectedBloom: { enabled: true, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
     previewBloom: { enabled: true, bits: 100_000, expected: BLOOM_EXPECTED_ITEMS },
-    nodeBloom: { enabled: false, bits: 10_000, inline: true, expected: BLOOM_EXPECTED_ITEMS },
+    searchBloom: { enabled: false, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
+    accountBloom: { enabled: false, bits: 1_000_000, expected: BLOOM_EXPECTED_ITEMS, resubmitHours: 24 },
     seenContentMode: 'hide',
   };
 }
@@ -103,8 +104,10 @@ export const BLOOM_BIT_STOPS = {
   selected: 8,
   /** Previewed content: up to 1,000,000,000 bits. */
   preview: 9,
-  /** The filter sent to search algorithm nodes: up to 1,000,000,000 bits. */
-  node: 9,
+  /** The filter carried in search and explore requests: up to 100,000 bits (it travels). */
+  search: 5,
+  /** The account filter kept on search nodes: up to 1,000,000 bits (what nodes keep). */
+  account: 6,
 } as const;
 
 /** A filter size on the slider: `10 ** exponent` bits, at most `maxStop` decades. */
@@ -133,7 +136,8 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     tor: { ...base.tor, ...saved?.tor },
     selectedBloom: { ...base.selectedBloom, ...saved?.selectedBloom },
     previewBloom: { ...base.previewBloom, ...saved?.previewBloom },
-    nodeBloom: { ...base.nodeBloom, ...saved?.nodeBloom },
+    searchBloom: { ...base.searchBloom, ...saved?.searchBloom },
+    accountBloom: { ...base.accountBloom, ...saved?.accountBloom },
   };
   // The old default home page (a 2D canvas) is gone: the video page is the home page now.
   const goneHome = (page: { id: string; preset?: string }) => page.id === 'home' || page.preset === 'home';
@@ -153,6 +157,16 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   const legacyMode = (saved?.previewBloom as { mode?: string } | undefined)?.mode;
   if (saved && saved.seenContentMode === undefined && legacyMode === 'demote') merged.seenContentMode = 'rank';
   delete (merged.previewBloom as { mode?: string }).mode;
+  // The old single node filter (carried in requests, optionally stored) is the search
+  // filter now; the account's much larger filter starts at its own defaults.
+  const legacyNode = (saved as { nodeBloom?: { enabled?: boolean; bits?: number; expected?: number } } | undefined)?.nodeBloom;
+  if (saved && !saved.searchBloom && legacyNode) {
+    merged.searchBloom = {
+      enabled: Boolean(legacyNode.enabled),
+      bits: Number(legacyNode.bits ?? merged.searchBloom.bits),
+      expected: Number(legacyNode.expected ?? merged.searchBloom.expected),
+    };
+  }
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -225,7 +239,8 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     tor: { ...current.tor, ...(patch.tor ?? {}) },
     selectedBloom: { ...current.selectedBloom, ...(patch.selectedBloom ?? {}) },
     previewBloom: { ...current.previewBloom, ...(patch.previewBloom ?? {}) },
-    nodeBloom: { ...current.nodeBloom, ...(patch.nodeBloom ?? {}) },
+    searchBloom: { ...current.searchBloom, ...(patch.searchBloom ?? {}) },
+    accountBloom: { ...current.accountBloom, ...(patch.accountBloom ?? {}) },
     pages: patch.pages ?? current.pages,
   });
   if (!['off', 'onion', 'all'].includes(next.tor.mode)) throw new Error('Tor mode is off, onion or all');
@@ -243,18 +258,23 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   try {
     next.selectedBloom.bits = bloomBitStep(next.selectedBloom.bits, BLOOM_BIT_STOPS.selected);
     next.previewBloom.bits = bloomBitStep(next.previewBloom.bits, BLOOM_BIT_STOPS.preview);
-    next.nodeBloom.bits = bloomBitStep(next.nodeBloom.bits, BLOOM_BIT_STOPS.node);
+    next.searchBloom.bits = bloomBitStep(next.searchBloom.bits, BLOOM_BIT_STOPS.search);
+    next.accountBloom.bits = bloomBitStep(next.accountBloom.bits, BLOOM_BIT_STOPS.account);
     next.selectedBloom.expected = bloomExpected(next.selectedBloom.expected);
     next.previewBloom.expected = bloomExpected(next.previewBloom.expected);
-    next.nodeBloom.expected = bloomExpected(next.nodeBloom.expected);
+    next.searchBloom.expected = bloomExpected(next.searchBloom.expected);
+    next.accountBloom.expected = bloomExpected(next.accountBloom.expected);
   } catch (error) {
     throw new Error((error as Error).message);
   }
   if (!['hide', 'rank'].includes(next.seenContentMode)) throw new Error('Seen content is hidden or ranked lower');
   next.selectedBloom.enabled = Boolean(next.selectedBloom.enabled);
   next.previewBloom.enabled = Boolean(next.previewBloom.enabled);
-  next.nodeBloom.enabled = Boolean(next.nodeBloom.enabled);
-  next.nodeBloom.inline = Boolean(next.nodeBloom.inline);
+  next.searchBloom.enabled = Boolean(next.searchBloom.enabled);
+  next.accountBloom.enabled = Boolean(next.accountBloom.enabled);
+  // How often the job resubmits the account filter, in hours: every day unless the user
+  // says otherwise. 0 switches the job off — the settings button still submits at any time.
+  next.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(next.accountBloom.resubmitHours) || 0));
   next.blockExternalEmbeds = Boolean(next.blockExternalEmbeds);
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));

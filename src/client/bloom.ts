@@ -2,29 +2,33 @@
 //  - selected: content the user opened (selected), kept entirely on this device;
 //  - preview:  content whose preview the user has seen on screen (hide it again, or
 //              just push it down among the other previews — a settings choice);
-//  - node:     the same seen-content record, but its bits are sent to search algorithm
-//              nodes (stored there for a price, or carried in requests when small), who
-//              then stop suggesting anything that collides with it.
+//  - search:   the same seen-content record in a size that travels inside every search
+//              and explore request (and nowhere else), so nodes stop suggesting whatever
+//              collides with it while it is being asked;
+//  - account:  a much larger, completely separate record of the same content: never sent
+//              in requests, but submitted to search nodes (by hand or by the resubmission
+//              job), which keep it long term and apply it while searching.
 // Every filter remembers a content by its cid and each of its links, independently.
 // Browser-safe: no Node imports.
 import { BloomFilter, BLOOM_EXPECTED_ITEMS, optimalHashCount, type BloomFilterData, type ContentIdentity } from '../shared/bloom.js';
-import type { BloomFilterSettings, BloomStatus, PreviewBloomSettings, Settings } from '../shared/clientapi.js';
+import type { AccountBloomSettings, BloomFilterSettings, BloomStatus } from '../shared/clientapi.js';
 import type { BloomData, ClientStoreLike } from './model.js';
 
-export type BloomScope = 'selected' | 'preview' | 'node';
+export type BloomScope = 'selected' | 'preview' | 'search' | 'account';
 
-const SETTING_OF: Record<BloomScope, 'selectedBloom' | 'previewBloom' | 'nodeBloom'> = {
+const SETTING_OF: Record<BloomScope, 'selectedBloom' | 'previewBloom' | 'searchBloom' | 'accountBloom'> = {
   selected: 'selectedBloom',
   preview: 'previewBloom',
-  node: 'nodeBloom',
+  search: 'searchBloom',
+  account: 'accountBloom',
 };
 
-/** Which filters record what: opening content, seeing a preview, and what is sent to nodes. */
+/** Which filters record what: opening content, seeing a preview, and what goes to nodes. */
 export const SCOPES_OF_EVENT: Record<'selected' | 'preview', BloomScope[]> = {
-  // Content sent to the search nodes covers everything the user has seen: both what was
-  // actually selected and what was only previewed, so neither is ever suggested again.
-  selected: ['selected', 'node'],
-  preview: ['preview', 'node'],
+  // What the nodes are told covers everything the user has seen: both what was actually
+  // selected and what was only previewed, so neither is ever suggested again.
+  selected: ['selected', 'search', 'account'],
+  preview: ['preview', 'search', 'account'],
 };
 
 export class BloomBook {
@@ -43,7 +47,7 @@ export class BloomBook {
     this.filters = {};
   }
 
-  setting(scope: BloomScope): Settings['selectedBloom'] | PreviewBloomSettings | Settings['nodeBloom'] {
+  setting(scope: BloomScope): BloomFilterSettings | AccountBloomSettings {
     return this.store.data.data.settings[SETTING_OF[scope]];
   }
 
@@ -56,7 +60,7 @@ export class BloomBook {
     const { bits, expected } = setting;
     let filter = this.filters[scope];
     if (!filter || filter.m !== bits || filter.expected !== expected) {
-      const saved = this.data[scope];
+      const saved = this.data[scope] ?? (scope === 'search' ? this.data.node : undefined);
       filter = saved && saved.m === bits && (saved.n ?? BLOOM_EXPECTED_ITEMS) === expected ? BloomFilter.from(saved) : new BloomFilter(bits, expected);
       this.filters[scope] = filter;
     }
@@ -112,11 +116,11 @@ export class BloomBook {
         added: filter.added,
       };
     };
-    const node = this.store.data.data.settings.nodeBloom;
     return {
       selected: of('selected'),
       preview: of('preview'),
-      node: { ...of('node'), inline: node.inline },
+      search: of('search'),
+      account: { ...of('account'), resubmitHours: this.store.data.data.settings.accountBloom.resubmitHours },
     };
   }
 }

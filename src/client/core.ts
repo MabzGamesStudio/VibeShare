@@ -35,7 +35,7 @@ import {
   type ProfileAccess,
   type SealKey,
 } from '../shared/profiles.js';
-import { SOFTWARE, claimSigningPayload, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { SOFTWARE, claimSigningPayload, type AccountFilterState, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
 import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
@@ -62,6 +62,13 @@ export function decodeCursor(text: string | undefined): Record<string, string | 
   } catch {
     return null;
   }
+}
+
+/** A timer that never holds a process open (unref'd where the runtime knows the trick). */
+function later(ms: number, fn: () => void): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(fn, ms);
+  (timer as { unref?: () => void }).unref?.();
+  return timer;
 }
 
 export interface ClientCoreOptions {
@@ -109,6 +116,8 @@ export class ClientCore {
       storeChanged();
       this.scheduleSeal();
     };
+    // The account filter's resubmission job (a no-op while the setting is off).
+    this.scheduleBloomJob();
   }
 
   get settings(): Settings {
@@ -146,14 +155,16 @@ export class ClientCore {
   }
 
   /**
-   * The seen-content filter carried inside a request to an algorithm node: only when the
-   * user sends one at all, and only while it is small enough for that node to accept.
+   * The seen-content filter carried inside a request to an algorithm node — the search
+   * filter: only when the user sends one at all, and only while it is small enough for
+   * that node to accept. The account's much larger filter never travels this way: the node
+   * keeps it and applies it while searching.
    */
   private bloomPayload(node: NodeEntry): { bloom?: BloomFilterData } {
-    const settings = this.settings.nodeBloom;
-    if (!settings.enabled || !settings.inline) return {};
+    const settings = this.settings.searchBloom;
+    if (!settings.enabled) return {};
     const limit = (node.info as AlgorithmInfo | undefined)?.bloom?.inlineMaxBits ?? BLOOM_INLINE_MAX_BYTES * 8;
-    const payload = this.blooms.payload('node', limit);
+    const payload = this.blooms.payload('search', limit);
     return payload ? { bloom: payload } : {};
   }
 
@@ -206,7 +217,7 @@ export class ClientCore {
       const price = this.nodes.algorithmPrice(node, priceKind);
       // (Paid answers carry the new balance; nothing else is asked — except when the node
       // keeps the user's seen-content filter, which it only applies to the account.)
-      const identify = price > 0 || (seenContent && this.settings.nodeBloom.enabled);
+      const identify = price > 0 || (seenContent && (this.settings.searchBloom.enabled || this.settings.accountBloom.enabled));
       return this.askJson<Page<ContentItem>>(
         node,
         path,
@@ -542,6 +553,7 @@ export class ClientCore {
     this.store.data.data.settings = next;
     this.store.changed();
     this.options.onSettings?.(current, next);
+    this.scheduleBloomJob();
     return next;
   }
 
@@ -1228,14 +1240,16 @@ export class ClientCore {
     return { added: this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.preview) };
   }
 
-  /** The state of the three seen-content filters (what the settings screen shows). */
+  /** The state of the four seen-content filters (what the settings screen shows). */
   bloomStatus(): BloomStatus {
     return this.blooms.status();
   }
 
   /** Forgets one filter; the user is warned about this before it is called. */
   resetBloom(scope: string): BloomStatus {
-    if (scope !== 'selected' && scope !== 'preview' && scope !== 'node') throw badRequest('scope is selected, preview or node');
+    if (scope !== 'selected' && scope !== 'preview' && scope !== 'search' && scope !== 'account') {
+      throw badRequest('scope is selected, preview, search or account');
+    }
     this.blooms.reset(scope);
     return this.blooms.status();
   }
@@ -1245,10 +1259,10 @@ export class ClientCore {
     return this.nodes.client(node).json<BloomStorageState>('/v1/bloom');
   }
 
-  /** Pays a search node (its own price and duration) to keep the user's filter a while. */
+  /** Pays a search node (its own price and duration) to keep a copy of the search filter a while. */
   async buyBloomStorage(node: NodeEntry, tier: string): Promise<BloomStorageState> {
     if (!tier) throw badRequest('tier is required');
-    const filter = this.blooms.filter('node').toJSON();
+    const filter = this.blooms.filter('search').toJSON();
     const state = await this.nodes.client(node).json<BloomStorageState>('/v1/bloom', { method: 'PUT', body: { tier, filter } });
     void this.nodes.refreshBalance(node);
     return state;
@@ -1261,8 +1275,84 @@ export class ClientCore {
     return state;
   }
 
+  // -------------------------------------------------------------------------
+  // The account filter: the much larger copy of what the user has seen, kept long term
+  // on search nodes (never sent along with requests). The settings button submits it at
+  // any time; the resubmission job redoes that every `resubmitHours` hours (0 = by hand).
+
+  /** The account filter one search node keeps for the user, and how big it may be. */
+  accountFilterState(node: NodeEntry): Promise<AccountFilterState> {
+    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter');
+  }
+
+  /** Sends this user's account filter to one search node (it replaces what is kept there). */
+  submitAccountFilter(node: NodeEntry): Promise<AccountFilterState> {
+    const filter = this.blooms.filter('account').toJSON();
+    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter', { method: 'PUT', body: { filter } });
+  }
+
+  /** Stops one search node from keeping the account filter. */
+  dropAccountFilter(node: NodeEntry): Promise<AccountFilterState> {
+    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter', { method: 'DELETE' });
+  }
+
+  /**
+   * The button: submits the account filter to every enabled search node at once. Each
+   * node answers (or fails) on its own; the summary says which is which.
+   */
+  async submitAccountFilters(): Promise<{ node: string; name: string; ok: boolean; error?: string; updatedAt?: string }[]> {
+    const nodes = this.nodes.active('algorithm');
+    return Promise.all(
+      nodes.map(async (node) => {
+        try {
+          const state = await this.submitAccountFilter(node);
+          return { node: node.id, name: node.name, ok: true, updatedAt: state.updatedAt };
+        } catch (error) {
+          return { node: node.id, name: node.name, ok: false, error: errorText(error) };
+        }
+      })
+    );
+  }
+
+  /** The resubmission job's timer (null while the job is switched off). */
+  private bloomJob: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped whenever the job is (re)scheduled, so an old run never schedules again. */
+  private bloomJobRun = 0;
+
+  /**
+   * Runs the resubmission job on its schedule: right away whenever it is switched on or
+   * its interval changes, then every `resubmitHours` hours. `resubmitHours: 0` switches
+   * the job off — the settings button still submits at any time.
+   */
+  scheduleBloomJob(): void {
+    this.stopBloomJob();
+    const { enabled, resubmitHours } = this.settings.accountBloom;
+    if (!enabled || !(resubmitHours > 0)) return;
+    const intervalMs = Math.max(1_000, resubmitHours * 3_600_000);
+    const generation = ++this.bloomJobRun;
+    const run = async () => {
+      try {
+        await this.submitAccountFilters();
+      } catch {
+        // one quiet round: the next run (or the button) tries again
+      }
+      // Switched off or rescheduled while it was submitting: nothing more from this run.
+      if (generation !== this.bloomJobRun) return;
+      this.bloomJob = later(intervalMs, run);
+    };
+    // Right away, so a fresh client (or a setting just switched on) does not wait a day.
+    this.bloomJob = later(250, run);
+  }
+
+  /** Stops the resubmission job (its filter stays on the nodes until it is dropped there). */
+  stopBloomJob(): void {
+    this.bloomJobRun++;
+    if (this.bloomJob) clearTimeout(this.bloomJob);
+    this.bloomJob = null;
+  }
+
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */
-  restoreIdentity(seed: Buffer): { id: string } {
+  restoreIdentity(seed: Uint8Array): { id: string } {
     this.store.replaceIdentity(seed);
     this.nodes.resetSessions();
     void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));

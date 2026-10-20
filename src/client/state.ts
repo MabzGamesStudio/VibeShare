@@ -47,7 +47,7 @@ export class ClientStore implements ClientStoreLike {
     if (file) writeFileSync(file, JSON.stringify({ seed: formatSeed(identity.seed), id: identity.id }, null, 2), { mode: 0o600 });
   }
 
-  replaceIdentity(seed: Buffer): Identity {
+  replaceIdentity(seed: Uint8Array): Identity {
     this.identity = identityFromSeed(seed);
     this.saveIdentity(this.identity);
     // Anonymous tokens stay valid; key-based sessions are re-opened with the new key.

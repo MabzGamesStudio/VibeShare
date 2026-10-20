@@ -11,6 +11,7 @@ import {
   type SignedInfo,
 } from '../src/shared/protocol.js';
 import { admin, clientFor, startAlgorithm, startClient, tempDir } from './helpers.js';
+import { creatorRefOf } from '../src/shared/sources.js';
 
 describe('creators linking their accounts together', async () => {
   const node = await startAlgorithm();
@@ -155,6 +156,71 @@ describe('creators linking their accounts together', async () => {
       /signed with the creator key/
     );
     await admin(url, '/v1/admin/config', { method: 'PUT', body: { allowUnsignedAccountLinks: true } });
+  });
+});
+
+describe('linking to related creators on VibeShare', async () => {
+  const node = await startAlgorithm();
+  const url = node.url();
+  after(() => node.stop());
+  const icon = 'data:image/png;base64,AAAA';
+  const signer = generateIdentity();
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:friend', name: 'Friendly Neighbor', kind: 'person', icon } });
+  await admin(url, '/v1/admin/creators', { method: 'PUT', body: { id: 'name:labs', name: 'Science Labs', kind: 'company', keys: [signer.id] } });
+  const proofFor = () => {
+    const ts = Date.now();
+    return { key: signer.id, ts, sig: signData(signer, claimSigningPayload(node.identity.id, 'name:labs', ts)) };
+  };
+
+  it('takes a creator id, a link id or a /creator/ page link — never a link to another platform', () => {
+    assert.equal(creatorRefOf('name:friend'), 'name:friend');
+    assert.equal(creatorRefOf('yt:abcdef'), 'yt:abcdef');
+    assert.equal(creatorRefOf('https://vibeshare.app/#/creator/name:friend'), 'name:friend');
+    assert.equal(creatorRefOf('http://127.0.0.1:7700/#/creator/name%3Afriend?x=1'), 'name:friend');
+    assert.equal(creatorRefOf('/creator/name:friend'), 'name:friend');
+    assert.equal(creatorRefOf('https://youtube.com/@someone'), null);
+    assert.equal(creatorRefOf('www.tiktok.com/@someone'), null);
+    assert.equal(creatorRefOf(''), null);
+  });
+
+  it('shows the existing creator’s name and icon, ignoring the submitted handle and subscribers', async () => {
+    const saved = await clientFor(url, 'pseudonym').json<AccountLinkResponse>('/v1/creators/accounts', {
+      method: 'PUT',
+      body: {
+        creator: 'name:labs',
+        accounts: [
+          { platform: 'yt', handle: '@neighbor', subscribers: 12345, creator: 'https://vibeshare.app/#/creator/name:friend' },
+          { platform: 'mastodon', handle: '@labs', url: 'https://mastodon.social/@labs' },
+        ],
+        proof: proofFor(),
+      },
+    });
+    assert.equal(saved.linked, true);
+    assert.equal(saved.creator?.accounts?.[0].creator, 'name:friend', 'a page link is parsed to the creator id');
+
+    // The creator page: the related creator's own name and icon stand in for the handle
+    // and subscriber count the client submitted.
+    const view = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
+    const [related, outside] = view.creator.accounts ?? [];
+    assert.equal(related.creator, 'name:friend');
+    assert.equal(related.name, 'Friendly Neighbor');
+    assert.equal(related.icon, icon, 'a known related creator shows its icon');
+    assert.equal(related.subscribers, undefined, 'subscribers are ignored for a creator the node knows');
+    assert.equal(outside.name, undefined, 'outside-platform links keep just their platform and handle');
+  });
+
+  it('refuses outside-platform links where a related creator belongs', async () => {
+    await assert.rejects(
+      clientFor(url, 'pseudonym').json('/v1/creators/accounts', {
+        method: 'PUT',
+        body: {
+          creator: 'name:labs',
+          accounts: [{ platform: 'yt', handle: '@neighbor', creator: 'https://youtube.com/@someone' }],
+          proof: proofFor(),
+        },
+      }),
+      /not a link to another platform/
+    );
   });
 });
 
@@ -318,7 +384,8 @@ describe('linking accounts between creators', async () => {
     const friend = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:friend', { auth: false });
     assert.equal(friend.creator.accounts?.some((a) => a.creator === 'name:labs'), true, 'the friend shows the link back');
     const labs = await clientFor(url).json<{ creator: CreatorInfo }>('/v1/creators/name:labs', { auth: false });
-    assert.equal(labs.creator.accounts?.[0]?.subscribers, 1200, 'the subscriber count is kept');
+    assert.equal(labs.creator.accounts?.[0]?.subscribers, undefined, 'a creator this node knows stands in: handle and numbers are ignored');
+    assert.equal(labs.creator.accounts?.[0]?.name, 'Friendly Studio', 'the existing creator info is served instead');
 
     // One way: only the suggesting creator shows it.
     const oneWay = await stranger.json<AccountLinkResponse>('/v1/creators/accounts', {

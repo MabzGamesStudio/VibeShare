@@ -22,17 +22,17 @@ import { ratingAllowed } from '../src/shared/taxonomy.js';
 describe('encoding', () => {
   it('round-trips base32 and sorts canonical JSON keys', () => {
     const bytes = Buffer.from([0, 1, 2, 250, 255, 128, 7]);
-    assert.deepEqual(base32Decode(base32Encode(bytes)), bytes);
+    assert.deepEqual([...base32Decode(base32Encode(bytes))], [...bytes]);
     assert.equal(base32Encode(Buffer.from('foobar')), 'mzxw6ytboi');
     assert.equal(canonicalJson({ b: 1, a: [true, { d: null, c: 'x' }], z: undefined }), '{"a":[true,{"c":"x","d":null}],"b":1}');
   });
 
   it('accepts only the canonical base32 of a byte string', () => {
-    assert.deepEqual(base32Decode('mzxw6ytboi'), Buffer.from('foobar'));
-    assert.deepEqual(base32Decode('MZXW6YTBOI='), Buffer.from('foobar')); // case and padding are tolerated
+    assert.deepEqual([...base32Decode('mzxw6ytboi')], [...Buffer.from('foobar')]);
+    assert.deepEqual([...base32Decode('MZXW6YTBOI=')], [...Buffer.from('foobar')]); // case and padding are tolerated
     for (let size = 0; size < 40; size++) {
       const bytes = Buffer.alloc(size, (size * 7) & 255);
-      assert.deepEqual(base32Decode(base32Encode(bytes)), bytes);
+      assert.deepEqual([...base32Decode(base32Encode(bytes))], [...bytes]);
     }
     assert.throws(() => base32Decode('mzxw6ytboj'), /padding bits/); // non-zero trailing bits
     assert.throws(() => base32Decode('mzxw6ytboi' + 'a'), /length/); // a trailing character that forms no byte

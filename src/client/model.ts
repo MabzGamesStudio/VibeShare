@@ -12,6 +12,11 @@ import type { ProfileAccess, SealedBlob } from '../shared/profiles.js';
 export interface BloomData {
   selected?: BloomFilterData;
   preview?: BloomFilterData;
+  /** The filter carried inside search and explore requests. */
+  search?: BloomFilterData;
+  /** The account's much larger filter, kept long term on search nodes. */
+  account?: BloomFilterData;
+  /** The old single node filter, read as the search filter until it is saved again. */
   node?: BloomFilterData;
 }
 
@@ -148,7 +153,7 @@ export interface ClientStoreLike {
   readonly accounts: Doc<{ accounts: Record<string, StoredAccount> }>;
   identity: Identity;
   changed(): void;
-  replaceIdentity(seed: Buffer): Identity;
+  replaceIdentity(seed: Uint8Array): Identity;
   /** While a hidden profile is active its id is not kept in the clear at rest. */
   hideIdentity?(): void | Promise<void>;
 }
@@ -182,7 +187,7 @@ export function formatSeed(seed: Uint8Array): string {
   return SEED_PREFIX + base32Encode(seed);
 }
 
-export function parseSeed(text: string): Buffer {
+export function parseSeed(text: string): Uint8Array {
   const clean = text.trim().toLowerCase().replace(/\s+/g, '');
   if (!clean.startsWith(SEED_PREFIX)) throw new Error('A backup starts with vibeshare-seed-');
   const seed = base32Decode(clean.slice(SEED_PREFIX.length));

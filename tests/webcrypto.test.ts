@@ -19,7 +19,10 @@ describe('web crypto', () => {
     for (let i = 0; i < 5; i++) {
       const seed = randomBytes(32);
       assert.equal(web.identityFromSeed(seed).id, native.identityFromSeed(seed).id);
-      assert.ok(web.identityFromSeed(seed).publicKey.equals(native.identityFromSeed(seed).publicKey));
+      assert.ok(
+        [...web.identityFromSeed(seed).publicKey].every((byte, at) => byte === native.identityFromSeed(seed).publicKey[at]),
+        'the same public key bytes'
+      );
       assert.equal(web.derivePseudonym(seed, `node-${i}`).id, native.derivePseudonym(seed, `node-${i}`).id);
     }
     assert.equal(web.isKeyId(native.generateIdentity().id), true);

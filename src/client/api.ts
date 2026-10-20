@@ -262,6 +262,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     core.buyBloomStorage(node(request), String((await request.json<{ tier?: string }>()).tier ?? ''))
   );
   on('DELETE', '/api/bloom/storage/:id', (request) => core.dropBloomStorage(node(request)));
+  // The account filter: the much larger copy kept long term on search nodes. The settings
+  // button submits it (to every search node at once, or one), the job redoes that on its
+  // schedule, and any of them can drop what a node keeps.
+  on('GET', '/api/bloom/account/:id', (request) => core.accountFilterState(node(request)));
+  on('POST', '/api/bloom/account', async () => ({ results: await core.submitAccountFilters() }));
+  on('POST', '/api/bloom/account/:id', async (request) => core.submitAccountFilter(node(request)));
+  on('DELETE', '/api/bloom/account/:id', (request) => core.dropAccountFilter(node(request)));
 
   // Settings, identity, cache
   on('PATCH', '/api/settings', async (request) => core.updateSettings(await request.json<Partial<Settings>>()));
@@ -276,7 +283,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/identity/export', () => ({ seed: formatSeed(core.store.identity.seed), id: core.store.identity.id }));
   on('POST', '/api/identity/import', async (request) => {
     const body = await request.json<{ seed?: string }>();
-    let seed: Buffer;
+    let seed: Uint8Array;
     try {
       seed = parseSeed(String(body.seed ?? ''));
     } catch (error) {

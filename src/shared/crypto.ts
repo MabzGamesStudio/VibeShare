@@ -24,12 +24,12 @@ export const KEY_PREFIX = 'vk1';
 
 export interface Identity {
   id: string;
-  publicKey: Buffer;
+  publicKey: Uint8Array;
   privateKey: KeyObject;
-  seed: Buffer;
+  seed: Uint8Array;
 }
 
-export function identityFromSeed(seed: Buffer): Identity {
+export function identityFromSeed(seed: Uint8Array): Identity {
   if (seed.length !== 32) throw new Error('An identity seed is 32 bytes');
   const privateKey = createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, seed]), format: 'der', type: 'pkcs8' });
   const spki = createPublicKey(privateKey).export({ format: 'der', type: 'spki' }) as Buffer;
@@ -46,7 +46,7 @@ export function generateIdentity(): Identity {
  * Each node sees a different, unlinkable key, yet the user can always re-derive it
  * from their one backup, so credits on every node survive a reinstall.
  */
-export function derivePseudonym(seed: Buffer, label: string): Identity {
+export function derivePseudonym(seed: Uint8Array, label: string): Identity {
   const derived = Buffer.from(hkdfSync('sha256', seed, 'vibeshare-pseudonym-v1', label, 32));
   return identityFromSeed(derived);
 }

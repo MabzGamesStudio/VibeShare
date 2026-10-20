@@ -432,3 +432,29 @@ export function platformOf(id: string): Platform {
   }
   return { key: source.scheme, name: SOURCE_LABELS[source.scheme], page: embed.page || undefined };
 }
+
+/**
+ * The VibeShare creator a link points at: a creator id (`vk1…`, `name:my-studio`, or a
+ * link id like `yt:abcdef`), or a VibeShare page URL carrying `/creator/<id>` (the id is
+ * parsed out of it). Anything pointing outside VibeShare is refused — the related-creators
+ * carousel only links inside VibeShare.
+ */
+export function creatorRefOf(text: string): string | null {
+  const input = String(text ?? '').trim();
+  if (!input || /\s/.test(input)) return null;
+  const isUrl =
+    /^https?:\/\//i.test(input) || /^www\./i.test(input) || input.startsWith('/') || input.startsWith('#/') || /^[a-z0-9-]+(\.[a-z0-9-]+)+\//i.test(input);
+  if (isUrl) {
+    const at = input.indexOf('/creator/');
+    if (at < 0) return null;
+    const rest = input.slice(at + '/creator/'.length);
+    let id = rest.split(/[?#]/)[0]?.replace(/\/+$/, '') ?? '';
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // a malformed escape: the raw text stands
+    }
+    return id && !/\s/.test(id) ? id.slice(0, 128) : null;
+  }
+  return input.slice(0, 128);
+}

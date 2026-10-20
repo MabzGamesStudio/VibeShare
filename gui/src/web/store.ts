@@ -116,7 +116,7 @@ export class WebStore implements ClientStoreLike {
     this.data.changed();
   }
 
-  replaceIdentity(seed: Buffer): Identity {
+  replaceIdentity(seed: Uint8Array): Identity {
     this.identity = identityFromSeed(seed);
     void this.kv.set('identity', { seed: formatSeed(this.identity.seed), id: this.identity.id });
     return this.identity;

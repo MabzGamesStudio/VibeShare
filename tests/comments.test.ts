@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 import {
+  blockHash,
   checkCommentChain,
+  commentDataHash,
   commentIdAt,
   commentRemovePayload,
   commentSigningPayload,
@@ -302,6 +306,44 @@ describe('a search node limiting what comments may say', async () => {
       }),
       /at most 20/
     );
+  });
+});
+
+describe('a browser checking the chain without Node globals', async () => {
+  it('verifies the very comment that failed in the browser', async () => {
+    // The response that came back from the algorithm node, pasted as-is.
+    const data = {
+      id: 'a5cc8fa2ab3b176f02e933274e4822511f0f6ba8e511f5626121b5fee8303c90',
+      text: 'hi',
+      key: 'vk1zo4pihzz5ui2eknkumuu7fsrnzq2mkb73w62q7dyj7e5dq4tln4q',
+      sig: 'TOtsKigyQApq6-tevxHX058ga-A4D9GaEv9XaMFWNtc8H9xb_GKkvUPw5V5Iy6sXhKQrMBLhQEd0bQw6pWIsBw',
+      time: '2026-10-19T23:19:10.057Z',
+      replyFrom: 'yt:_t_31A7gens',
+    };
+    const payload = commentSigningPayload(data);
+    // The GUI bundle runs the browser crypto: nothing on the verification path may fall
+    // back to Node globals. (Import first — the module loader itself needs Buffer.)
+    const webCrypto = (await import(pathToFileURL(resolve(import.meta.dirname, '../gui/src/web/crypto.ts')).href)) as {
+      isKeyId: (id: string) => boolean;
+      verifySignature: (key: string, data: string, sig: string) => boolean;
+    };
+    const globals = globalThis as { Buffer?: unknown };
+    const real = globals.Buffer;
+    delete globals.Buffer;
+    try {
+      assert.equal(webCrypto.isKeyId(data.key), true);
+      assert.equal(webCrypto.verifySignature(data.key, payload, data.sig), true, 'the signature verifies in a browser');
+      assert.equal(commentDataHash(data), '109eaeb98d5d23b21871fa9fd030f57d938e0657940ebe2d622d4068118c7145');
+      assert.equal(blockHash('', commentDataHash(data), data.id), '2574ec31734cc5bf368fb113322f1109eb9173faac2ac525d38a7631df65c2d7');
+    } finally {
+      globals.Buffer = real;
+    }
+    // And the chain check resolves it into the comment.
+    const chain = checkCommentChain(
+      [{ prev: '', dataHash: '109eaeb98d5d23b21871fa9fd030f57d938e0657940ebe2d622d4068118c7145', hash: '2574ec31734cc5bf368fb113322f1109eb9173faac2ac525d38a7631df65c2d7', id: data.id, data }],
+      {}
+    );
+    assert.deepEqual(chain.errors, []);
   });
 });
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import { BloomFilter, optimalHashCount } from '../src/shared/bloom.js';
 import type { BloomStatus, ContentView, FeedResponse, NodeEntry, Settings } from '../src/shared/clientapi.js';
-import type { AlgorithmInfo, BloomStorageState, ContentItem, Page, SignedInfo } from '../src/shared/protocol.js';
+import type { AccountFilterState, AlgorithmInfo, BloomStorageState, ContentItem, Page, SignedInfo } from '../src/shared/protocol.js';
 import { admin, clientFor, startAlgorithm, startClient, tempDir } from './helpers.js';
 
 const vid = 'vs1' + 'a'.repeat(52);
@@ -82,6 +82,25 @@ describe('a search node filtering content the user has seen', async () => {
     // The hash count must match the number of items the filter declares it is made for.
     const wrongN = { ...seen.toJSON(), n: 10 };
     await assert.rejects(client.json('/v1/search', { body: { query: 'holes', bloom: wrongN }, auth: false }), /hash functions/);
+  });
+
+  it('keeps an account filter long term (never in requests), and refuses one bigger than its cap', async () => {
+    const account = clientFor(url, 'pseudonym');
+    const filter = new BloomFilter(1_024);
+    filter.add(vid);
+    const kept = await account.json<AccountFilterState>('/v1/account-filter', { method: 'PUT', body: { filter: filter.toJSON() } });
+    assert.ok(kept.updatedAt, 'the node says when the account filter was last updated');
+    assert.equal(kept.maxBits, 1_048_576, 'and how big a filter it keeps for an account');
+    // No request carries it — the node applies the copy it keeps while searching.
+    const hidden = await account.json<Page<ContentItem>>('/v1/search', { body: { query: 'holes' } });
+    assert.ok(!hidden.items.some((item) => item.title === 'Black holes'));
+    const tooBig = new BloomFilter(2_097_152);
+    tooBig.add(vid);
+    await assert.rejects(account.json('/v1/account-filter', { method: 'PUT', body: { filter: tooBig.toJSON() } }), /at most \d+ bits/);
+    await account.json('/v1/account-filter', { method: 'DELETE' });
+    assert.equal((await account.json<AccountFilterState>('/v1/account-filter')).filter, undefined);
+    const back = await account.json<Page<ContentItem>>('/v1/search', { body: { query: 'holes' } });
+    assert.ok(back.items.some((item) => item.title === 'Black holes'), 'gone once it is dropped');
   });
 
   it('keeps a paid copy of the filter for as long as its tier says, and drops it when asked', async () => {
@@ -172,11 +191,12 @@ describe('a client keeping track of what the user has seen', async () => {
 
   const browse = () => api<FeedResponse>('/api/browse', { body: { source: 'feed' } });
 
-  it('has the three filters in its settings, with their defaults and their own ranges', async () => {
+  it('has the four filters in its settings, with their defaults and their own ranges', async () => {
     const { settings } = await api<{ settings: Settings }>('/api/state');
     assert.deepEqual(settings.selectedBloom, { enabled: true, bits: 10_000, expected: 10_000 });
     assert.deepEqual(settings.previewBloom, { enabled: true, bits: 100_000, expected: 10_000 });
-    assert.deepEqual(settings.nodeBloom, { enabled: false, bits: 10_000, inline: true, expected: 10_000 });
+    assert.deepEqual(settings.searchBloom, { enabled: false, bits: 10_000, expected: 10_000 });
+    assert.deepEqual(settings.accountBloom, { enabled: false, bits: 1_000_000, expected: 10_000, resubmitHours: 24 }, 'the account filter resubmits every day by default');
     assert.equal(settings.seenContentMode, 'hide', 'seen content is eliminated from the results by default');
 
     // The slider stops snap to 1, 10, 100, … bits within each range.
@@ -263,16 +283,16 @@ describe('a client keeping track of what the user has seen', async () => {
     await api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: false, bits: 10_000 } } });
   });
 
-  it('sends the filter to the search node, which then stops suggesting what it has seen', async () => {
+  it('sends the search filter with search requests, and the node stops suggesting what it has seen', async () => {
     await api('/api/settings', {
       method: 'PATCH',
       body: {
         selectedBloom: { enabled: false, bits: 10_000 },
         previewBloom: { enabled: false, bits: 100_000 },
-        nodeBloom: { enabled: true, bits: 10_000, inline: true },
+        searchBloom: { enabled: true, bits: 10_000, expected: 10_000 },
       },
     });
-    await api('/api/bloom/reset', { body: { scope: 'node' } });
+    await api('/api/bloom/reset', { body: { scope: 'search' } });
     const first = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
     const target = first.items.find((item) => item.id === 'yt:lava2');
     assert.ok(target, 'the content is suggested before the node knows anything');
@@ -297,7 +317,7 @@ describe('a client keeping track of what the user has seen', async () => {
     assert.equal(account.account.balance, 99, 'the day tier costs 1 of the 100 credits the account started with');
 
     // Without the request copy, the stored one still filters.
-    await api('/api/settings', { method: 'PATCH', body: { nodeBloom: { enabled: true, bits: 10_000, inline: false } } });
+    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: false, bits: 10_000 } } });
     const still = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
     assert.ok(!still.items.some((item) => item.id === 'yt:lava2'), 'the stored filter is applied too');
 
@@ -306,8 +326,9 @@ describe('a client keeping track of what the user has seen', async () => {
     assert.ok(back.items.some((item) => item.id === 'yt:lava2'), 'gone from the node: suggested again');
 
     // A filter bigger than every tier is refused.
-    await api('/api/settings', { method: 'PATCH', body: { nodeBloom: { enabled: true, bits: 1_000_000, inline: true } } });
+    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: true, bits: 1_000_000, expected: 10_000 } } });
     await assert.rejects(api(`/api/bloom/storage/${entry.id}`, { body: { tier: 'day' } }), /at most \d+ bits/);
+    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: false, bits: 10_000 } } });
   });
 
   it('pauses the whole history: viewing leaves no trace until it is back on', async () => {
@@ -317,7 +338,8 @@ describe('a client keeping track of what the user has seen', async () => {
         pauseHistory: true,
         selectedBloom: { enabled: true, bits: 10_000, expected: 10_000 },
         previewBloom: { enabled: true, bits: 100_000, expected: 10_000 },
-        nodeBloom: { enabled: true, bits: 10_000, expected: 10_000, inline: true },
+        searchBloom: { enabled: true, bits: 10_000, expected: 10_000 },
+        accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0 },
       },
     });
     const before = await api<BloomStatus>('/api/bloom');
@@ -330,7 +352,8 @@ describe('a client keeping track of what the user has seen', async () => {
     const paused = await api<BloomStatus>('/api/bloom');
     assert.equal(paused.selected.added, before.selected.added, 'no filter recorded anything');
     assert.equal(paused.preview.added, before.preview.added);
-    assert.equal(paused.node.added, before.node.added);
+    assert.equal(paused.search.added, before.search.added);
+    assert.equal(paused.account.added, before.account.added);
 
     // Back on, the same views count again.
     await api('/api/settings', { method: 'PATCH', body: { pauseHistory: false } });
@@ -339,5 +362,78 @@ describe('a client keeping track of what the user has seen', async () => {
     assert.equal(library2.history[0]?.id, 'yt:goat3');
     const done = await api<BloomStatus>('/api/bloom');
     assert.ok(done.selected.added > before.selected.added, 'and recording works again');
+  });
+
+  it('keeps the much larger account filter on the node, separate from the search filter', async () => {
+    const { nodes } = await api<{ nodes: NodeEntry[] }>('/api/state');
+    const entry = nodes.find((node) => node.type === 'algorithm')!;
+    const start = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
+    const offersBefore = await api<BloomStorageState>(`/api/bloom/offers/${entry.id}`);
+    // The account filter alone: the search filter is off, so nothing travels in requests.
+    await api('/api/settings', {
+      method: 'PATCH',
+      body: {
+        selectedBloom: { enabled: false, bits: 10_000 },
+        previewBloom: { enabled: false, bits: 100_000 },
+        searchBloom: { enabled: false, bits: 10_000 },
+        accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0 },
+      },
+    });
+    await api('/api/bloom/reset', { body: { scope: 'account' } });
+    await api('/api/bloom/mark', { body: { scope: 'preview', id: 'yt:lava2', title: 'Lava flow' } });
+
+    // The button: the account filter goes to every search node at once.
+    const submitted = await api<{ results: { node: string; ok: boolean }[] }>('/api/bloom/account', { method: 'POST' });
+    assert.equal(submitted.results.length, 1);
+    assert.equal(submitted.results[0].ok, true);
+    const kept = await api<AccountFilterState>(`/api/bloom/account/${entry.id}`);
+    assert.ok(kept.filter, 'the node keeps it');
+    assert.ok(Date.parse(kept.updatedAt!) > Date.now() - 60_000, 'and says when it was last updated');
+    assert.equal(kept.maxBits, 1_048_576, 'the node says how big a filter it keeps for an account');
+
+    // No request carries it — yet the node stops suggesting what it holds.
+    const hidden = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
+    assert.ok(!hidden.items.some((item) => item.id === 'yt:lava2'), 'the stored account filter is applied while searching');
+
+    // Dropping it on the node brings the content back.
+    await api(`/api/bloom/account/${entry.id}`, { method: 'DELETE' });
+    assert.equal((await api<AccountFilterState>(`/api/bloom/account/${entry.id}`)).filter, undefined);
+    const back = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
+    const raw = await clientFor(algorithm.url(), 'pseudonym').json<Page<ContentItem>>('/v1/search', { body: { query: 'flow' } });
+    const live = await api<{ settings: Settings }>('/api/state');
+    const again = await api<AccountFilterState>(`/api/bloom/account/${entry.id}`);
+    assert.ok(
+      back.items.some((item) => item.id === 'yt:lava2'),
+      `suggested again — the client saw: ${JSON.stringify(back).slice(0, 600)}; the node serves: ${raw.items
+        .map((i) => i.id)
+        .join(', ') || '(none)'}; selected: ${JSON.stringify(
+        live.settings.selectedBloom
+      )}; preview: ${JSON.stringify(live.settings.previewBloom)}; search: ${JSON.stringify(live.settings.searchBloom)}; account: ${JSON.stringify(
+        live.settings.accountBloom
+      )}; node keeps: ${again.filter ? 'a filter' : 'nothing'}; paid: ${
+        (await api<BloomStorageState>(`/api/bloom/offers/${entry.id}`)).filter ? 'a copy' : 'nothing'
+      }; at start: ${start.items.map((i) => i.id).join(', ') || '(none)'} (paid then: ${offersBefore.filter ? 'a copy' : 'nothing'})`
+    );
+  });
+
+  it('resubmits the account filter on its own — every day by default, off or on a schedule', async () => {
+    const { nodes } = await api<{ nodes: NodeEntry[] }>('/api/state');
+    const entry = nodes.find((node) => node.type === 'algorithm')!;
+
+    // Switched off: nothing is submitted by itself.
+    await api(`/api/bloom/account/${entry.id}`, { method: 'DELETE' });
+    await api('/api/settings', { method: 'PATCH', body: { accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0 } } });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert.equal((await api<AccountFilterState>(`/api/bloom/account/${entry.id}`)).filter, undefined, 'the job is off — only the button submits');
+
+    // A short interval stands in for the daily default: the job resubmits on its own.
+    await api('/api/settings', { method: 'PATCH', body: { accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0.0003 } } });
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const kept = await api<AccountFilterState>(`/api/bloom/account/${entry.id}`);
+    assert.ok(kept.filter, 'the job submitted the account filter by itself');
+    assert.ok(Date.parse(kept.updatedAt!) > Date.now() - 60_000);
+
+    await api('/api/settings', { method: 'PATCH', body: { accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0 } } });
+    await api(`/api/bloom/account/${entry.id}`, { method: 'DELETE' });
   });
 });

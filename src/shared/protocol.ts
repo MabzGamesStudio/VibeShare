@@ -103,6 +103,8 @@ export interface BloomStorageTier {
 export interface BloomServiceInfo {
   /** The biggest filter (in bits) that may travel inside a request. */
   inlineMaxBits: number;
+  /** The biggest account filter (in bits) this node keeps long term. */
+  accountMaxBits: number;
   storage: { tiers: BloomStorageTier[] };
 }
 
@@ -117,6 +119,19 @@ export interface BloomStorageState {
   filter?: BloomFilterData;
   expiresAt?: string;
   tiers: BloomStorageTier[];
+}
+
+/**
+ * The account's own long-term filter on a node: kept until it is dropped (no expiry),
+ * refreshed at any time by hand or by the client's resubmission job. The node applies it
+ * while searching, so the client does not have to send it along with every request.
+ */
+export interface AccountFilterState {
+  filter?: BloomFilterData;
+  /** When the client last submitted it. */
+  updatedAt?: string;
+  /** The largest filter this node keeps for an account (bits). */
+  maxBits: number;
 }
 
 export interface AlgorithmRewards {
@@ -284,10 +299,21 @@ export interface CreatorAccount {
   handle: string;
   /** A direct link to the account, when known. */
   url?: string;
-  /** The VibeShare creator this account belongs to, when it has a page here. */
+  /**
+   * The VibeShare creator this account is related to (a creator id like `name:…`/`vk1…`,
+   * or a link id like `yt:abcdef`). Related creators with a page here belong in the
+   * creator page's carousel; accounts without one are just outside-platform links.
+   */
   creator?: string;
   /** How many subscribers (or followers) the account has, when known. */
   subscribers?: number;
+  /**
+   * The related creator's own name and icon, filled in by the node when it already knows
+   * that creator: its info is what shows then, not the submitted handle or subscriber
+   * count.
+   */
+  name?: string;
+  icon?: string;
 }
 
 export interface CreatorInfo {

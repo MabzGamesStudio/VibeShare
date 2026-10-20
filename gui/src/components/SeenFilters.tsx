@@ -2,10 +2,10 @@
 // was previewed on screen, and the copy whose bits go to search algorithm nodes. The
 // sizes are exponential (1, 10, 100, … bits); each filter records a content by its cid
 // and each of its links, hashed — the filters never carry the ids themselves.
-import { Eye, MousePointerClick, RotateCcw, ShieldAlert, Trash2 } from 'lucide-react';
+import { Eye, MousePointerClick, RefreshCw, RotateCcw, ShieldAlert, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import type { BloomFilterStatus, BloomStatus, NodeEntry, Settings } from '../../../src/shared/clientapi';
-import type { BloomStorageState } from '../../../src/shared/protocol';
+import type { AccountFilterState, BloomStorageState } from '../../../src/shared/protocol';
 import { api, errorMessage } from '../api';
 import { useApp } from '../state';
 import { formatBytes } from '../util';
@@ -71,7 +71,7 @@ function FilterStatus({ status }: { status: BloomFilterStatus | undefined }) {
 }
 
 /** The reset button: forgetting what was seen is destructive, so it is confirmed. */
-function ResetFilter({ scope, onDone }: { scope: 'selected' | 'preview' | 'node'; onDone: () => void }) {
+function ResetFilter({ scope, onDone }: { scope: 'selected' | 'preview' | 'search' | 'account'; onDone: () => void }) {
   const { toast } = useApp();
   const [asking, setAsking] = useState(false);
   const reset = async () => {
@@ -216,22 +216,110 @@ function StorageRow({ node }: { node: NodeEntry }) {
   );
 }
 
-/** The three seen-content filters and the copy search algorithm nodes get. */
+/** One search node's copy of the account filter: when it was updated, and dropping it. */
+function AccountRow({ node, onChanged }: { node: NodeEntry; onChanged: () => void }) {
+  const { toast } = useApp();
+  const [info, setInfo] = useState<AccountFilterState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      setInfo(await api<AccountFilterState>(`/api/bloom/account/${encodeURIComponent(node.id)}`));
+    } catch {
+      setInfo(null);
+    }
+  }, [node.id]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const update = async () => {
+    setBusy(true);
+    try {
+      setInfo(await api<AccountFilterState>(`/api/bloom/account/${encodeURIComponent(node.id)}`, { method: 'POST' }));
+      toast(`Your account filter is updated on ${node.name}`, 'success');
+      onChanged();
+    } catch (e) {
+      toast(errorMessage(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const drop = async () => {
+    setBusy(true);
+    try {
+      setInfo(await api<AccountFilterState>(`/api/bloom/account/${encodeURIComponent(node.id)}`, { method: 'DELETE' }));
+      toast(`${node.name} deleted your account filter`, 'success');
+    } catch (e) {
+      toast(errorMessage(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="page-row">
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <strong>{node.name}</strong>
+        <div className="tiny faint">
+          {info?.updatedAt ? (
+            <span>your filter is kept here long term (updated {new Date(info.updatedAt).toLocaleString()})</span>
+          ) : (
+            <span>no account filter here</span>
+          )}
+        </div>
+      </div>
+      <div className="row" style={{ gap: 6 }}>
+        <button className="small" disabled={busy} onClick={() => void update()}>
+          Update
+        </button>
+        {info?.filter && (
+          <button className="small danger" disabled={busy} onClick={() => void drop()}>
+            <Trash2 size={13} /> Delete
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The seen-content filters and the copies search algorithm nodes get. */
 export function SeenFiltersSection() {
-  const { state, updateSettings, algorithms } = useApp();
+  const { state, updateSettings, algorithms, toast } = useApp();
   const [status, setStatus] = useState<BloomStatus | null>(null);
+  const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
     void api<BloomStatus>('/api/bloom')
       .then(setStatus)
       .catch(() => setStatus(null));
   }, []);
-  useEffect(load, [load, state?.settings.selectedBloom, state?.settings.previewBloom, state?.settings.nodeBloom]);
+  useEffect(load, [load, state?.settings.selectedBloom, state?.settings.previewBloom, state?.settings.searchBloom, state?.settings.accountBloom]);
+
+  /** The button: the account filter goes to every search node right now. */
+  const updateNow = async () => {
+    setBusy(true);
+    try {
+      const result = await api<{ results: { name: string; ok: boolean; error?: string }[] }>('/api/bloom/account', { method: 'POST' });
+      const failed = result.results.filter((entry) => !entry.ok);
+      toast(
+        failed.length
+          ? `${result.results.length - failed.length} node(s) updated · ${failed.map((entry) => `${entry.name}: ${entry.error}`).join(' · ')}`
+          : `Your account filter is updated on ${result.results.length} node${result.results.length === 1 ? '' : 's'}`,
+        failed.length ? 'error' : 'success'
+      );
+      load();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (!state) return null;
   const s = state.settings;
   const patchSelected = (patch: Partial<Settings['selectedBloom']>) => void updateSettings({ selectedBloom: { ...s.selectedBloom, ...patch } });
   const patchPreview = (patch: Partial<Settings['previewBloom']>) => void updateSettings({ previewBloom: { ...s.previewBloom, ...patch } });
-  const patchNode = (patch: Partial<Settings['nodeBloom']>) => void updateSettings({ nodeBloom: { ...s.nodeBloom, ...patch } });
+  const patchSearch = (patch: Partial<Settings['searchBloom']>) => void updateSettings({ searchBloom: { ...s.searchBloom, ...patch } });
+  const patchAccount = (patch: Partial<Settings['accountBloom']>) => void updateSettings({ accountBloom: { ...s.accountBloom, ...patch } });
 
   return (
     <>
@@ -320,10 +408,10 @@ export function SeenFiltersSection() {
         </div>
       </div>
 
-      <div className="card form-stack" id="seen-node">
+      <div className="card form-stack" id="seen-search">
         <div className="row">
           <ShieldAlert size={20} />
-          <h2>Send what you have seen to search nodes</h2>
+          <h2>Search filter (in search and explore)</h2>
         </div>
         <div className="banner warn small">
           <ShieldAlert size={16} />
@@ -334,35 +422,95 @@ export function SeenFiltersSection() {
           </div>
         </div>
         <Switch
-          checked={s.nodeBloom.enabled}
-          onChange={(enabled) => patchNode({ enabled })}
-          label="Send my seen-content filter to algorithm nodes"
-        />
-        <Switch
-          checked={s.nodeBloom.inline}
-          onChange={(inline) => patchNode({ inline })}
-          label="Include it in search requests while it is small enough (a few kilobytes)"
+          checked={s.searchBloom.enabled}
+          onChange={(enabled) => patchSearch({ enabled })}
+          label="Carry my seen-content filter inside search and explore requests"
         />
         <span className="hint">
-          This copy is filled with everything the filters above record — what you opened and the previews you have seen. A node that receives it
-          stops suggesting any content whose id or links collide with it, at all. Nothing is sent until you turn this on.
+          This small filter travels inside every search and explore request and nowhere else: it is never stored anywhere. A node that receives
+          it stops suggesting any content whose id or links collide with it. It is filled with everything the filters above record — what you
+          opened and the previews you have seen. Nothing is sent until you turn this on.
         </span>
-        <BitsSlider stops={9} value={s.nodeBloom.bits} onChange={(bits) => patchNode({ bits })} />
-        <ExpectedInput value={s.nodeBloom.expected} onChange={(expected) => patchNode({ expected })} />
-        <FilterStatus status={status?.node} />
+        <BitsSlider stops={5} value={s.searchBloom.bits} onChange={(bits) => patchSearch({ bits })} />
+        <ExpectedInput value={s.searchBloom.expected} onChange={(expected) => patchSearch({ expected })} />
+        <FilterStatus status={status?.search} />
         <div>
-          <ResetFilter scope="node" onDone={load} />
+          <ResetFilter scope="search" onDone={load} />
         </div>
         {algorithms.length > 0 && (
           <>
-            <h3>Keeping the filter on a node</h3>
+            <h3>Keeping a copy of it on a node</h3>
             <span className="hint">
-              Instead of (or besides) carrying the filter in every request, a search node can keep it for you for a while. Each node sets its own
-              prices: how many bits it stores, for how long, for how many credits.
+              Instead of carrying the filter in every request, a search node can keep a copy of this search filter for you for a while. Each
+              node sets its own prices: how many bits it stores, for how long, for how many credits.
             </span>
             <div className="page-list">
               {algorithms.map((node) => (
                 <StorageRow key={node.id} node={node} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="card form-stack" id="seen-account">
+        <div className="row">
+          <RefreshCw size={20} />
+          <h2>Account filter (kept on search nodes)</h2>
+        </div>
+        <div className="banner warn small">
+          <ShieldAlert size={16} />
+          <div>
+            <strong>This one is much larger, so it says even more about your search history.</strong> The node keeps it long term and can test
+            guesses of known content against it. It is completely separate from the search filter above — send the smallest one that is good
+            enough for you.
+          </div>
+        </div>
+        <Switch
+          checked={s.accountBloom.enabled}
+          onChange={(enabled) => patchAccount({ enabled })}
+          label="Keep my account filter on search nodes"
+        />
+        <span className="hint">
+          Completely separate from the search filter, and never carried inside requests: this much larger filter is stored on the search nodes
+          long term, and they apply it while searching — so nothing you have seen is suggested even without the request filter. Update it below
+          at any time, or let the job resubmit it on a schedule.
+        </span>
+        <BitsSlider stops={6} value={s.accountBloom.bits} onChange={(bits) => patchAccount({ bits })} />
+        <ExpectedInput value={s.accountBloom.expected} onChange={(expected) => patchAccount({ expected })} />
+        <FilterStatus status={status?.account} />
+        <label className="field">
+          Resubmit automatically
+          <select
+            value={String(s.accountBloom.resubmitHours)}
+            onChange={(e) => patchAccount({ resubmitHours: Number(e.target.value) })}
+          >
+            {![0, 6, 12, 24, 168].includes(s.accountBloom.resubmitHours) && (
+              <option value={String(s.accountBloom.resubmitHours)}>Every {s.accountBloom.resubmitHours} hours</option>
+            )}
+            <option value="0">Off (only by hand)</option>
+            <option value="6">Every 6 hours</option>
+            <option value="12">Every 12 hours</option>
+            <option value="24">Every day</option>
+            <option value="168">Every week</option>
+          </select>
+          <span className="hint">
+            The job resubmits your account filter to every search node on this schedule — every day by default. Switched off, the button alone
+            updates it.
+          </span>
+        </label>
+        <div className="row">
+          <button className="primary small" disabled={busy} onClick={() => void updateNow()}>
+            <RefreshCw size={14} /> {busy ? 'Updating…' : 'Update now'}
+          </button>
+          <ResetFilter scope="account" onDone={load} />
+        </div>
+        {algorithms.length > 0 && (
+          <>
+            <h3>Your filter on each node</h3>
+            <div className="page-list">
+              {algorithms.map((node) => (
+                <AccountRow key={node.id} node={node} onChanged={load} />
               ))}
             </div>
           </>

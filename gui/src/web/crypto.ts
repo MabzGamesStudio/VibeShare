@@ -5,16 +5,16 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
-import { base32Decode, base32Encode, base64url, fromBase64url } from '../../../src/shared/encoding';
+import { base32Decode, base32Encode, base64url, fromBase64url } from '../../../src/shared/encoding.js';
 
 export const KEY_PREFIX = 'vk1';
 
 export interface Identity {
   id: string;
-  publicKey: Buffer;
+  publicKey: Uint8Array;
   /** The Ed25519 secret key (its 32-byte seed). */
   privateKey: Uint8Array;
-  seed: Buffer;
+  seed: Uint8Array;
 }
 
 const encoder = new TextEncoder();
@@ -27,20 +27,20 @@ function random(count: number): Uint8Array {
   return globalThis.crypto.getRandomValues(new Uint8Array(count));
 }
 
-export function identityFromSeed(seed: Buffer): Identity {
+export function identityFromSeed(seed: Uint8Array): Identity {
   if (seed.length !== 32) throw new Error('An identity seed is 32 bytes');
   const secret = new Uint8Array(seed);
-  const publicKey = Buffer.from(ed25519.getPublicKey(secret));
-  return { id: KEY_PREFIX + base32Encode(publicKey), publicKey, privateKey: secret, seed: Buffer.from(secret) };
+  const publicKey = new Uint8Array(ed25519.getPublicKey(secret));
+  return { id: KEY_PREFIX + base32Encode(publicKey), publicKey, privateKey: secret, seed: new Uint8Array(secret) };
 }
 
 export function generateIdentity(): Identity {
-  return identityFromSeed(Buffer.from(random(32)));
+  return identityFromSeed(random(32));
 }
 
 /** See src/shared/crypto.ts: one unlinkable key per node, derived from the main seed. */
-export function derivePseudonym(seed: Buffer, label: string): Identity {
-  return identityFromSeed(Buffer.from(hkdf(nobleSha256, new Uint8Array(seed), bytes('vibeshare-pseudonym-v1'), bytes(label), 32)));
+export function derivePseudonym(seed: Uint8Array, label: string): Identity {
+  return identityFromSeed(new Uint8Array(hkdf(nobleSha256, new Uint8Array(seed), bytes('vibeshare-pseudonym-v1'), bytes(label), 32)));
 }
 
 export function isKeyId(id: string): boolean {

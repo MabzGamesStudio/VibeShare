@@ -577,15 +577,28 @@ interface StoredFilter {
   expiresAt: string;
 }
 
+/** An account's own long-term filter kept here (no expiry), refreshed by hand or by its job. */
+interface AccountFilterRow {
+  account: string;
+  bits: number;
+  expected: number;
+  hashes: number;
+  updatedAt: string;
+}
+
 /** The storage tiers the operator sells, and the client filters kept here right now. */
 function BloomStorage({ config, save }: { config: Record<string, unknown>; save: (patch: Record<string, unknown>) => Promise<void> }) {
   const tiers = ((get(config, 'bloom.storage.tiers') as Tier[] | undefined) ?? []).map((tier) => ({ ...tier }));
   const [stored, setStored] = useState<StoredFilter[] | null>(null);
+  const [accountFilters, setAccountFilters] = useState<AccountFilterRow[] | null>(null);
   const [toast, show] = useToast();
 
   const load = useCallback(() => {
-    admin<{ stored: StoredFilter[] }>('/v1/admin/bloom')
-      .then((result) => setStored(result.stored))
+    admin<{ stored: StoredFilter[]; accountFilters: AccountFilterRow[] }>('/v1/admin/bloom')
+      .then((result) => {
+        setStored(result.stored);
+        setAccountFilters(result.accountFilters ?? []);
+      })
       .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
@@ -668,6 +681,45 @@ function BloomStorage({ config, save }: { config: Record<string, unknown>; save:
                     className="small"
                     onClick={async () => {
                       await admin(`/v1/admin/bloom/${encodeURIComponent(entry.account)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                      load();
+                    }}
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <h3>Account filters kept long term</h3>
+      <p className="small muted">
+        Each account's own much larger filter, kept until it is dropped: refreshed by hand in the client's settings, or by its resubmission
+        job. Whatever collides with it is never suggested again to that account.
+      </p>
+      {!accountFilters ? (
+        <Loading />
+      ) : accountFilters.length === 0 ? (
+        <p className="small muted">None.</p>
+      ) : (
+        <table className="table">
+          <tbody>
+            {accountFilters.map((entry) => (
+              <tr key={entry.account}>
+                <td>
+                  <div className="mono tiny">{entry.account}</div>
+                </td>
+                <td className="small">
+                  {entry.bits} bits · made for {entry.expected} items · {entry.hashes} hashes
+                </td>
+                <td className="tiny faint">updated {new Date(entry.updatedAt).toLocaleString()}</td>
+                <td>
+                  <button
+                    className="small"
+                    onClick={async () => {
+                      await admin(`/v1/admin/account-filters/${encodeURIComponent(entry.account)}`, { method: 'DELETE' }).catch((e) =>
+                        show(message(e))
+                      );
                       load();
                     }}
                   >

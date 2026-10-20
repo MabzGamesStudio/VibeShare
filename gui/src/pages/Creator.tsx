@@ -1,10 +1,11 @@
 import { ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import type { AccountLinkProposal, AlgorithmInfo, CreatorAccount, CreatorContentSuggestion, CreatorIconSuggestion, CreatorInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
-import { SOURCE_LABELS } from '../../../src/shared/sources';
+import { creatorRefOf, SOURCE_LABELS } from '../../../src/shared/sources';
 import { api, errorMessage } from '../api';
 import { GridLayout } from '../components/feed/Cards';
 import { compact } from '../components/feed/Fields';
@@ -14,39 +15,67 @@ import { useApp } from '../state';
 import { creatorPath } from '../util';
 
 /**
- * The creator's related accounts: a horizontal scroll of fixed-width cards to click
- * through. Every card goes to a VibeShare page — the linked creator's page, or Explore
- * for its handle where VibeShare has no creator id yet. The external channel links
- * themselves live next to the page's main row instead.
+ * The creator's related creators and their links elsewhere. Related creators — accounts
+ * that name a VibeShare creator — are a horizontal scroll of fixed-width cards clicking
+ * through to that creator's page: when this node already knows that creator, its own name
+ * and icon show (the submitted handle and subscriber count are only fallbacks). The
+ * outside-platform links (platform and handle only) are listed below and stay with this
+ * page; the external channel links themselves live next to the page's main row instead.
  */
 function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]; creatorName: string }) {
-  if (!accounts.length) return null;
+  const related = accounts.filter((account) => account.creator);
+  const elsewhere = accounts.filter((account) => !account.creator);
   return (
-    <div style={{ marginTop: 14 }}>
-      <div className="hint" style={{ marginBottom: 6 }}>Related accounts of {creatorName}</div>
-      <div className="carousel">
-        {accounts.map((account) => {
-          const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
-          const key = `${account.platform}:${account.handle}`;
-          const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
-          const to = account.creator ? creatorPath(account.creator) : `/search?q=${encodeURIComponent(handle)}`;
-          return (
-            <Link key={key} to={to} style={{ textDecoration: 'none', color: 'inherit' }}>
-              <div className="card carousel-card">
-                <Avatar name={account.handle} id={key} />
-                <div className="carousel-handle" title={account.handle}>
-                  {account.handle}
-                </div>
-                <div className="carousel-line" title={label}>
-                  {label}
-                </div>
-                <div className="carousel-line">{account.subscribers !== undefined ? `${compact(account.subscribers)} subscribers` : 'Subscribers unknown'}</div>
-              </div>
-            </Link>
-          );
-        })}
-      </div>
-    </div>
+    <>
+      {related.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div className="hint" style={{ marginBottom: 6 }}>Related creators of {creatorName}</div>
+          <div className="carousel">
+            {related.map((account) => {
+              const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+              const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
+              const title = account.name ?? handle;
+              return (
+                <Link key={`${account.platform}:${account.handle}:${account.creator}`} to={creatorPath(account.creator!)} style={{ textDecoration: 'none', color: 'inherit' }}>
+                  <div className="card carousel-card">
+                    <Avatar name={title} id={account.creator!} icon={account.icon} />
+                    <div className="carousel-handle" title={title}>
+                      {title}
+                    </div>
+                    <div className="carousel-line" title={label}>
+                      {label}
+                    </div>
+                    <div className="carousel-line">
+                      {account.name ? 'On VibeShare' : account.subscribers !== undefined ? `${compact(account.subscribers)} subscribers` : 'Subscribers unknown'}
+                    </div>
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {elsewhere.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div className="hint" style={{ marginBottom: 6 }}>Links of {creatorName} on other platforms</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            {elsewhere.map((account) => {
+              const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+              const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
+              return account.url ? (
+                <a key={`${account.platform}:${account.handle}`} className="link row small" href={account.url} target="_blank" rel="noreferrer" title={account.url}>
+                  <ExternalLink size={13} /> {label} · {handle}
+                </a>
+              ) : (
+                <span key={`${account.platform}:${account.handle}`} className="badge">
+                  {label} · {handle}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -55,8 +84,9 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
   const { state, toast } = useApp();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [rows, setRows] = useState<{ platform: string; handle: string; url?: string; creator?: string; subscribers?: number }[]>(() =>
-    (creator.accounts ?? []).map((a) => ({ ...a }))
+  type Row = { platform: string; handle: string; url?: string; creator?: string; subscribers?: number; custom?: boolean };
+  const [rows, setRows] = useState<Row[]>(() =>
+    (creator.accounts ?? []).map((a) => ({ ...a, custom: a.platform !== '' && !SOURCE_CATALOG.some((source) => source.key === a.platform) }))
   );
   const [proposals, setProposals] = useState<AccountLinkProposal[]>([]);
   const [symmetric, setSymmetric] = useState(true);
@@ -66,7 +96,7 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
   const identity = state?.identity.id;
   const isCreator = Boolean(identity && (creator.id === identity || creator.keys?.includes(identity)));
   useEffect(() => {
-    setRows((creator.accounts ?? []).map((a) => ({ ...a })));
+    setRows((creator.accounts ?? []).map((a) => ({ ...a, custom: a.platform !== '' && !SOURCE_CATALOG.some((source) => source.key === a.platform) })));
   }, [creator.id, creator.accounts?.length]);
   const load = useCallback(() => {
     api<{ proposals: AccountLinkProposal[] }>(`/api/account-links/${encodeURIComponent(nodeId)}`)
@@ -75,12 +105,27 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
   }, [nodeId, creator.id]);
   useEffect(load, [load]);
 
-  const update = (index: number, patch: Partial<{ platform: string; handle: string; url?: string; creator?: string; subscribers?: number }>) =>
-    setRows((list) => list.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const update = (index: number, patch: Partial<Row>) => setRows((list) => list.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   const save = async () => {
     setBusy(true);
     try {
-      const accounts = rows.filter((row) => row.platform.trim() && row.handle.trim());
+      const accounts: Row[] = [];
+      for (const row of rows) {
+        if (!row.platform.trim() || !row.handle.trim()) continue;
+        // The related creator only accepts VibeShare creators: an id, a link id (yt:abcdef…)
+        // or a /creator/ page link whose id is parsed out. Links to other platforms never
+        // belong in the related-creators carousel.
+        let creatorRef: string | undefined;
+        if (row.creator?.trim()) {
+          const ref = creatorRefOf(row.creator.trim());
+          if (!ref) {
+            toast('A related creator is a VibeShare creator id, a link id (yt:abcdef…) or a /creator/ page link — not a link to another platform', 'error');
+            return;
+          }
+          creatorRef = ref;
+        }
+        accounts.push({ platform: row.platform.trim(), handle: row.handle.trim(), url: row.url?.trim() || undefined, creator: creatorRef, subscribers: row.subscribers });
+      }
       const result = await api<{ linked: boolean }>('/api/creators/accounts', {
         method: 'PUT',
         body: { nodeId, creator: creator.id, accounts, sign: isCreator, symmetric },
@@ -113,25 +158,42 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
       {open && (
         <div className="form-stack">
           {rows.map((row, index) => (
-            <div key={index} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+            <div key={index} className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <select
+                aria-label="Platform"
+                value={row.custom ? 'other' : row.platform}
+                onChange={(e) => update(index, e.target.value === 'other' ? { custom: true, platform: '' } : { custom: false, platform: e.target.value })}
+                style={{ maxWidth: 150 }}
+              >
+                {SOURCE_CATALOG.map((source) => (
+                  <option key={source.key} value={source.key}>
+                    {source.name}
+                  </option>
+                ))}
+                <option value="other">Other…</option>
+              </select>
+              {row.custom && (
+                <input
+                  type="text"
+                  placeholder="Platform name"
+                  style={{ maxWidth: 140 }}
+                  value={row.platform}
+                  onChange={(e) => update(index, { platform: e.target.value })}
+                />
+              )}
+              <input type="text" placeholder="Creator handle" value={row.handle} onChange={(e) => update(index, { handle: e.target.value })} />
               <input
                 type="text"
-                placeholder="Platform (yt, tiktok, x…)"
-                value={row.platform}
-                onChange={(e) => update(index, { platform: e.target.value })}
+                placeholder="VibeShare creator: id, yt:abcdef… or a /creator/ link"
+                title="The related creator's VibeShare id, its link id (yt:abcdef…) or a VibeShare page link (the creator id is parsed out of it). Links to other platforms are not allowed here."
+                value={row.creator ?? ''}
+                onChange={(e) => update(index, { creator: e.target.value })}
               />
-              <input type="text" placeholder="Handle" value={row.handle} onChange={(e) => update(index, { handle: e.target.value })} />
               <input
                 type="url"
                 placeholder={isCreator ? 'Link (optional)' : 'Link to the creator (required)'}
                 value={row.url ?? ''}
                 onChange={(e) => update(index, { url: e.target.value })}
-              />
-              <input
-                type="text"
-                placeholder="VibeShare creator id (optional)"
-                value={row.creator ?? ''}
-                onChange={(e) => update(index, { creator: e.target.value })}
               />
               <input
                 type="number"

@@ -44,13 +44,21 @@ export interface BloomFilterSettings {
 export interface PreviewBloomSettings extends BloomFilterSettings {}
 
 /**
- * The seen-content filter the client sends to search algorithm nodes, who then stop
+ * The seen-content filter carried inside search and explore requests — just there, never
+ * stored anywhere: it travels with every call, so it is kept small. The node stops
  * suggesting anything that collides with it. More bits make the filter more precise —
  * and tell the node more about what the user has seen.
  */
-export interface NodeBloomSettings extends BloomFilterSettings {
-  /** Send the filter inside search requests when it is small enough for the node. */
-  inline: boolean;
+export interface SearchBloomSettings extends BloomFilterSettings {}
+
+/**
+ * The account's much larger seen-content filter. It never travels inside search requests:
+ * the settings button (or the resubmission job) sends it to the search nodes, which keep
+ * it long term and apply it while searching.
+ */
+export interface AccountBloomSettings extends BloomFilterSettings {
+  /** How often the job resubmits it, in hours (0 = only by hand). */
+  resubmitHours: number;
 }
 
 /** What the GUI shows of one filter. */
@@ -67,11 +75,14 @@ export interface BloomFilterStatus {
   added: number;
 }
 
-/** The state of all three seen-content filters (GET /api/bloom). */
+/** The state of all four seen-content filters (GET /api/bloom). */
 export interface BloomStatus {
   selected: BloomFilterStatus;
   preview: BloomFilterStatus;
-  node: BloomFilterStatus & { inline: boolean };
+  /** The filter carried inside search and explore requests. */
+  search: BloomFilterStatus;
+  /** The account's filter kept on search nodes, with its resubmission job. */
+  account: BloomFilterStatus & { resubmitHours: number };
 }
 
 export interface NodeStatus {
@@ -277,8 +288,10 @@ export interface Settings {
   selectedBloom: BloomFilterSettings;
   /** Content previews you have seen on screen, without selecting them. */
   previewBloom: PreviewBloomSettings;
-  /** The seen-content filter sent to search algorithm nodes (they stop suggesting what collides). */
-  nodeBloom: NodeBloomSettings;
+  /** The seen-content filter carried inside search and explore requests (kept small). */
+  searchBloom: SearchBloomSettings;
+  /** The account's much larger filter kept on search nodes, resubmitted by the job. */
+  accountBloom: AccountBloomSettings;
   /**
    * What the bloom filters do with content the user has seen, in feeds and in search
    * results: `hide` eliminates it completely, `rank` only alters its ranking (it is

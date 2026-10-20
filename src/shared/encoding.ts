@@ -1,6 +1,9 @@
 // Lowercase RFC 4648 base32 without padding: case-insensitive and safe in URLs,
 // file names and hostnames, which is why ids (keys, content, chunks) use it.
+// Pure bytes and strings only — the browser has no Node globals, and these run in
+// every client that verifies signatures and hashes.
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 export function base32Encode(bytes: Uint8Array): string {
   let out = '';
@@ -18,7 +21,7 @@ export function base32Encode(bytes: Uint8Array): string {
   return out;
 }
 
-export function base32Decode(text: string): Buffer {
+export function base32Decode(text: string): Uint8Array {
   const clean = text.toLowerCase().replace(/=+$/, '');
   const out: number[] = [];
   let bits = 0;
@@ -39,16 +42,61 @@ export function base32Decode(text: string): Buffer {
   // must be zero, and it must always contribute to a byte (no dangling whole characters).
   if (bits >= 5) throw new Error('Invalid base32 length');
   if (bits > 0 && (value & ((1 << bits) - 1)) !== 0) throw new Error('Invalid base32 padding bits');
-  return Buffer.from(out);
+  return new Uint8Array(out);
 }
 
-// (Written with plain base64 so that browser Buffer polyfills, which lack base64url, work too.)
 export function base64url(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  // A preallocated buffer of characters, then one string per block: appending per byte
+  // leaves a long rope of tiny strings behind, which costs far more than the result.
+  const chars = new Uint8Array(Math.ceil(bytes.length / 3) * 4);
+  let at = 0;
+  let bits = 0;
+  let value = 0;
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 6) {
+      const code = BASE64.charCodeAt((value >>> (bits - 6)) & 63);
+      chars[at++] = code === 43 ? 45 : code === 47 ? 95 : code; // +/ as -_
+      bits -= 6;
+    }
+  }
+  if (bits > 0) {
+    const code = BASE64.charCodeAt((value << (6 - bits)) & 63);
+    chars[at++] = code === 43 ? 45 : code === 47 ? 95 : code;
+  }
+  let out = '';
+  for (let i = 0; i < at; i += 8192) out += String.fromCharCode(...chars.subarray(i, Math.min(at, i + 8192)));
+  return out;
 }
 
-export function fromBase64url(text: string): Buffer {
-  return Buffer.from(text.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+const BASE64_INDEX = (() => {
+  const table = new Int8Array(128).fill(-1);
+  for (let i = 0; i < BASE64.length; i++) table[BASE64.charCodeAt(i)] = i;
+  return table;
+})();
+
+export function fromBase64url(text: string): Uint8Array {
+  // Padding is optional (RFC 4648 §3.2): an Ed25519 signature is 86 characters, not a
+  // multiple of four. Decoders that insist on padded input — like the base64 decoder of
+  // browser Buffer polyfills — reject every signature, so decode by bits instead.
+  const clean = text.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let bits = 0;
+  let value = 0;
+  let at = 0;
+  for (let i = 0; i < clean.length; i++) {
+    const code = clean.charCodeAt(i);
+    const index = code < 128 ? BASE64_INDEX[code] : -1;
+    if (index < 0) throw new Error(`Invalid base64 character "${clean[i]}"`);
+    value = (value << 6) | index;
+    bits += 6;
+    if (bits >= 8) {
+      out[at++] = (value >>> (bits - 8)) & 255;
+      bits -= 8;
+    }
+  }
+  return at === out.length ? out : out.slice(0, at);
 }
 
 /** JSON with sorted object keys and no whitespace, so equal values always hash and sign the same. */

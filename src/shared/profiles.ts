@@ -102,7 +102,7 @@ export function encodeProfileSeed(seed: Uint8Array): string {
   return base32Encode(seed);
 }
 
-export function decodeProfileSeed(text: string): Buffer {
+export function decodeProfileSeed(text: string): Uint8Array {
   return base32Decode(text);
 }
 

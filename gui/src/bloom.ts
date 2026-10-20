@@ -1,6 +1,7 @@
 // Seen-content bloom filters in the GUI: previews that come on screen are reported to the
 // client, which records the content (its cid and each link, independently) in the filters
-// of what the user has seen — the local ones and the copy sent to search algorithm nodes.
+// of what the user has seen — the local ones, the search filter carried in requests, and
+// the account filter kept on search nodes.
 import { useEffect, type RefObject } from 'react';
 import type { FeedItem } from '../../src/shared/clientapi';
 import { api } from './api';
@@ -13,7 +14,9 @@ const reported = new Set<string>();
 /** True while any filter that records previews is on (and history is not paused). */
 export function useTrackingPreviews(): boolean {
   const { state } = useApp();
-  return Boolean((state?.settings.previewBloom.enabled || state?.settings.nodeBloom.enabled) && !state?.settings.pauseHistory);
+  return Boolean(
+    (state?.settings.previewBloom.enabled || state?.settings.searchBloom.enabled || state?.settings.accountBloom.enabled) && !state?.settings.pauseHistory
+  );
 }
 
 /** Reports one shown preview to the client (once per content and session). */

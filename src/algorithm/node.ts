@@ -49,7 +49,7 @@ import {
   type SuggestionRequest,
   type ContentItem,
 } from '../shared/protocol.js';
-import { baseId, parseContentId, parseSource } from '../shared/sources.js';
+import { baseId, creatorRefOf, parseContentId, parseSource } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
 import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
@@ -104,11 +104,14 @@ export interface AlgorithmConfig extends BaseConfig {
   sources: { priorities: Record<string, number> };
   /**
    * Seen-content bloom filters clients send so this node stops suggesting what they have
-   * already seen: small ones travel inside requests (at most `inlineMaxBits` bits), and
-   * one may be kept per account for the prices and durations the operator sets (`tiers`).
+   * already seen: small ones travel inside requests (at most `inlineMaxBits` bits), one may
+   * be kept per account for the prices and durations the operator sets (`tiers`), and the
+   * account's own much larger filter is kept long term (at most `accountMaxBits` bits),
+   * refreshed by hand or by the client's resubmission job.
    */
   bloom: {
     inlineMaxBits: number;
+    accountMaxBits: number;
     storage: { tiers: BloomStorageTier[] };
   };
   /**
@@ -194,6 +197,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     sources: { priorities: { vibeshare: 10 } },
     bloom: {
       inlineMaxBits: 32_768,
+      accountMaxBits: 1_048_576,
       storage: {
         tiers: [
           { id: 'day', label: '1 day · up to 32 Kibit', maxBits: 32_768, durationSeconds: 86_400, price: 1 },
@@ -333,8 +337,12 @@ function creatorMatch(creator: CreatorRecord, phrase: string): number | null {
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
   private contributions: JsonFile<ContributionData>;
-  /** Seen-content bloom filters kept for accounts (a paid copy, until it expires). */
-  private blooms: JsonFile<{ stored: Record<string, { filter: BloomFilterData; expiresAt: string }> }>;
+  /** Seen-content bloom filters kept for accounts: a paid copy (until it expires), and the
+   *  account's own much larger filter, kept long term until it is dropped. */
+  private blooms: JsonFile<{
+    stored: Record<string, { filter: BloomFilterData; expiresAt: string }>;
+    accounts: Record<string, { filter: BloomFilterData; updatedAt: string }>;
+  }>;
   /** Comments on content pages: one hash-chained log per content id. */
   private comments: JsonFile<CommentsData>;
 
@@ -354,7 +362,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       iconSuggestions: {},
       accountLinks: {},
     }));
-    this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {} }));
+    this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {}, accounts: {} }));
+    this.blooms.data.accounts ??= {};
     this.comments = new JsonFile(this.path('comments.json'), () => ({ sections: {}, recent: {} }));
     // Nothing is kept for a content page that has no comments: drop the empty sections
     // that earlier versions left behind when a page was merely read.
@@ -449,7 +458,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           .filter(([, adapter]) => adapter.enabled)
           .map(([id]) => id),
       },
-      bloom: { inlineMaxBits: config.bloom.inlineMaxBits, storage: config.bloom.storage },
+      bloom: { inlineMaxBits: config.bloom.inlineMaxBits, accountMaxBits: config.bloom.accountMaxBits, storage: config.bloom.storage },
       maxCreatorAccounts: config.maxCreatorAccounts,
     };
   }
@@ -481,6 +490,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const bloom = config.bloom;
     if (!Number.isInteger(bloom.inlineMaxBits) || bloom.inlineMaxBits < 8 || bloom.inlineMaxBits > 1_048_576) {
       throw badRequest('bloom.inlineMaxBits is a bit count between 8 and 1,048,576');
+    }
+    if (!Number.isInteger(bloom.accountMaxBits) || bloom.accountMaxBits < 8 || bloom.accountMaxBits > 1_048_576) {
+      throw badRequest('bloom.accountMaxBits is a bit count between 8 and 1,048,576');
     }
     for (const list of [config.console?.catalog, config.console?.creators]) {
       if (!list || !['lazy', 'pages'].includes(list.paging)) throw badRequest('console paging is lazy or pages');
@@ -563,6 +575,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
   }
 
+  /** The account's own long-term filter here, kept until it is dropped. */
+  private accountBloom(accountId: string): BloomFilter | null {
+    const record = this.blooms.data.accounts[accountId];
+    if (!record) return null;
+    try {
+      return BloomFilter.from(record.filter);
+    } catch {
+      return null;
+    }
+  }
+
   /** A filter sent or stored in its `{ v, m, k, data }` form; refused when it is malformed. */
   private parseBloom(value: unknown, maxBits: number): BloomFilter | null {
     if (value === undefined || value === null) return null;
@@ -584,12 +607,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
   }
 
-  /** The filters of one request: the account's paid copy, plus the one carried along. */
+  /** The filters of one request: the account's copies kept here, plus the one carried along. */
   private seenFilters(ctx: Ctx, body: { bloom?: unknown }): BloomFilter[] {
     const filters: BloomFilter[] = [];
     const account = this.auth.account(ctx);
-    const stored = account ? this.storedBloom(account.id) : null;
-    if (stored) filters.push(stored);
+    if (account) {
+      const stored = this.storedBloom(account.id);
+      if (stored) filters.push(stored);
+      const own = this.accountBloom(account.id);
+      if (own) filters.push(own);
+    }
     const inline = this.parseBloom(body.bloom, this.config.bloom.inlineMaxBits);
     if (inline) filters.push(inline);
     return filters;
@@ -975,6 +1002,38 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return { tiers: this.config.bloom.storage.tiers };
     });
 
+    // The account's own much larger filter: kept here long term (until it is dropped), and
+    // refreshed at any time — by hand in the client's settings, or by its resubmission job.
+    // It never travels inside search requests: this node applies it while searching instead.
+    router.get('/v1/account-filter', (ctx) => {
+      const account = this.auth.require(ctx);
+      const record = this.blooms.data.accounts[account.id];
+      return {
+        filter: record?.filter,
+        updatedAt: record?.updatedAt,
+        maxBits: this.config.bloom.accountMaxBits,
+      };
+    });
+
+    router.put('/v1/account-filter', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{ filter?: unknown }>(ctx.req, 1024 * 1024);
+      const filter = this.parseBloom(body.filter, this.config.bloom.accountMaxBits);
+      if (!filter) throw badRequest('filter is required');
+      const updatedAt = new Date().toISOString();
+      this.blooms.data.accounts[account.id] = { filter: filter.toJSON(), updatedAt };
+      this.blooms.changed();
+      return { filter: filter.toJSON(), updatedAt, maxBits: this.config.bloom.accountMaxBits };
+    });
+
+    router.delete('/v1/account-filter', (ctx) => {
+      const account = this.auth.require(ctx);
+      const existed = Boolean(this.blooms.data.accounts[account.id]);
+      delete this.blooms.data.accounts[account.id];
+      if (existed) this.blooms.changed();
+      return { maxBits: this.config.bloom.accountMaxBits };
+    });
+
     // Comments on a content page: the whole hash-chained history, always. Clients verify
     // every block header and signature themselves before showing anything.
     router.get('/v1/comments/:id', async (ctx) => {
@@ -1041,7 +1100,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         .filter((match): match is { creator: CreatorRecord; score: number } => match.score !== null)
         .sort((a, b) => a.score - b.score || a.creator.name.localeCompare(b.creator.name))
         .slice(0, 50)
-        .map((match) => match.creator);
+        .map((match) => ({ ...match.creator, accounts: this.servedAccounts(match.creator) }));
       return { creators };
     });
 
@@ -1055,7 +1114,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         .slice(0, 100)
         .map((entry) => this.registry.view(entry));
       const { status: _status, addedAt: _added, ...info } = creator;
-      return { creator: info, items };
+      return { creator: { ...info, accounts: creator.accounts ? this.servedAccounts(creator) : undefined }, items };
     });
 
     // A creator linking their accounts on other platforms (YouTube, TikTok, Twitter…):
@@ -1366,8 +1425,28 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }));
     for (const account of accounts) {
       if (!account.platform || !account.handle) throw badRequest('Every account needs a platform and a handle');
+      if (account.creator !== undefined) {
+        // A related creator is a VibeShare creator — its id, its link id, or its page link
+        // (the id is parsed out of it). Links to other platforms do not belong here.
+        const ref = creatorRefOf(account.creator);
+        if (!ref) throw badRequest('A related creator is a VibeShare creator id, link id or page link — not a link to another platform');
+        account.creator = ref;
+      }
     }
     return accounts;
+  }
+
+  /**
+   * The accounts as clients show them: when a related creator is already known here, its
+   * own name and icon stand in for the submitted handle and subscriber count.
+   */
+  private servedAccounts(creator: CreatorRecord): CreatorAccount[] {
+    return (creator.accounts ?? []).map((account) => {
+      const related = account.creator ? this.registry.creator(account.creator) : undefined;
+      if (!related) return account;
+      const { subscribers: _ignored, ...kept } = account;
+      return { ...kept, name: related.name, icon: related.icon };
+    });
   }
 
   /**
@@ -2131,7 +2210,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       return { removed: this.registry.remove(ctx.params.id) };
     });
     // The seen-content filters kept here for accounts: the operator may see them all and
-    // drop any of them. Expired ones are swept up while listing.
+    // drop any of them. Expired paid copies are swept up while listing.
     router.get('/v1/admin/bloom', (ctx) => {
       admin(ctx);
       const stored: { account: string; bits: number; expected: number; hashes: number; expiresAt: string }[] = [];
@@ -2149,13 +2228,28 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           expiresAt: record.expiresAt,
         });
       }
-      return { stored };
+      const accountFilters = Object.entries(this.blooms.data.accounts).map(([account, record]) => ({
+        account,
+        bits: record.filter.m,
+        expected: record.filter.n ?? BLOOM_EXPECTED_ITEMS,
+        hashes: record.filter.k,
+        updatedAt: record.updatedAt,
+      }));
+      return { stored, accountFilters };
     });
     router.delete('/v1/admin/bloom/:account', (ctx) => {
       admin(ctx);
       const account = decodeURIComponent(ctx.params.account);
       const existed = Boolean(this.blooms.data.stored[account]);
       delete this.blooms.data.stored[account];
+      if (existed) this.blooms.changed();
+      return { removed: existed };
+    });
+    router.delete('/v1/admin/account-filters/:account', (ctx) => {
+      admin(ctx);
+      const account = decodeURIComponent(ctx.params.account);
+      const existed = Boolean(this.blooms.data.accounts[account]);
+      delete this.blooms.data.accounts[account];
       if (existed) this.blooms.changed();
       return { removed: existed };
     });
