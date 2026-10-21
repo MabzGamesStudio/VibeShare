@@ -1,6 +1,6 @@
 // Default client settings, preset pages and helpers shared by the desktop/CLI client
 // and the static web client. Browser-safe: no Node imports.
-import type { PageConfig, PageFilters, PagePreset, Settings } from './clientapi.js';
+import type { BloomFilterSettings, PageConfig, PageFilters, PagePreset, Settings } from './clientapi.js';
 import { BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX } from './bloom.js';
 import type { Preferences } from './protocol.js';
 import { baseLanguage } from './language.js';
@@ -100,10 +100,10 @@ export function defaultSettings(): Settings {
 
 /** The slider stops of one filter: 1, 10, 100, … bits (the exponent of ten). */
 export const BLOOM_BIT_STOPS = {
-  /** Selected content: up to 100,000,000 bits. */
+  /** Selected content: up to 100,000,000 bits (12.5 MB of bits). */
   selected: 8,
-  /** Previewed content: up to 1,000,000,000 bits. */
-  preview: 9,
+  /** Previewed content: up to 100,000,000 bits. */
+  preview: 8,
   /** The filter carried in search and explore requests: up to 100,000 bits (it travels). */
   search: 5,
   /** The account filter kept on search nodes: up to 1,000,000 bits (what nodes keep). */
@@ -167,6 +167,29 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
       expected: Number(legacyNode.expected ?? merged.searchBloom.expected),
     };
   }
+  // Filter sizes are 1, 10, 100, … bits within each filter's range. Old or hand-edited
+  // settings can be out of it (a 1,000,000,000-bit filter made the saved state so large it
+  // could not be written out at all), so they snap back into range on load.
+  const sizes: [BloomFilterSettings, number][] = [
+    [merged.selectedBloom, BLOOM_BIT_STOPS.selected],
+    [merged.previewBloom, BLOOM_BIT_STOPS.preview],
+    [merged.searchBloom, BLOOM_BIT_STOPS.search],
+    [merged.accountBloom, BLOOM_BIT_STOPS.account],
+  ];
+  for (const [group, stop] of sizes) {
+    try {
+      group.bits = bloomBitStep(group.bits, stop);
+    } catch {
+      group.bits = 10_000;
+    }
+    try {
+      group.expected = bloomExpected(group.expected);
+    } catch {
+      group.expected = BLOOM_EXPECTED_ITEMS;
+    }
+    group.enabled = Boolean(group.enabled);
+  }
+  merged.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(merged.accountBloom.resubmitHours) || 0));
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -230,6 +253,20 @@ const SOURCES = ['feed', 'search', 'subscriptions'];
  * meant for the user when something is invalid.
  */
 export function applySettingsPatch(current: Settings, patch: Partial<Settings>): Settings {
+  // Seen-content filter sizes are checked strictly here: what was typed is refused outright
+  // unless it is one of 1, 10, 100, … bits within the filter's range, made for at least one
+  // item. Loading saved settings is lenient instead (normalizeSettings snaps anything odd
+  // back into range, so a stale giant filter cannot bloat the saved state again).
+  const strict: [Partial<BloomFilterSettings> | undefined, number][] = [
+    [patch.selectedBloom, BLOOM_BIT_STOPS.selected],
+    [patch.previewBloom, BLOOM_BIT_STOPS.preview],
+    [patch.searchBloom, BLOOM_BIT_STOPS.search],
+    [patch.accountBloom, BLOOM_BIT_STOPS.account],
+  ];
+  for (const [group, stop] of strict) {
+    if (group?.bits !== undefined) bloomBitStep(group.bits, stop);
+    if (group?.expected !== undefined) bloomExpected(group.expected);
+  }
   const next = normalizeSettings({
     ...current,
     ...patch,

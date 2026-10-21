@@ -4,6 +4,7 @@ import type { Manifest } from './content.js';
 import type { CommentBlock, CommentVotes } from './comments.js';
 import type { ContentItem, CreatorInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
+import type { VvshFile } from './vvsh.js';
 import type { CreatorKind, Format, Rating } from './taxonomy.js';
 
 export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
@@ -412,6 +413,8 @@ export interface ManifestSummary {
   createdAt: string;
   creator?: { id: string; name?: string; kind?: CreatorKind };
   meta?: Record<string, unknown>;
+  /** A .vvsh verifiable video stream: its metadata and tree root (the chunks hang off it). */
+  vvsh?: VvshFile;
 }
 
 export interface ContentView {

@@ -18,6 +18,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { claimSourceMetrics } from '../../../src/algorithm/metrics';
 import { SOURCE_CATALOG, sourceKeyOf } from '../../../src/algorithm/sources';
 import type { ContentView, Job, NodeEntry, PublishPreview } from '../../../src/shared/clientapi';
+import { VvshPlayer } from '../components/VvshPlayer';
 import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
 import { baseId } from '../../../src/shared/sources';
@@ -119,6 +120,11 @@ function NativePlayer({
   const src = useMediaSrc(view.streamUrl!);
   const download = useMediaSrc(view.downloadUrl);
   const [ratio, measured] = useRatio(view);
+  // A .vvsh verifiable video stream plays chunk by chunk: seeking fetches only the chunk
+  // under the playhead (each verified, each charged), never the whole file.
+  if (view.manifest?.vvsh) {
+    return <VvshPlayer nodeId={view.provider?.id ?? ''} file={view.manifest.vvsh} name={view.manifest.name} />;
+  }
   if (mime.startsWith('video/')) {
     return (
       <Fit ratio={ratio}>

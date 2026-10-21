@@ -333,6 +333,7 @@ export class ClientNode {
 
   async stop(): Promise<void> {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.core.stopBloomJob();
     this.worker.stop();
     if (this.server) await closeServer(this.server);
     this.server = null;

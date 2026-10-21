@@ -40,6 +40,9 @@ import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
+import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
+import { DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
+import { walkToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -346,6 +349,7 @@ export class ClientCore {
           createdAt: manifest.createdAt,
           creator: manifest.creator ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind } : undefined,
           meta: manifest.meta as Record<string, unknown> | undefined,
+          vvsh: manifest.vvsh,
         };
         view.provider = {
           id: hit.provider.id,
@@ -1349,6 +1353,145 @@ export class ClientCore {
     this.bloomJobRun++;
     if (this.bloomJob) clearTimeout(this.bloomJob);
     this.bloomJob = null;
+  }
+
+  // -------------------------------------------------------------------------
+  // .vvsh verifiable video streams: building one here or on a node, publishing it, and
+  // reading it back chunk by chunk — every record and payload verified against its hash.
+
+  /**
+   * Builds one video's .vvsh stream and publishes it: every record and payload is uploaded
+   * the moment it exists, so a long video is never held twice in memory, then the signed
+   * manifest (the metadata and root alone) is committed.
+   */
+  async publishVvshStream(
+    node: NodeEntry,
+    source: Uint8Array,
+    options: {
+      name: string;
+      totalSeconds: number;
+      config?: VvshBuildConfig;
+      meta?: ManifestMeta;
+      sourceMime?: string;
+      previews?: string[];
+    }
+  ): Promise<{ cid: string; manifest: Manifest; objects: number }> {
+    const client = this.nodes.client(node);
+    const config = options.config ?? DEFAULT_VVSH_BUILD;
+    const { file, objects } = await encodeVvsh(
+      source,
+      { totalSeconds: options.totalSeconds, config, sourceMime: options.sourceMime, previews: options.previews },
+      async (hash, data) => {
+        await client.json(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
+      }
+    );
+    const manifest: Manifest = {
+      v: 1,
+      name: options.name,
+      mime: 'video/x-vvsh',
+      size: 0,
+      chunkSize: DEFAULT_CHUNK_SIZE,
+      chunks: [],
+      createdAt: new Date().toISOString(),
+      vvsh: file,
+    };
+    if (options.meta && Object.keys(options.meta).length) manifest.meta = options.meta;
+    const signed = signManifest(manifest, this.store.identity, this.settings.profile);
+    await client.json('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
+    return { cid: contentIdOf(signed), manifest: signed, objects };
+  }
+
+  /** What one provider asks to calculate a .vvsh from just the video. */
+  quoteVvshConvert(
+    node: NodeEntry,
+    options: { bytes: number; totalSeconds: number; config?: VvshBuildConfig }
+  ): Promise<{ quote: VvshConvertQuote }> {
+    return this.nodes.client(node).json<{ quote: VvshConvertQuote }>('/v1/vvsh/quote', { method: 'POST', body: options });
+  }
+
+  /**
+   * Lets a provider calculate the .vvsh stream from just the video, sent in pieces so a
+   * long one never overflows anything: the quote first, then the pieces, then the work
+   * (charged before it runs), then the signed manifest is committed there.
+   */
+  async convertVvshOn(
+    node: NodeEntry,
+    options: {
+      data: Uint8Array;
+      name: string;
+      totalSeconds: number;
+      config?: VvshBuildConfig;
+      meta?: ManifestMeta;
+      sourceMime?: string;
+      previews?: string[];
+    }
+  ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest }> {
+    const client = this.nodes.client(node);
+    const started = await client.json<{ jobId: string; quote: VvshConvertQuote }>('/v1/vvsh/convert', {
+      method: 'POST',
+      body: {
+        name: options.name,
+        bytes: options.data.length,
+        totalSeconds: options.totalSeconds,
+        config: options.config,
+        meta: options.meta,
+        sourceMime: options.sourceMime,
+        previews: options.previews,
+      },
+    });
+    const pieceSize = 2 * 1024 * 1024;
+    for (let at = 0; at < options.data.length; at += pieceSize) {
+      await client.json(`/v1/vvsh/convert/${started.jobId}/piece`, { method: 'PUT', raw: options.data.subarray(at, at + pieceSize) });
+    }
+    const converted = await client.json<{ manifest: Manifest; quote: VvshConvertQuote }>(`/v1/vvsh/convert/${started.jobId}/finish`, {
+      method: 'POST',
+      body: {},
+    });
+    const signed = signManifest(converted.manifest, this.store.identity, this.settings.profile);
+    const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
+    return { cid: committed.cid, quote: converted.quote, manifest: signed };
+  }
+
+  /** One object (a tree record or a payload) given its hash, checked against that hash. */
+  async vvshObject(node: NodeEntry, hash: string): Promise<Uint8Array> {
+    const response = await this.nodes.client(node).fetch(`/v1/vvsh/objects/${encodeURIComponent(hash)}`);
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (chunkIdOf(data) !== hash) throw new Error(CID_MISMATCH);
+    return data;
+  }
+
+  /**
+   * One verified chunk of one bitrate at one time: walks the tree down from the root in
+   * the file (single path, every step checked), then fetches just that chunk's payload.
+   */
+  async vvshChunk(
+    node: NodeEntry,
+    file: VvshFile,
+    index: number,
+    rendition: string
+  ): Promise<{ data: Uint8Array; frames: VvshFrameStats }> {
+    const fetchRecord = async (hash: string): Promise<Uint8Array | null> => {
+      try {
+        return await this.vvshObject(node, hash);
+      } catch {
+        return null;
+      }
+    };
+    const chunkNode = await walkToChunk(file.root, file.meta.chunkCount, index, fetchRecord);
+    if (!chunkNode) throw new Error('The node did not give a verifiable path to that chunk');
+    const leaf = chunkNode.renditions.find((entry) => entry.id === rendition);
+    if (!leaf) throw new Error('This stream has no such bitrate encoding');
+    const data = await this.vvshObject(node, leaf.hash);
+    return { data, frames: leaf.frames };
+  }
+
+  /** Every chunk of one bitrate, reassembled into the full video file to save. */
+  async exportVvsh(node: NodeEntry, file: VvshFile, rendition: string): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    for (let index = 0; index < file.meta.chunkCount; index++) {
+      chunks.push((await this.vvshChunk(node, file, index, rendition)).data);
+    }
+    return exportVvshStream(chunks);
   }
 
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */

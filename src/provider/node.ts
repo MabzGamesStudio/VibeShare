@@ -48,6 +48,9 @@ import {
   type BlobBackend,
 } from './storage/backends.js';
 import { basename } from 'node:path';
+import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
+import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
+import type { VvshConvertQuote } from '../shared/vvsh.js';
 
 export interface ProviderConfig extends BaseConfig {
   pricing: ProviderPricing & {
@@ -106,6 +109,12 @@ export interface ProviderConfig extends BaseConfig {
     /** Credits to pay a client each time this node pulls content from their URL. */
     creditPerDownload: number;
   };
+  /** Building .vvsh verifiable video streams from uploads, priced by size, chunks and encodings. */
+  vvsh: {
+    convert: VvshConvertPricing;
+    /** What a client gets when it sends no configuration of its own. */
+    defaults: { chunkSeconds: number; previewSplits: number; bitrates: { id: string; label: string; height?: number; kbps: number }[] };
+  };
 }
 
 export function providerDefaults(): ProviderConfig {
@@ -130,6 +139,7 @@ export function providerDefaults(): ProviderConfig {
     rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
     peering: { peers: [], acceptPush: true, sync: { enabled: false, intervalMs: 3_600_000, sendRatePerMin: 120, receiveRatePerMin: 120 } },
     contentUrls: { autoAccept: true, maxUrlsPerClient: 16, maxBaseUrlsPerClient: 4, creditPerDownload: 2 },
+    vvsh: { convert: { perMiB: 1, perChunk: 1, perRendition: 2, perPreview: 1 }, defaults: defaultVvshConfig() },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -311,6 +321,43 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const pricing = this.config.pricing;
     if (cid && cid in pricing.overrides) return pricing.overrides[cid];
     return pricing.perMiB;
+  }
+
+  /** Running .vvsh conversions: the video arrives piece by piece, then the work runs. */
+  private vvshConverts = new Map<
+    string,
+    {
+      account: string;
+      name: string;
+      input: { bytes: number; totalSeconds: number; config: VvshBuildConfig };
+      declared: number;
+      meta?: Manifest['meta'];
+      sourceMime?: string;
+      previews?: string[];
+      pieces: Buffer[];
+      bytes: number;
+      quote: VvshConvertQuote;
+      at: number;
+    }
+  >();
+
+  /** One conversion job's shape: the client's configuration over this node's defaults. */
+  private vvshInput(body: { bytes?: number; totalSeconds?: number; config?: VvshBuildConfig }): {
+    bytes: number;
+    totalSeconds: number;
+    config: VvshBuildConfig;
+  } {
+    const defaults = this.config.vvsh.defaults;
+    return {
+      bytes: Math.max(0, Number(body.bytes ?? 0)),
+      totalSeconds: Math.max(0, Number(body.totalSeconds ?? 0)),
+      config: {
+        bitrates: body.config?.bitrates?.length ? body.config.bitrates : defaults.bitrates,
+        chunkSeconds: body.config?.chunkSeconds || defaults.chunkSeconds,
+        previewSplits: body.config?.previewSplits ?? defaults.previewSplits,
+        gop: body.config?.gop,
+      },
+    };
   }
 
   chunkPrice(size: number, cid?: string): number {
@@ -896,6 +943,119 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.autoJob(cid, upload.manifest);
       log.info(`Stored ${upload.manifest.name} (${cid.slice(0, 16)}…, ${(upload.manifest.size / MiB).toFixed(1)} MiB)`);
       return { cid, status: 'ready' };
+    });
+
+    // .vvsh verifiable video streams: the file itself is metadata and the tree root. Every
+    // branch, chunk node and encoded payload is stored on its own under its hash, so a user
+    // starts at any branch hash and works down, paying per chunk as they go.
+    router.put('/v1/vvsh/objects/:hash', async (ctx) => {
+      this.auth.require(ctx);
+      const data = await readBody(ctx.req, 16 * MiB);
+      const hash = String(ctx.params.hash);
+      if (chunkIdOf(data) !== hash) throw badRequest('The bytes do not match the object hash');
+      await this.store.putChunk(hash, data);
+      return { ok: true, hash };
+    });
+
+    router.get('/v1/vvsh/objects/:hash', async (ctx) => {
+      const hash = String(ctx.params.hash);
+      const account = this.auth.account(ctx);
+      const data = await this.store.getChunk(hash);
+      if (!data) throw notFound('This node does not have the object');
+      const price = this.chunkPrice(data.length);
+      if (price > 0 && !account) throw unauthorized('An account is needed to download from this node');
+      const { charged, balance } = this.charge(account, data.length, undefined, 'vvsh chunk');
+      if (balance !== undefined) ctx.res.setHeader('x-vs-balance', String(balance));
+      ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length, 'x-vs-charged': String(charged) }).end(data);
+    });
+
+    // Calculating a .vvsh here: the client uploads the video and its metadata configuration
+    // (or takes this node's defaults) and the quote — driven by the metadata (chunks and
+    // previews), the video's length and the encodings — is charged before the work runs.
+    router.post('/v1/vvsh/quote', async (ctx) => {
+      const body = await readJson<{ bytes?: number; totalSeconds?: number; config?: VvshBuildConfig }>(ctx.req);
+      return { quote: quoteVvsh(this.config.vvsh.convert, this.vvshInput(body)) };
+    });
+
+    // Calculating a .vvsh here. The video arrives in pieces (so a long one never lands in
+    // one huge buffer or a giant JSON string), the quote — driven by the metadata (chunks
+    // and previews), the video's length and the encodings — is charged before the work
+    // runs, and the finished stream is stored object by object under its hashes.
+    router.post('/v1/vvsh/convert', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{
+        name?: string;
+        bytes?: number;
+        totalSeconds?: number;
+        config?: VvshBuildConfig;
+        meta?: Manifest['meta'];
+        sourceMime?: string;
+        previews?: string[];
+      }>(ctx.req);
+      const input = this.vvshInput(body);
+      const declared = Math.max(1, Number(body.bytes ?? 0));
+      const quote = quoteVvsh(this.config.vvsh.convert, { ...input, bytes: declared });
+      if (quote.credits > 0) this.ledger.debit(account.id, quote.credits, 'vvsh convert', String(body.name ?? 'video.vvsh'));
+      const jobId = randomId();
+      this.vvshConverts.set(jobId, {
+        account: account.id,
+        name: String(body.name ?? 'video.vvsh'),
+        input,
+        declared,
+        meta: body.meta,
+        sourceMime: body.sourceMime,
+        previews: body.previews,
+        pieces: [],
+        bytes: 0,
+        quote,
+        at: Date.now(),
+      });
+      return { jobId, quote };
+    });
+
+    router.put('/v1/vvsh/convert/:jobId/piece', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const job = this.vvshConverts.get(String(ctx.params.jobId));
+      if (!job || job.account !== account.id) throw notFound('No such conversion job');
+      const piece = await readBody(ctx.req, 16 * MiB);
+      if (job.bytes + piece.length > job.declared) throw badRequest('More video bytes than the job declared');
+      job.pieces.push(piece);
+      job.bytes += piece.length;
+      return { ok: true, bytes: job.bytes };
+    });
+
+    router.post('/v1/vvsh/convert/:jobId/finish', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const job = this.vvshConverts.get(String(ctx.params.jobId));
+      if (!job || job.account !== account.id) throw notFound('No such conversion job');
+      this.vvshConverts.delete(String(ctx.params.jobId));
+      const source = Buffer.concat(job.pieces);
+      job.pieces.length = 0;
+      const { manifest } = await convertVvsh(
+        source,
+        {
+          name: job.name,
+          totalSeconds: job.input.totalSeconds,
+          config: job.input.config,
+          meta: job.meta,
+          sourceMime: job.sourceMime,
+          previews: job.previews,
+        },
+        async (hash, data) => {
+          await this.store.putChunk(hash, Buffer.from(data));
+        }
+      );
+      log.info(`Converted ${manifest.name} for ${account.id} into a .vvsh stream (${job.quote.credits} credits)`);
+      return { manifest, quote: job.quote };
+    });
+
+    router.put('/v1/vvsh/manifest', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{ manifest?: Manifest }>(ctx.req, 2 * 1024 * 1024);
+      const manifest = validateManifest(body.manifest);
+      if (!manifest.vvsh) throw badRequest('This manifest carries no vvsh stream');
+      await this.store.addContent(manifest, account.id);
+      return { cid: contentIdOf(manifest), status: 'ready' };
     });
 
     router.get('/v1/catalog', (ctx) => {

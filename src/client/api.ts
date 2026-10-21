@@ -2,9 +2,12 @@
 // ClientCore. The daemon mounts it on its HTTP server; the web client answers the same
 // routes in a service worker. Browser-safe.
 import type { CommentPostRequest, ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
-import { MiB } from '../shared/content.js';
+import { MiB, type ManifestMeta } from '../shared/content.js';
+import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, Preferences } from '../shared/protocol.js';
+import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
+import type { VvshFile } from '../shared/vvsh.js';
 import type { ClientCore } from './core.js';
 import { SCOPES_OF_EVENT } from './bloom.js';
 import { formatSeed, parseSeed } from './model.js';
@@ -269,6 +272,115 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('POST', '/api/bloom/account', async () => ({ results: await core.submitAccountFilters() }));
   on('POST', '/api/bloom/account/:id', async (request) => core.submitAccountFilter(node(request)));
   on('DELETE', '/api/bloom/account/:id', (request) => core.dropAccountFilter(node(request)));
+
+  // .vvsh verifiable video streams. The video goes up in pieces — never one huge body —
+  // then either this client calculates and publishes the stream, or the provider does.
+  const vvshSessions = new Map<
+    string,
+    {
+      mode: 'publish' | 'convert';
+      nodeId: NodeEntry;
+      options: {
+        name: string;
+        totalSeconds: number;
+        config?: VvshBuildConfig;
+        meta?: ManifestMeta;
+        sourceMime?: string;
+        previews?: string[];
+      };
+      pieces: Uint8Array[];
+      bytes: number;
+    }
+  >();
+  const concatBytes = (pieces: Uint8Array[]): Uint8Array => {
+    const out = new Uint8Array(pieces.reduce((total, piece) => total + piece.length, 0));
+    let at = 0;
+    for (const piece of pieces) {
+      out.set(piece, at);
+      at += piece.length;
+    }
+    return out;
+  };
+
+  on('POST', '/api/vvsh/session', async (request) => {
+    const body = await request.json<{
+      mode?: string;
+      nodeId?: string;
+      name?: string;
+      totalSeconds?: number;
+      config?: VvshBuildConfig;
+      meta?: ManifestMeta;
+      sourceMime?: string;
+      previews?: string[];
+    }>();
+    const mode = body.mode === 'convert' ? 'convert' : 'publish';
+    const jobId = `${mode}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    vvshSessions.set(jobId, {
+      mode,
+      nodeId: nodes.require(String(body.nodeId ?? '')),
+      options: {
+        name: String(body.name ?? 'video.vvsh'),
+        totalSeconds: Number(body.totalSeconds ?? 0),
+        config: body.config,
+        meta: body.meta,
+        sourceMime: body.sourceMime,
+        previews: body.previews,
+      },
+      pieces: [],
+      bytes: 0,
+    });
+    return { jobId };
+  });
+
+  on('POST', '/api/vvsh/session/:id/piece', async (request) => {
+    const session = vvshSessions.get(String(request.params.id));
+    if (!session) throw notFound('No such vvsh upload');
+    const body = await request.json<{ data?: string }>(5 * MiB);
+    const piece = fromBase64url(String(body.data ?? ''));
+    if (!piece.length) throw badRequest('The piece carries no bytes');
+    session.pieces.push(piece);
+    session.bytes += piece.length;
+    return { bytes: session.bytes };
+  });
+
+  on('POST', '/api/vvsh/session/:id/finish', async (request) => {
+    const id = String(request.params.id);
+    const session = vvshSessions.get(id);
+    if (!session) throw notFound('No such vvsh upload');
+    vvshSessions.delete(id);
+    const source = concatBytes(session.pieces);
+    session.pieces.length = 0;
+    return session.mode === 'publish'
+      ? core.publishVvshStream(session.nodeId, source, session.options)
+      : core.convertVvshOn(session.nodeId, { data: source, ...session.options });
+  });
+
+  on('POST', '/api/vvsh/quote', async (request) => {
+    const body = await request.json<{ nodeId?: string; bytes?: number; totalSeconds?: number; config?: VvshBuildConfig }>();
+    return core.quoteVvshConvert(nodes.require(String(body.nodeId ?? '')), {
+      bytes: Number(body.bytes ?? 0),
+      totalSeconds: Number(body.totalSeconds ?? 0),
+      config: body.config,
+    });
+  });
+
+  on('POST', '/api/vvsh/chunk', async (request) => {
+    const body = await request.json<{ nodeId?: string; file?: VvshFile; index?: number; rendition?: string }>();
+    const chunk = await core.vvshChunk(nodes.require(String(body.nodeId ?? '')), body.file as VvshFile, Number(body.index ?? 0), String(body.rendition ?? ''));
+    return { data: base64url(chunk.data), frames: chunk.frames };
+  });
+
+  on('POST', '/api/vvsh/export', async (request) => {
+    const body = await request.json<{ nodeId?: string; file?: VvshFile; rendition?: string; name?: string }>();
+    const data = await core.exportVvsh(nodes.require(String(body.nodeId ?? '')), body.file as VvshFile, String(body.rendition ?? ''));
+    return { data: base64url(data), name: body.name ?? 'video' };
+  });
+
+  on('POST', '/api/vvsh/object', async (request) => {
+    const body = await request.json<{ nodeId?: string; hash?: string }>();
+    const data = await core.vvshObject(nodes.require(String(body.nodeId ?? '')), String(body.hash ?? ''));
+    return { data: base64url(data) };
+  });
 
   // Settings, identity, cache
   on('PATCH', '/api/settings', async (request) => core.updateSettings(await request.json<Partial<Settings>>()));

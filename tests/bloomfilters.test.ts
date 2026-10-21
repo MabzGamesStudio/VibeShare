@@ -4,6 +4,9 @@ import { BloomFilter, optimalHashCount } from '../src/shared/bloom.js';
 import type { BloomStatus, ContentView, FeedResponse, NodeEntry, Settings } from '../src/shared/clientapi.js';
 import type { AccountFilterState, AlgorithmInfo, BloomStorageState, ContentItem, Page, SignedInfo } from '../src/shared/protocol.js';
 import { admin, clientFor, startAlgorithm, startClient, tempDir } from './helpers.js';
+import { BloomBook } from '../src/client/bloom.js';
+import type { ClientStoreLike } from '../src/client/model.js';
+import { normalizeSettings } from '../src/shared/clientdefaults.js';
 
 const vid = 'vs1' + 'a'.repeat(52);
 
@@ -205,7 +208,7 @@ describe('a client keeping track of what the user has seen', async () => {
       body: { selectedBloom: { enabled: true, bits: 12_345 }, previewBloom: { enabled: true, bits: 1_000_000_000_000 } },
     });
     assert.equal(saved.selectedBloom.bits, 10_000);
-    assert.equal(saved.previewBloom.bits, 1_000_000_000, 'the preview filter goes up to 1,000,000,000 bits');
+    assert.equal(saved.previewBloom.bits, 100_000_000, 'the preview filter goes up to 100,000,000 bits');
     await assert.rejects(api('/api/settings', { method: 'PATCH', body: { selectedBloom: { enabled: true, bits: 0 } } }), /400/);
     await assert.rejects(api('/api/settings', { method: 'PATCH', body: { seenContentMode: 'shuffle' } }), /400/);
 
@@ -316,8 +319,9 @@ describe('a client keeping track of what the user has seen', async () => {
     const account = await api<{ account: { balance: number } }>(`/api/nodes/${entry.id}/account`);
     assert.equal(account.account.balance, 99, 'the day tier costs 1 of the 100 credits the account started with');
 
-    // Without the request copy, the stored one still filters.
-    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: false, bits: 10_000 } } });
+    // Without a request copy — the filter is bigger than the node's inline limit, so it is
+    // not carried in requests — the stored one still filters.
+    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: true, bits: 100_000, expected: 10_000 } } });
     const still = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
     assert.ok(!still.items.some((item) => item.id === 'yt:lava2'), 'the stored filter is applied too');
 
@@ -326,7 +330,7 @@ describe('a client keeping track of what the user has seen', async () => {
     assert.ok(back.items.some((item) => item.id === 'yt:lava2'), 'gone from the node: suggested again');
 
     // A filter bigger than every tier is refused.
-    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: true, bits: 1_000_000, expected: 10_000 } } });
+    await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: true, bits: 100_000, expected: 10_000 } } });
     await assert.rejects(api(`/api/bloom/storage/${entry.id}`, { body: { tier: 'day' } }), /at most \d+ bits/);
     await api('/api/settings', { method: 'PATCH', body: { searchBloom: { enabled: false, bits: 10_000 } } });
   });
@@ -367,8 +371,6 @@ describe('a client keeping track of what the user has seen', async () => {
   it('keeps the much larger account filter on the node, separate from the search filter', async () => {
     const { nodes } = await api<{ nodes: NodeEntry[] }>('/api/state');
     const entry = nodes.find((node) => node.type === 'algorithm')!;
-    const start = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
-    const offersBefore = await api<BloomStorageState>(`/api/bloom/offers/${entry.id}`);
     // The account filter alone: the search filter is off, so nothing travels in requests.
     await api('/api/settings', {
       method: 'PATCH',
@@ -399,21 +401,7 @@ describe('a client keeping track of what the user has seen', async () => {
     await api(`/api/bloom/account/${entry.id}`, { method: 'DELETE' });
     assert.equal((await api<AccountFilterState>(`/api/bloom/account/${entry.id}`)).filter, undefined);
     const back = await api<FeedResponse>('/api/search', { body: { query: 'flow' } });
-    const raw = await clientFor(algorithm.url(), 'pseudonym').json<Page<ContentItem>>('/v1/search', { body: { query: 'flow' } });
-    const live = await api<{ settings: Settings }>('/api/state');
-    const again = await api<AccountFilterState>(`/api/bloom/account/${entry.id}`);
-    assert.ok(
-      back.items.some((item) => item.id === 'yt:lava2'),
-      `suggested again — the client saw: ${JSON.stringify(back).slice(0, 600)}; the node serves: ${raw.items
-        .map((i) => i.id)
-        .join(', ') || '(none)'}; selected: ${JSON.stringify(
-        live.settings.selectedBloom
-      )}; preview: ${JSON.stringify(live.settings.previewBloom)}; search: ${JSON.stringify(live.settings.searchBloom)}; account: ${JSON.stringify(
-        live.settings.accountBloom
-      )}; node keeps: ${again.filter ? 'a filter' : 'nothing'}; paid: ${
-        (await api<BloomStorageState>(`/api/bloom/offers/${entry.id}`)).filter ? 'a copy' : 'nothing'
-      }; at start: ${start.items.map((i) => i.id).join(', ') || '(none)'} (paid then: ${offersBefore.filter ? 'a copy' : 'nothing'})`
-    );
+    assert.ok(back.items.some((item) => item.id === 'yt:lava2'), 'suggested again once the node does not keep the account filter');
   });
 
   it('resubmits the account filter on its own — every day by default, off or on a schedule', async () => {
@@ -435,5 +423,29 @@ describe('a client keeping track of what the user has seen', async () => {
 
     await api('/api/settings', { method: 'PATCH', body: { accountBloom: { enabled: true, bits: 10_000, expected: 10_000, resubmitHours: 0 } } });
     await api(`/api/bloom/account/${entry.id}`, { method: 'DELETE' });
+  });
+});
+
+describe('a filter that outgrew every sane size', () => {
+  it('snaps the settings back into range and drops the saved bits of the old shape', () => {
+    // A billion-bit filter once made the saved state so large (167 MB) that it could not
+    // be written out at all — loading such settings snaps them back and forgets the blob.
+    const settings = normalizeSettings({
+      nodeBloom: { enabled: true, bits: 1_000_000_000, expected: 10_000 },
+    } as unknown as Partial<Settings>);
+    assert.equal(settings.searchBloom.bits, 100_000, 'the search filter snaps to the top of its range');
+    assert.equal(settings.previewBloom.bits, 100_000, 'no local filter is kept past 100,000,000 bits');
+
+    const giant = { v: 1 as const, m: 1_000_000_000, k: 7, n: 10_000, data: 'AAAA' };
+    let dirty = false;
+    const store = {
+      data: { data: { settings, blooms: { node: giant } } },
+      changed: () => {
+        dirty = true;
+      },
+    } as unknown as ClientStoreLike;
+    void new BloomBook(store);
+    assert.equal((store.data.data.blooms as Record<string, unknown>).node, undefined, 'the stale saved bits go');
+    assert.equal(dirty, true, 'dropping them saves the state again');
   });
 });

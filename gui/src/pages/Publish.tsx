@@ -2,6 +2,7 @@ import { CheckCircle2, Circle, CircleAlert, ImagePlus, Link2, Loader2, Upload, U
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Job, NodeEntry } from '../../../src/shared/clientapi';
+import { VvshCompose } from '../components/VvshCompose';
 import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
 import type { Embed, ExternalSource } from '../../../src/shared/sources';
 import {
@@ -531,7 +532,7 @@ function LinkTab() {
 }
 
 export function PublishPage() {
-  const [tab, setTab] = useState<'file' | 'link'>('file');
+  const [tab, setTab] = useState<'file' | 'link' | 'vvsh'>('file');
   const [jobs, setJobs] = useState<Job[]>([]);
   useEffect(() => {
     api<{ jobs: Job[] }>('/api/jobs').then((r) => setJobs(r.jobs)).catch(() => undefined);
@@ -551,8 +552,11 @@ export function PublishPage() {
         <button className={`tab ${tab === 'link' ? 'on' : ''}`} onClick={() => setTab('link')}>
           <Link2 size={15} /> Share a link
         </button>
+        <button className={`tab ${tab === 'vvsh' ? 'on' : ''}`} onClick={() => setTab('vvsh')}>
+          Verifiable video (.vvsh)
+        </button>
       </div>
-      {tab === 'file' ? <FileTab /> : <LinkTab />}
+      {tab === 'file' ? <FileTab /> : tab === 'vvsh' ? <VvshCompose /> : <LinkTab />}
       {jobs.length > 0 && (
         <div className="section">
           <h2>Recent</h2>

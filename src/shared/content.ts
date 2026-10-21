@@ -3,6 +3,7 @@ import { sha256, signData, verifySignature, type Identity, isKeyId } from './cry
 import { base32Encode, canonicalJson } from './encoding.js';
 import { CHUNK_PREFIX, NATIVE_PREFIX, isChunkId, parseSource } from './sources.js';
 import { CREATOR_KINDS, FORMATS, RATINGS, type CreatorKind, type Format, type Rating } from './taxonomy.js';
+import type { VvshFile } from './vvsh.js';
 
 export const MiB = 1024 * 1024;
 export const DEFAULT_CHUNK_SIZE = MiB;
@@ -51,6 +52,11 @@ export interface Manifest {
   meta?: ManifestMeta;
   /** External copies (`yt:…`, `ia:…`) a client can fall back to. */
   sources?: string[];
+  /**
+   * A verifiable video stream: the .vvsh file is this metadata and root alone — every
+   * branch, chunk node and payload of the tree is stored on its own under its hash.
+   */
+  vvsh?: VvshFile;
   creator?: ManifestCreator;
 }
 
@@ -157,6 +163,18 @@ export function validateManifest(value: unknown): Manifest {
   if (manifest.sources !== undefined) {
     if (!Array.isArray(manifest.sources) || manifest.sources.length > 16) fail('bad sources');
     for (const source of manifest.sources) if (typeof source !== 'string' || !parseSource(source)) fail(`bad source ${source}`);
+  }
+  if (manifest.vvsh !== undefined) {
+    const vvsh = manifest.vvsh;
+    const meta = vvsh?.meta;
+    if (!vvsh || typeof vvsh !== 'object' || typeof vvsh.root !== 'string' || !isChunkId(vvsh.root)) fail('bad vvsh root');
+    if (!meta || meta.v !== 1 || !Number.isInteger(meta.chunkCount) || meta.chunkCount < 1) fail('bad vvsh metadata');
+    if (!(meta.chunkSeconds > 0) || !(meta.totalSeconds > 0)) fail('bad vvsh length');
+    if (!Array.isArray(meta.bitrates) || !meta.bitrates.length || meta.bitrates.length > 16) fail('bad vvsh bitrates');
+    for (const rendition of meta.bitrates) {
+      if (!rendition || typeof rendition.id !== 'string' || !rendition.id || typeof rendition.label !== 'string') fail('bad vvsh bitrate');
+      if (!(rendition.kbps > 0)) fail('bad vvsh bitrate speed');
+    }
   }
   if (manifest.creator !== undefined) {
     const creator = manifest.creator;

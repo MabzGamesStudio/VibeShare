@@ -34,7 +34,9 @@ export const SCOPES_OF_EVENT: Record<'selected' | 'preview', BloomScope[]> = {
 export class BloomBook {
   private filters: Partial<Record<BloomScope, BloomFilter>> = {};
 
-  constructor(private readonly store: ClientStoreLike) {}
+  constructor(private readonly store: ClientStoreLike) {
+    this.prune();
+  }
 
   private get data(): BloomData {
     const data = this.store.data.data;
@@ -45,6 +47,31 @@ export class BloomBook {
   /** Forgets the in-memory filters (another profile's data was loaded). */
   reloaded(): void {
     this.filters = {};
+    this.prune();
+  }
+
+  /**
+   * Drops saved filters that no longer match their settings — the same rule `filter()` uses
+   * to start a new size over. Besides keeping the saved state tidy, this is what clears a
+   * filter that grew past every sane size: a billion-bit filter once made the saved state so
+   * large it could not be written out at all.
+   */
+  private prune(): void {
+    let dirty = false;
+    const stale = (saved: BloomFilterData | undefined, setting: BloomFilterSettings): boolean =>
+      Boolean(saved && (saved.m !== setting.bits || (saved.n ?? BLOOM_EXPECTED_ITEMS) !== setting.expected));
+    for (const scope of ['selected', 'preview', 'search', 'account'] as BloomScope[]) {
+      if (stale(this.data[scope], this.setting(scope) as BloomFilterSettings)) {
+        delete this.data[scope];
+        dirty = true;
+      }
+    }
+    // The old single node filter follows the search filter's shape.
+    if (stale(this.data.node, this.setting('search') as BloomFilterSettings)) {
+      delete this.data.node;
+      dirty = true;
+    }
+    if (dirty) this.store.changed();
   }
 
   setting(scope: BloomScope): BloomFilterSettings | AccountBloomSettings {

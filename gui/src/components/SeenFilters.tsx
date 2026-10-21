@@ -400,7 +400,7 @@ export function SeenFiltersSection() {
           Kept apart from what you actually opened: this filter records every content whose preview you have seen while browsing, in its own
           filter with its own size. The choice at the top decides what happens to it.
         </span>
-        <BitsSlider stops={9} value={s.previewBloom.bits} onChange={(bits) => patchPreview({ bits })} />
+        <BitsSlider stops={8} value={s.previewBloom.bits} onChange={(bits) => patchPreview({ bits })} />
         <ExpectedInput value={s.previewBloom.expected} onChange={(expected) => patchPreview({ expected })} />
         <FilterStatus status={status?.preview} />
         <div>
