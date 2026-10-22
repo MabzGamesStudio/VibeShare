@@ -382,6 +382,17 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     return { data: base64url(data) };
   });
 
+  on('PUT', '/api/vvsh/object', async (request) => {
+    const body = await request.json<{ nodeId?: string; hash?: string; data?: string }>(8 * MiB);
+    await core.storeVvshObject(nodes.require(String(body.nodeId ?? '')), String(body.hash ?? ''), fromBase64url(String(body.data ?? '')));
+    return { ok: true };
+  });
+
+  on('POST', '/api/vvsh/manifest', async (request) => {
+    const body = await request.json<{ nodeId?: string; manifest?: Record<string, unknown> }>();
+    return core.commitVvshStream(nodes.require(String(body.nodeId ?? '')), body.manifest as never);
+  });
+
   // Settings, identity, cache
   on('PATCH', '/api/settings', async (request) => core.updateSettings(await request.json<Partial<Settings>>()));
   // Profiles (each keeps its own nodes, settings, history and client id)

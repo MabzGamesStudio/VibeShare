@@ -174,6 +174,7 @@ export function validateManifest(value: unknown): Manifest {
     for (const rendition of meta.bitrates) {
       if (!rendition || typeof rendition.id !== 'string' || !rendition.id || typeof rendition.label !== 'string') fail('bad vvsh bitrate');
       if (!(rendition.kbps > 0)) fail('bad vvsh bitrate speed');
+      if (rendition.bytes !== undefined && !(Number.isSafeInteger(rendition.bytes) && rendition.bytes >= 0)) fail('bad vvsh bitrate bytes');
     }
   }
   if (manifest.creator !== undefined) {

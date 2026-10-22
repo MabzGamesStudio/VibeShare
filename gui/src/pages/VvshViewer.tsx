@@ -2,7 +2,7 @@
 // tree (fetched and verified node by node from the root) and every chunk with its bitrate
 // leaves and I/P/B frame counts. Not part of the product; it comes out again once the
 // format settles.
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useApp } from '../state';
 import { api, errorMessage } from '../api';
 import { fromBase64url } from '../../../src/shared/encoding.js';
@@ -36,7 +36,7 @@ function Tree({ walked, depth = 0 }: { walked: Walked; depth?: number }) {
     <div style={{ marginLeft: depth ? 16 : 0, fontFamily: 'monospace', fontSize: 12 }}>
       <div>
         <strong>{label}</strong> <span className="faint">{walked.hash.slice(0, 22)}…</span>
-        {walked.node === null && <span style={{ color: 'var(--warn)' }}> (hash does not match!)</span>}
+        {walked.node === null && <span style={{ color: 'var(--warn)' }}> (not found on the node, or its bytes hash to something else)</span>}
       </div>
       {walked.children.map((child) => (
         <Tree key={child.hash} walked={child} depth={depth + 1} />
@@ -48,6 +48,9 @@ function Tree({ walked, depth = 0 }: { walked: Walked; depth?: number }) {
 export function VvshViewerPage() {
   const { state } = useApp();
   const [text, setText] = useState('');
+  const raw = useRef<Uint8Array | null>(null);
+  const [loaded, setLoaded] = useState('');
+  const [cid, setCid] = useState('');
   const [jsonText, setJsonText] = useState('');
   const [file, setFile] = useState<VvshFile | null>(null);
   const [tree, setTree] = useState<Walked | null>(null);
@@ -61,11 +64,26 @@ export function VvshViewerPage() {
         const parsed = parseVvshFile(source);
         setFile(parsed);
         setJsonText(JSON.stringify(vvshFileJson(parsed), null, 2));
+        setLoaded(typeof source === 'string' ? 'pasted text' : `${source.length} bytes of packed data`);
         setError(null);
         setTree(null);
         setChunks([]);
-        if (!provider) return;
-        const walked = await walk(provider.id, parsed.root, 0, new Set());
+        const providers = (state?.nodes ?? []).filter((node) => node.type === 'provider');
+        if (!providers.length) return;
+        // The objects may live on any provider — walk the first one that actually has them.
+        let walked: Walked | null = null;
+        for (const candidate of providers) {
+          const attempt = await walk(candidate.id, parsed.root, 0, new Set());
+          if (attempt.node) {
+            walked = attempt;
+            break;
+          }
+        }
+        if (!walked) {
+          setTree({ hash: parsed.root, node: null, children: [] });
+          setError('The file parses fine, but none of the provider nodes here hold its objects.');
+          return;
+        }
         setTree(walked);
         const found: typeof chunks = [];
         const collect = (node: Walked) => {
@@ -83,8 +101,26 @@ export function VvshViewerPage() {
         }
       }
     },
-    [provider, chunks]
+    [state, chunks]
   );
+
+  const loadFromCid = useCallback(async () => {
+    try {
+      setError(null);
+      // The content's metadata carries the root — walking down from it is exactly what
+      // the player does, and here the tree is shown too.
+      const view = await api<{ manifest?: { vvsh?: VvshFile } }>(`/api/content/${encodeURIComponent(cid.trim())}`);
+      const vvsh = view.manifest?.vvsh;
+      if (!vvsh) {
+        setError('That content id is not a .vvsh video stream');
+        return;
+      }
+      await parse(JSON.stringify(vvshFileJson(vvsh)));
+      setLoaded(`from ${cid.trim()}`);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [cid, parse]);
 
   return (
     <div className="page">
@@ -99,12 +135,15 @@ export function VvshViewerPage() {
             rows={6}
             className="mono"
             value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder='{ "format": "vvsh", "meta": { … }, "root": "chk1…" }'
+            onChange={(e) => {
+              raw.current = null;
+              setText(e.target.value);
+            }}
+            placeholder="Paste the JSON form here. Packed .vvsh files: use “Open file…” instead."
           />
         </label>
         <div className="row">
-          <button className="primary small" onClick={() => void parse(text)}>
+          <button className="primary small" onClick={() => void parse(raw.current ?? text)}>
             Parse
           </button>
           <label className="button small">
@@ -116,11 +155,27 @@ export function VvshViewerPage() {
               onChange={async (e) => {
                 const picked = e.target.files?.[0];
                 if (!picked) return;
-                setText(picked.name);
-                void parse(new Uint8Array(await picked.arrayBuffer()));
+                const bytes = new Uint8Array(await picked.arrayBuffer());
+                raw.current = bytes;
+                setText('');
+                void parse(bytes);
               }}
             />
           </label>
+          {loaded && <span className="hint">Loaded: {loaded}</span>}
+        </div>
+        <div className="row">
+          <input
+            type="text"
+            className="mono"
+            style={{ flex: 1, minWidth: 220 }}
+            placeholder="Content id (vs1…) — load the tree from the root in its metadata"
+            value={cid}
+            onChange={(e) => setCid(e.target.value)}
+          />
+          <button className="small" onClick={() => void loadFromCid()}>
+            Load from id
+          </button>
         </div>
         {error && <div className="banner danger small">{error}</div>}
       </div>
@@ -152,7 +207,11 @@ export function VvshViewerPage() {
                 </tr>
                 <tr>
                   <td>Bitrate encodings</td>
-                  <td>{file.meta.bitrates.map((rendition) => `${rendition.label} (${rendition.kbps} kbit/s)`).join(' · ')}</td>
+                  <td>
+                    {file.meta.bitrates
+                      .map((rendition) => `${rendition.label} (${rendition.kbps} kbit/s${rendition.bytes ? ` · ${(rendition.bytes / (1024 * 1024)).toFixed(2)} MB` : ''})`)
+                      .join(' · ')}
+                  </td>
                 </tr>
                 <tr>
                   <td>Frames per chunk</td>

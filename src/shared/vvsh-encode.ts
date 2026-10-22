@@ -244,6 +244,13 @@ export interface VvshBuildOptions {
   previews?: string[];
   /** The mime of the video that was uploaded, so players know what the stream holds. */
   sourceMime?: string;
+  /**
+   * Pre-encoded streams per rendition (each already encoded to its resolution and frame
+   * rate). When given, every encoding chunks its own stream — that is what makes one
+   * quality actually differ from another. Without it the built-in encoder derives the
+   * renditions from `source` (a real upload stays intact at every level).
+   */
+  streams?: Record<string, Uint8Array>;
 }
 
 /**
@@ -270,21 +277,29 @@ export async function buildVvsh(
   };
 
   const nodeHashes: VvshHash[] = [];
+  const bytesByRendition = new Map<string, number>();
   for (let index = 0; index < chunkCount; index++) {
     const start = Math.floor((index * source.length) / chunkCount);
     const end = Math.floor(((index + 1) * source.length) / chunkCount);
     const block = source.subarray(start, end);
     const renditions: { id: string; hash: VvshHash; size: number; frames: VvshFrameStats }[] = [];
     for (const rendition of config.bitrates) {
-      // A real video's container can't survive thinning, so every encoding of a real
-      // upload carries the stream intact (they share one object; the tree still splits
-      // into one leaf per encoding). Synthetic input is thinned to its declared rate.
-      const piece = options.sourceMime ? block : sample(block, Math.max(1, Math.round((block.length * rendition.kbps) / top)));
+      // With a pre-encoded stream per encoding each quality is its own bytes; without one
+      // a real video's container can't survive thinning, so every encoding of a real
+      // upload carries the stream intact (they share one object). Synthetic input is
+      // thinned to its declared rate.
+      const stream = options.streams?.[rendition.id];
+      const piece = stream
+        ? stream.subarray(Math.floor((index * stream.length) / chunkCount), Math.floor(((index + 1) * stream.length) / chunkCount))
+        : options.sourceMime
+          ? block
+          : sample(block, Math.max(1, Math.round((block.length * rendition.kbps) / top)));
       const frames = encodeVvshFrames(frameBlocks(piece, gop), framePattern(gop));
       const data = encodeVvshChunk(frames);
       const hash = vvshPayloadHash(data);
       await emit(hash, data, 'payload');
       renditions.push({ id: rendition.id, hash, size: data.length, frames: frameStats(frames) });
+      bytesByRendition.set(rendition.id, (bytesByRendition.get(rendition.id) ?? 0) + data.length);
     }
     const node: VvshNode = { v: 1, kind: 'chunk', index, renditions };
     const bytes = vvshRecordBytes(node);
@@ -320,11 +335,13 @@ export async function buildVvsh(
   const meta: VvshMeta = {
     v: 1,
     codec: 'vvsh-frames/1',
-    sourceMime: options.sourceMime,
+    sourceMime: options.streams ? (options.sourceMime ?? 'video/webm') : options.sourceMime,
     chunkSeconds: config.chunkSeconds,
     chunkCount,
     totalSeconds: options.totalSeconds,
-    bitrates: [...config.bitrates].sort((a, b) => b.kbps - a.kbps),
+    bitrates: [...config.bitrates]
+      .sort((a, b) => b.kbps - a.kbps)
+      .map((rendition) => ({ ...rendition, bytes: bytesByRendition.get(rendition.id) ?? 0 })),
     frames: { gop, pattern: framePattern(gop).join('') },
     previews: images.length ? { seconds: options.totalSeconds / images.length, images } : undefined,
   };

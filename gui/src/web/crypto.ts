@@ -67,8 +67,9 @@ export function verifySignature(keyId: string, data: string | Uint8Array, signat
   }
 }
 
-export function sha256(data: string | Uint8Array): Buffer {
-  return Buffer.from(nobleSha256(bytes(data)));
+export function sha256(data: string | Uint8Array): Uint8Array {
+  // The browser has no Buffer — the digest is plain bytes (Node's Buffer is one too).
+  return nobleSha256(bytes(data));
 }
 
 function hex(data: Uint8Array): string {

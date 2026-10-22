@@ -47,7 +47,7 @@ describe('web crypto', () => {
 
   it('hashes, authenticates and proves work the same way', () => {
     const data = randomBytes(3000);
-    assert.ok(web.sha256(data).equals(native.sha256(data)));
+    assert.ok(Buffer.from(web.sha256(data)).equals(native.sha256(data)));
     assert.equal(web.sha256hex('abc'), native.sha256hex('abc'));
     assert.equal(web.hmacHex('secret', data), native.hmacHex('secret', data));
     const nonce = web.solveProofOfWork('input', 10);

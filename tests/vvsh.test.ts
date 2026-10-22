@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../src/shared/content.js';
+import { defaultSettings, normalizeSettings } from '../src/shared/clientdefaults.js';
 import { buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../src/shared/vvsh-encode.js';
 import { chunkAt, parseVvshFile, parseVvshNode, pathToChunk, previewAt, serializeVvshFile, treeLeaves, unpackVvshNode, vvshFileJson, walkToChunk, type VvshHash } from '../src/shared/vvsh.js';
 import { base64url } from '../src/shared/encoding.js';
@@ -216,6 +217,17 @@ describe('a provider storing a .vvsh stream', async () => {
     assert.equal(root.status, 200, 'the converted stream is queryable from its root');
     const committed = await account.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: converted.manifest } });
     assert.match(committed.cid, /^vs1/);
+  });
+});
+
+describe('the video prefetch setting', () => {
+  it('keeps fetching a minute ahead by default, configurable within bounds', () => {
+    const settings = defaultSettings();
+    assert.equal(settings.vvshPrefetchSeconds, 60, 'a minute ahead by default');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 99_999 }).vvshPrefetchSeconds, 3_600, 'clamped to an hour');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 0 }).vvshPrefetchSeconds, 0, '0 fetches only what is playing');
+    assert.equal(normalizeSettings({ vvshPrefetchSeconds: 30 }).vvshPrefetchSeconds, 30);
+    assert.equal(normalizeSettings({}).vvshPrefetchSeconds, 60, 'older settings pick up the default');
   });
 });
 

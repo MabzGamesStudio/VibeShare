@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, CircleAlert, ImagePlus, Link2, Loader2, Upload, UploadCloud } from 'lucide-react';
+import { CheckCircle2, Circle, CircleAlert, Film, ImagePlus, Link2, Loader2, Upload, UploadCloud } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Job, NodeEntry } from '../../../src/shared/clientapi';
@@ -254,11 +254,12 @@ function describeAlgorithm(node: NodeEntry): string {
   return `${info.pricing.submission ? `${info.pricing.submission} credits per submission` : 'Free submissions'} · reviewed by the operator`;
 }
 
-function FileTab() {
+function FileTab({ onVideo }: { onVideo?: () => void }) {
   const { state, providers, algorithms, updateSettings, toast } = useApp();
   const enabledProviders = providers.filter((n) => n.enabled && (n.info as ProviderInfo | undefined)?.pricing.upload.mode !== 'closed');
   const enabledAlgorithms = algorithms.filter((n) => n.enabled);
   const [file, setFile] = useState<File | null>(null);
+  const [videoHint, setVideoHint] = useState(false);
   const [over, setOver] = useState(false);
   const [meta, setMeta] = useState<MetaState>(emptyMeta);
   const [duration, setDuration] = useState<number | undefined>();
@@ -280,6 +281,7 @@ function FileTab() {
 
   const choose = async (picked: File) => {
     setFile(picked);
+    setVideoHint((picked.type || '').startsWith('video/'));
     setThumbnail(undefined);
     setDuration(undefined);
     const mime = picked.type || 'application/octet-stream';
@@ -372,6 +374,15 @@ function FileTab() {
             </div>
             <button className="small" onClick={() => (setFile(null), setMeta(emptyMeta()))}>
               Change
+            </button>
+          </div>
+        )}
+        {videoHint && onVideo && (
+          <div className="banner warn small">
+            This is a video. Publishing it as a <strong>video stream</strong> makes it seekable chunk by chunk, with preview images and per-chunk
+            pricing.{' '}
+            <button className="small" onClick={onVideo}>
+              Open Video stream
             </button>
           </div>
         )}
@@ -532,7 +543,7 @@ function LinkTab() {
 }
 
 export function PublishPage() {
-  const [tab, setTab] = useState<'file' | 'link' | 'vvsh'>('file');
+  const [tab, setTab] = useState<'file' | 'link' | 'vvsh'>('vvsh');
   const [jobs, setJobs] = useState<Job[]>([]);
   useEffect(() => {
     api<{ jobs: Job[] }>('/api/jobs').then((r) => setJobs(r.jobs)).catch(() => undefined);
@@ -546,17 +557,17 @@ export function PublishPage() {
         </div>
       </div>
       <div className="tabs">
-        <button className={`tab ${tab === 'file' ? 'on' : ''}`} onClick={() => setTab('file')}>
-          <Upload size={15} /> Upload a file
+        <button className={`tab ${tab === 'vvsh' ? 'on' : ''}`} onClick={() => setTab('vvsh')}>
+          <Film size={15} /> Video stream
         </button>
         <button className={`tab ${tab === 'link' ? 'on' : ''}`} onClick={() => setTab('link')}>
           <Link2 size={15} /> Share a link
         </button>
-        <button className={`tab ${tab === 'vvsh' ? 'on' : ''}`} onClick={() => setTab('vvsh')}>
-          Verifiable video (.vvsh)
+        <button className={`tab ${tab === 'file' ? 'on' : ''}`} onClick={() => setTab('file')}>
+          <Upload size={15} /> Upload a file
         </button>
       </div>
-      {tab === 'file' ? <FileTab /> : tab === 'vvsh' ? <VvshCompose /> : <LinkTab />}
+      {tab === 'vvsh' ? <VvshCompose /> : tab === 'file' ? <FileTab onVideo={() => setTab('vvsh')} /> : <LinkTab />}
       {jobs.length > 0 && (
         <div className="section">
           <h2>Recent</h2>

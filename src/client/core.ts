@@ -1375,7 +1375,7 @@ export class ClientCore {
       sourceMime?: string;
       previews?: string[];
     }
-  ): Promise<{ cid: string; manifest: Manifest; objects: number }> {
+  ): Promise<{ cid: string; manifest: Manifest; objects: number; listed: number }> {
     const client = this.nodes.client(node);
     const config = options.config ?? DEFAULT_VVSH_BUILD;
     const { file, objects } = await encodeVvsh(
@@ -1398,7 +1398,9 @@ export class ClientCore {
     if (options.meta && Object.keys(options.meta).length) manifest.meta = options.meta;
     const signed = signManifest(manifest, this.store.identity, this.settings.profile);
     await client.json('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    return { cid: contentIdOf(signed), manifest: signed, objects };
+    const cid = contentIdOf(signed);
+    const listed = await this.submitVvshToAlgorithms(cid, signed, node);
+    return { cid, manifest: signed, objects, listed };
   }
 
   /** What one provider asks to calculate a .vvsh from just the video. */
@@ -1425,7 +1427,7 @@ export class ClientCore {
       sourceMime?: string;
       previews?: string[];
     }
-  ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest }> {
+  ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number }> {
     const client = this.nodes.client(node);
     const started = await client.json<{ jobId: string; quote: VvshConvertQuote }>('/v1/vvsh/convert', {
       method: 'POST',
@@ -1449,7 +1451,8 @@ export class ClientCore {
     });
     const signed = signManifest(converted.manifest, this.store.identity, this.settings.profile);
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    return { cid: committed.cid, quote: converted.quote, manifest: signed };
+    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    return { cid: committed.cid, quote: converted.quote, manifest: signed, listed };
   }
 
   /** One object (a tree record or a payload) given its hash, checked against that hash. */
@@ -1458,6 +1461,19 @@ export class ClientCore {
     const data = new Uint8Array(await response.arrayBuffer());
     if (chunkIdOf(data) !== hash) throw new Error(CID_MISMATCH);
     return data;
+  }
+
+  /** Uploads one already-built .vvsh object (a record or a payload) to a provider. */
+  async storeVvshObject(node: NodeEntry, hash: string, data: Uint8Array): Promise<void> {
+    await this.nodes.client(node).json(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
+  }
+
+  /** Commits an already-uploaded .vvsh stream (its objects are on the node) and lists it. */
+  async commitVvshStream(node: NodeEntry, manifest: Manifest): Promise<{ cid: string; listed: number }> {
+    const signed = signManifest(manifest, this.store.identity, this.settings.profile);
+    const committed = await this.nodes.client(node).json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
+    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    return { cid: committed.cid, listed };
   }
 
   /**
@@ -1492,6 +1508,42 @@ export class ClientCore {
       chunks.push((await this.vvshChunk(node, file, index, rendition)).data);
     }
     return exportVvshStream(chunks);
+  }
+
+  /** Puts a published .vvsh stream in front of the search algorithm nodes as well. */
+  private async submitVvshToAlgorithms(cid: string, manifest: Manifest, provider: NodeEntry): Promise<number> {
+    const profile = this.settings.profile;
+    let listed = 0;
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const client = this.nodes.client(node);
+        const info = node.info ?? (await client.fetchInfo());
+        const ts = Date.now();
+        await client.json('/v1/submissions', {
+          method: 'POST',
+          timeoutMs: 30000,
+          body: {
+            id: cid,
+            title: manifest.meta?.title ?? manifest.name,
+            description: manifest.meta?.description,
+            format: manifest.meta?.format ?? 'video',
+            rating: manifest.meta?.rating,
+            topics: manifest.meta?.topics,
+            tags: manifest.meta?.tags,
+            language: manifest.meta?.language,
+            durationSeconds: manifest.meta?.durationSeconds,
+            creator: { id: this.store.identity.id, name: profile.name || undefined, kind: profile.kind },
+            providers: [provider.ref],
+            publishedAt: manifest.createdAt,
+            creatorProof: { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) },
+          },
+        });
+        listed++;
+      } catch {
+        // The stream is published either way; listing is the algorithm node's call.
+      }
+    }
+    return listed;
   }
 
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */

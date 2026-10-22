@@ -270,6 +270,10 @@ export interface Settings {
    */
   loadPauseMs: number;
   cacheMiB: number;
+  /** How far ahead a .vvsh video keeps fetching chunks while it plays, in seconds. */
+  vvshPrefetchSeconds: number;
+  /** How far the arrow keys skip through a video, in seconds. */
+  vvshSkipSeconds: number;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;

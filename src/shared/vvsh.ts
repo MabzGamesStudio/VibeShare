@@ -22,6 +22,10 @@ export interface VvshRendition {
   height?: number;
   /** Nominal bitrate in kbit/s (the encoding level). */
   kbps: number;
+  /** Frames per second of this encoding, when it was encoded to one. */
+  fps?: number;
+  /** Total bytes this encoding takes across every chunk. */
+  bytes?: number;
 }
 
 /** How many of each frame type a chunk holds. */
@@ -427,6 +431,8 @@ export function serializeVvshFile(file: VvshFile): Uint8Array {
     pack.str(rendition.label);
     pack.varint(rendition.height ?? 0);
     pack.varint(rendition.kbps);
+    pack.varint(rendition.fps ?? 0);
+    pack.varint(rendition.bytes ?? 0);
   }
   if (file.meta.previews) {
     pack.u8(1);
@@ -463,7 +469,20 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
       if (count < 1 || count > 16) throw new Error('Invalid vvsh file: no bitrate encodings');
       const bitrates: VvshRendition[] = [];
       for (let i = 0; i < count; i++) {
-        bitrates.push({ id: unpack.str(), label: unpack.str(), height: unpack.varint() || undefined, kbps: unpack.varint() });
+        const id = unpack.str();
+        const label = unpack.str();
+        const height = unpack.varint();
+        const kbps = unpack.varint();
+        const fps = unpack.varint();
+        const bytes = unpack.varint();
+        bitrates.push({
+          id,
+          label,
+          kbps,
+          ...(height ? { height } : {}),
+          ...(fps ? { fps } : {}),
+          ...(bytes ? { bytes } : {}),
+        });
       }
       const previews =
         unpack.u8() === 1

@@ -82,6 +82,8 @@ export function defaultSettings(): Settings {
     autoplay: true,
     loadPauseMs: 1500,
     cacheMiB: 1024,
+    vvshPrefetchSeconds: 60,
+    vvshSkipSeconds: 10,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
@@ -190,6 +192,8 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     group.enabled = Boolean(group.enabled);
   }
   merged.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(merged.accountBloom.resubmitHours) || 0));
+  merged.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(merged.vvshPrefetchSeconds) || 0));
+  merged.vvshSkipSeconds = Math.min(120, Math.max(1, Number(merged.vvshSkipSeconds) || 10));
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -314,6 +318,8 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(next.accountBloom.resubmitHours) || 0));
   next.blockExternalEmbeds = Boolean(next.blockExternalEmbeds);
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
+  next.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(next.vvshPrefetchSeconds) || 0));
+  next.vvshSkipSeconds = Math.min(120, Math.max(1, Number(next.vvshSkipSeconds) || 10));
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
   const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];
   next.preferences.languages = [...new Set(languages.map((code) => baseLanguage(String(code))).filter((code) => /^[a-z]{2,3}$/.test(code)))].slice(0, 30);

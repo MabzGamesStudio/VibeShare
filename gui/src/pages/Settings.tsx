@@ -944,6 +944,30 @@ export function SettingsPage() {
                 <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
               </label>
               <label className="field">
+                Video prefetch ahead (seconds)
+                <input
+                  type="number"
+                  min={0}
+                  max={3600}
+                  defaultValue={s.vvshPrefetchSeconds}
+                  onBlur={(e) => void updateSettings({ vvshPrefetchSeconds: Number(e.target.value) })}
+                />
+                <span className="hint">
+                  While a .vvsh video plays, its chunks keep downloading this far ahead (a minute by default). 0 fetches only what is playing.
+                </span>
+              </label>
+              <label className="field">
+                Arrow-key skip (seconds)
+                <input
+                  type="number"
+                  min={1}
+                  max={120}
+                  defaultValue={s.vvshSkipSeconds}
+                  onBlur={(e) => void updateSettings({ vvshSkipSeconds: Number(e.target.value) })}
+                />
+                <span className="hint">How far the left and right arrows jump through a video (10 by default · 1–120).</span>
+              </label>
+              <label className="field">
                 IPFS gateway
                 <input type="url" defaultValue={s.ipfsGateway} onBlur={(e) => void updateSettings({ ipfsGateway: e.target.value })} />
               </label>
