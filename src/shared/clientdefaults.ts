@@ -84,6 +84,9 @@ export function defaultSettings(): Settings {
     cacheMiB: 1024,
     vvshPrefetchSeconds: 60,
     vvshSkipSeconds: 10,
+    vvshDefaultQuality: 'auto',
+    vvshPreviewWidth: 320,
+    vvshPreviewQuality: 0.72,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
@@ -194,6 +197,9 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   merged.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(merged.accountBloom.resubmitHours) || 0));
   merged.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(merged.vvshPrefetchSeconds) || 0));
   merged.vvshSkipSeconds = Math.min(120, Math.max(1, Number(merged.vvshSkipSeconds) || 10));
+  merged.vvshDefaultQuality = ['auto', 'highest', 'lowest'].includes(String(merged.vvshDefaultQuality)) ? String(merged.vvshDefaultQuality) : 'auto';
+  merged.vvshPreviewWidth = Math.min(1280, Math.max(80, Number(merged.vvshPreviewWidth) || 320));
+  merged.vvshPreviewQuality = Math.min(1, Math.max(0.1, Number(merged.vvshPreviewQuality) || 0.72));
   merged.revision = SETTINGS_REVISION;
   return merged;
 }

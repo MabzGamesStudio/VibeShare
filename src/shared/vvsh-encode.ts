@@ -348,6 +348,10 @@ export async function buildVvsh(
       .sort((a, b) => b.kbps - a.kbps)
       .map((rendition) => ({ ...rendition, bytes: bytesByRendition.get(rendition.id) ?? 0 })),
     frames: { gop, pattern: framePattern(gop).join('') },
+    avgChunkBytes:
+      chunkCount * config.bitrates.length > 0
+        ? Math.round([...bytesByRendition.values()].reduce((total, size) => total + size, 0) / (chunkCount * config.bitrates.length))
+        : 0,
     previews: images.length ? { seconds: options.totalSeconds / images.length, images } : undefined,
   };
   return { file: { meta, root: level[0] }, objects };

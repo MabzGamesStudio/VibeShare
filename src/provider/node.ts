@@ -112,6 +112,8 @@ export interface ProviderConfig extends BaseConfig {
   /** Building .vvsh verifiable video streams from uploads, priced by size, chunks and encodings. */
   vvsh: {
     convert: VvshConvertPricing;
+    /** Credits per MiB of a .vvsh chunk served (streaming/download pricing). */
+    chunkPerMiB: number;
     /** What a client gets when it sends no configuration of its own. */
     defaults: { chunkSeconds: number; previewSplits: number; bitrates: { id: string; label: string; height?: number; kbps: number }[] };
   };
@@ -139,7 +141,7 @@ export function providerDefaults(): ProviderConfig {
     rewards: { report: 1, reportDailyCap: 100, suggestion: 1, suggestionDailyCap: 50 },
     peering: { peers: [], acceptPush: true, sync: { enabled: false, intervalMs: 3_600_000, sendRatePerMin: 120, receiveRatePerMin: 120 } },
     contentUrls: { autoAccept: true, maxUrlsPerClient: 16, maxBaseUrlsPerClient: 4, creditPerDownload: 2 },
-    vvsh: { convert: { perMiB: 1, perChunk: 1, perRendition: 2, perPreview: 1 }, defaults: defaultVvshConfig() },
+    vvsh: { convert: { perMiB: 1, perChunk: 1, perRendition: 2, perPreview: 1 }, chunkPerMiB: 1, defaults: defaultVvshConfig() },
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -962,7 +964,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const account = this.auth.account(ctx);
       const data = await this.store.getChunk(hash);
       if (!data) throw notFound('This node does not have the object');
-      const price = this.chunkPrice(data.length);
+      // .vvsh chunks are priced per MiB of the chunk — configurable on this node.
+      const price = Math.ceil((data.length / MiB) * this.config.vvsh.chunkPerMiB);
       if (price > 0 && !account) throw unauthorized('An account is needed to download from this node');
       const { charged, balance } = this.charge(account, data.length, undefined, 'vvsh chunk');
       if (balance !== undefined) ctx.res.setHeader('x-vs-balance', String(balance));

@@ -859,6 +859,26 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
   };
 
   const selectedRow = rows.find((row) => row.index === selected);
+  // Exploring the stored tree by hand: a cursor on one node, moving left/right/down.
+  const [cursor, setCursor] = useState<string[]>([vvsh.root]);
+  const cursorHash = cursor[cursor.length - 1];
+  const [cursorNode, setCursorNode] = useState<NonNullable<ReturnType<typeof parseVvshNode>> | null>(null);
+  const [chunkView, setChunkView] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setChunkView('');
+    setCursorNode(null);
+    void adminBytes(`/v1/vvsh/objects/${encodeURIComponent(cursorHash)}`)
+      .then((bytes) => {
+        if (!cancelled) setCursorNode(parseVvshNode(bytes, cursorHash));
+      })
+      .catch((e) => {
+        if (!cancelled) setError(message(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cursorHash]);
   return (
     <Modal title={`Stream · ${meta.chunkCount} chunks · ${meta.bitrates.length} encodings`} onClose={onClose} wide>
       {error && <div className="banner danger small">{error}</div>}
@@ -871,6 +891,7 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
         <dt>Chunks</dt>
         <dd>
           {meta.chunkCount} × {meta.chunkSeconds}s · {meta.totalSeconds}s total
+          {meta.avgChunkBytes ? ` · ≈ ${(meta.avgChunkBytes / 1_048_576).toFixed(2)} MB per chunk (average)` : ''}
         </dd>
         <dt>Frames</dt>
         <dd>
@@ -881,6 +902,80 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
         <dt>Root</dt>
         <dd className="mono tiny">{vvsh.root}</dd>
       </dl>
+      <details open>
+        <summary>Explore the stored tree — one branch at a time</summary>
+        <div className="row" style={{ alignItems: 'center', marginTop: 8 }}>
+          {cursorNode?.kind === 'branch' ? (
+            <>
+              <button onClick={() => setCursor((path) => [...path, cursorNode.left])}>◀ left</button>
+              <button onClick={() => setCursor((path) => [...path, cursorNode.right])}>right ▶</button>
+            </>
+          ) : null}
+          {cursor.length > 1 ? <button onClick={() => setCursor((path) => path.slice(0, -1))}>↑ up</button> : null}
+          <button onClick={() => setCursor([vvsh.root])}>reset to root</button>
+        </div>
+        <dl className="kv">
+          <dt>Level</dt>
+          <dd>
+            {cursor.length - 1} of {meta.chunkCount > 1 ? Math.ceil(Math.log2(meta.chunkCount)) : 0}+ · at{' '}
+            {cursorNode ? (cursorNode.kind === 'branch' ? 'a branch' : `chunk ${cursorNode.index}`) : 'loading…'}
+          </dd>
+          <dt>Hash</dt>
+          <dd className="mono tiny">{cursorHash}</dd>
+          {cursorNode?.kind === 'branch' && (
+            <>
+              <dt>Left child</dt>
+              <dd className="mono tiny">{cursorNode.left}</dd>
+              <dt>Right child</dt>
+              <dd className="mono tiny">{cursorNode.right}</dd>
+            </>
+          )}
+          {cursorNode?.kind === 'chunk' && (
+            <>
+              <dt>Leaves</dt>
+              <dd>
+                {cursorNode.renditions.map((leaf) => (
+                  <div key={leaf.id} className="mono tiny">
+                    {leaf.id} · {leaf.size} bytes · {leaf.frames.i} I / {leaf.frames.p} P / {leaf.frames.b} B · {leaf.hash}
+                  </div>
+                ))}
+              </dd>
+            </>
+          )}
+        </dl>
+        {cursorNode?.kind === 'chunk' && (
+          <div className="row">
+            {cursorNode.renditions.map((leaf) => (
+              <button
+                key={leaf.id}
+                onClick={() => {
+                  void adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`)
+                    .then((bytes) => {
+                      const frames = (() => {
+                        try {
+                          return decodeVvshChunk(bytes)
+                            .map((frame) => frame.type)
+                            .join('');
+                        } catch {
+                          return 'unreadable';
+                        }
+                      })();
+                      setChunkView(
+                        `${leaf.id}: ${bytes.length} bytes, hash ${leaf.hash}\nframes: ${frames}\nhex: ${[...bytes.slice(0, 48)]
+                          .map((byte) => byte.toString(16).padStart(2, '0'))
+                          .join(' ')} …`
+                      );
+                    })
+                    .catch((e) => setChunkView(message(e)));
+                }}
+              >
+                view {leaf.id} chunk
+              </button>
+            ))}
+          </div>
+        )}
+        {chunkView && <pre className="mono tiny">{chunkView}</pre>}
+      </details>
       <div className="field">
         <span>Encodings — click to fetch every chunk of that quality and play it</span>
         {meta.bitrates.map((rendition) => (

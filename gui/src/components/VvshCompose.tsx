@@ -14,8 +14,14 @@ import { useApp } from '../state';
 import { defaultKbps, estimateBytes, FRAME_RATES, RESOLUTIONS, rowId, transcode, type EncodeRow } from '../media/transcode';
 import { clearJob, getBlob, getStoredFile, loadJob, newJobId, putBlob, saveJob, type VvshJob } from '../media/vvshjobs';
 
-/** Opens the picked video once to read its length and capture real preview thumbnails. */
-async function probeVideo(file: Blob, splits: number): Promise<{ seconds: number; previews: string[] }> {
+/** Opens the picked video once to read its length and capture real preview thumbnails.
+ *  Size and JPEG quality come from Settings → Video streams. */
+async function probeVideo(
+  file: Blob,
+  splits: number,
+  width = 320,
+  quality = 0.72
+): Promise<{ seconds: number; previews: string[] }> {
   const url = URL.createObjectURL(file);
   try {
     const video = document.createElement('video');
@@ -36,8 +42,8 @@ async function probeVideo(file: Blob, splits: number): Promise<{ seconds: number
     });
     const seconds = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
     const canvas = document.createElement('canvas');
-    canvas.width = 320;
-    canvas.height = Math.max(90, Math.round(((video.videoHeight || 180) / (video.videoWidth || 320)) * 320));
+    canvas.width = width;
+    canvas.height = Math.max(90, Math.round(((video.videoHeight || 180) / (video.videoWidth || 320)) * width));
     const previews: string[] = [];
     for (let index = 0; index < Math.max(0, splits); index++) {
       const at = ((index + 0.5) * seconds) / splits;
@@ -47,7 +53,7 @@ async function probeVideo(file: Blob, splits: number): Promise<{ seconds: number
       });
       video.onseeked = null;
       canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
-      previews.push(canvas.toDataURL('image/jpeg', 0.72));
+      previews.push(canvas.toDataURL('image/jpeg', quality));
     }
     return { seconds, previews };
   } finally {
@@ -73,6 +79,7 @@ export function VvshCompose() {
   const [previews, setPreviews] = useState('6');
   const [job, setJob] = useState<VvshJob | null>(null);
   const jobRef = useRef<VvshJob | null>(null);
+  const [passPct, setPassPct] = useState<number | null>(null);
   const [result, setResult] = useState<string | null>(null);
 
   // A job left over from an earlier visit (the page closed mid-publish) is picked up here.
@@ -96,6 +103,9 @@ export function VvshCompose() {
   // Empty fields are fine while typing — the numbers are only read when they are filled.
   const chunkSecondsValue = Number(chunkSeconds) || 0;
   const previewSplits = Number(previews) || 0;
+  // Preview thumbnails follow the size and JPEG quality set in Settings → Video streams.
+  const previewWidth = Math.min(1280, Math.max(80, Number(state?.settings?.vvshPreviewWidth ?? 320)));
+  const previewQuality = Math.min(1, Math.max(0.1, Number(state?.settings?.vvshPreviewQuality ?? 0.72)));
   const bitrates: VvshRendition[] = rows.map((row) => ({
     id: row.id,
     label: `${row.height}p${row.fps}`,
@@ -127,7 +137,7 @@ export function VvshCompose() {
     setSeconds(0);
     try {
       // The length comes from the video itself — no typing needed.
-      const probe = await probeVideo(picked, 0);
+      const probe = await probeVideo(picked, 0, previewWidth, previewQuality);
       if (probe.seconds > 0) setSeconds(Math.round(probe.seconds));
     } catch {
       // Not something the browser can open; the run will say so clearly.
@@ -145,7 +155,7 @@ export function VvshCompose() {
       // exactly this, so a resumed job does not need the file to be chosen again.
       const source: Blob | null = file ?? (resuming ? await getStoredFile(`${resuming.id}:source`) : null);
       if (!source) throw new Error('Pick the video file first');
-      const probed = await probeVideo(source, previewSplits);
+      const probed = await probeVideo(source, previewSplits, previewWidth, previewQuality);
       const totalSeconds = probed.seconds || seconds;
       if (!(totalSeconds > 0)) throw new Error('Could not read a length from this video');
       if (!(chunkSecondsValue > 0)) throw new Error('Time per chunk must be 1 or more');
@@ -226,7 +236,8 @@ export function VvshCompose() {
   const runPassthrough = async () => {
     if (!provider || !file) return;
     try {
-      const probed = await probeVideo(file, previewSplits);
+      setPassPct(0);
+      const probed = await probeVideo(file, previewSplits, previewWidth, previewQuality);
       const totalSeconds = probed.seconds || seconds;
       const name = (title.trim() || file.name.replace(/\.[^.]+$/, '') || 'video') + '.vvsh';
       const session = await api<{ jobId: string }>('/api/vvsh/session', {
@@ -240,15 +251,20 @@ export function VvshCompose() {
           previews: probed.previews,
         },
       });
-      for (let at = 0; at < file.size; at += 2 * 1024 * 1024) {
-        const slice = new Uint8Array(await file.slice(at, at + 2 * 1024 * 1024).arrayBuffer());
+      const pieceSize = 2 * 1024 * 1024;
+      for (let at = 0; at < file.size; at += pieceSize) {
+        const slice = new Uint8Array(await file.slice(at, at + pieceSize).arrayBuffer());
         await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(slice) } });
+        setPassPct(Math.min(99, Math.round(((at + pieceSize) / file.size) * 100)));
       }
       const answer = await api<{ cid: string }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+      setPassPct(100);
       setResult(answer.cid);
       toast('Stored on the provider', 'success');
     } catch (e) {
       toast(errorMessage(e), 'error');
+    } finally {
+      setPassPct(null);
     }
   };
 
@@ -332,7 +348,17 @@ export function VvshCompose() {
             placeholder="6"
             onChange={(e) => setPreviews(e.target.value)}
           />
-          <span className="hint">0 or more · 0 = no previews</span>
+          <span className="hint">
+            0 or more · 0 = no previews ·{' '}
+            {previewWidth}px at {previewQuality} quality ≈{' '}
+            {(Math.max(0, previewSplits) * previewWidth * Math.round((previewWidth * 9) / 16) * 0.3 * previewQuality) / 1_048_576 > 0.01
+              ? `${(
+                  (Math.max(0, previewSplits) * previewWidth * Math.round((previewWidth * 9) / 16) * 0.3 * previewQuality) /
+                  1_048_576
+                ).toFixed(2)} MB`
+              : '0 MB'}{' '}
+            total
+          </span>
         </label>
         <label className="field">
           Title
@@ -400,6 +426,17 @@ export function VvshCompose() {
           </button>
         )}
       </div>
+      {passPct !== null && (
+        <div className="card form-stack">
+          <div className="row between">
+            <strong>Uploading to the provider</strong>
+            <span className="hint">{passPct}%</span>
+          </div>
+          <div style={{ height: 6, background: 'rgba(0,0,0,0.12)', borderRadius: 3 }}>
+            <div style={{ width: `${passPct}%`, height: '100%', background: 'var(--accent)', borderRadius: 3, transition: 'width 0.3s' }} />
+          </div>
+        </div>
+      )}
       {job && job.status !== 'done' && (
         <div className="card form-stack">
           <div className="row between">

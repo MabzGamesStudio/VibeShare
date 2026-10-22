@@ -274,6 +274,12 @@ export interface Settings {
   vvshPrefetchSeconds: number;
   /** How far the arrow keys skip through a video, in seconds. */
   vvshSkipSeconds: number;
+  /** What the player starts on: `auto`, `highest` or `lowest`. */
+  vvshDefaultQuality: string;
+  /** Width of the preview thumbnails captured when publishing, in pixels. */
+  vvshPreviewWidth: number;
+  /** JPEG quality of the preview thumbnails (0–1). */
+  vvshPreviewQuality: number;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;

@@ -57,6 +57,8 @@ export interface VvshMeta {
   bitrates: VvshRendition[];
   /** How the I/P/B frames are arranged inside each chunk. */
   frames: { gop: number; pattern: string };
+  /** Average size of a chunk payload across every encoding, in bytes. */
+  avgChunkBytes?: number;
   /**
    * Optional image previews: one image per `seconds` of video, so the client can scrub
    * and see the overall progression without fetching any chunk down to the leaf.
@@ -425,6 +427,7 @@ export function serializeVvshFile(file: VvshFile): Uint8Array {
   pack.varint(file.meta.chunkCount);
   pack.varint(file.meta.frames.gop);
   pack.str(file.meta.frames.pattern);
+  pack.varint(file.meta.avgChunkBytes ?? 0);
   pack.varint(file.meta.bitrates.length);
   for (const rendition of file.meta.bitrates) {
     pack.str(rendition.id);
@@ -465,6 +468,7 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
       const chunkCount = unpack.varint();
       const gop = unpack.varint();
       const pattern = unpack.str();
+      const avgChunkBytes = unpack.varint();
       const count = unpack.varint();
       if (count < 1 || count > 16) throw new Error('Invalid vvsh file: no bitrate encodings');
       const bitrates: VvshRendition[] = [];
@@ -494,7 +498,18 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
       const root = hashFromBytes(unpack.raw(32));
       if (!unpack.finished) throw new Error('Invalid vvsh file: trailing bytes');
       file = {
-        meta: { v: 1, codec, sourceMime: sourceMime || undefined, chunkSeconds, chunkCount, totalSeconds, bitrates, frames: { gop, pattern }, previews },
+        meta: {
+          v: 1,
+          codec,
+          sourceMime: sourceMime || undefined,
+          chunkSeconds,
+          chunkCount,
+          totalSeconds,
+          bitrates,
+          frames: { gop, pattern },
+          ...(avgChunkBytes ? { avgChunkBytes } : {}),
+          previews,
+        },
         root,
       };
     } catch (error) {

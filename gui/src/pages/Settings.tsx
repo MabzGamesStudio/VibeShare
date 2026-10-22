@@ -943,30 +943,71 @@ export function SettingsPage() {
                 Cache size (MiB)
                 <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
               </label>
-              <label className="field">
-                Video prefetch ahead (seconds)
-                <input
-                  type="number"
-                  min={0}
-                  max={3600}
-                  defaultValue={s.vvshPrefetchSeconds}
-                  onBlur={(e) => void updateSettings({ vvshPrefetchSeconds: Number(e.target.value) })}
-                />
-                <span className="hint">
-                  While a .vvsh video plays, its chunks keep downloading this far ahead (a minute by default). 0 fetches only what is playing.
-                </span>
-              </label>
-              <label className="field">
-                Arrow-key skip (seconds)
-                <input
-                  type="number"
-                  min={1}
-                  max={120}
-                  defaultValue={s.vvshSkipSeconds}
-                  onBlur={(e) => void updateSettings({ vvshSkipSeconds: Number(e.target.value) })}
-                />
-                <span className="hint">How far the left and right arrows jump through a video (10 by default · 1–120).</span>
-              </label>
+              <div className="field" style={{ gridColumn: '1 / -1' }}>
+                <strong>Video streams</strong>
+                <div className="form-grid">
+                  <label className="field">
+                    Default quality
+                    <select
+                      value={s.vvshDefaultQuality}
+                      onChange={(e) => void updateSettings({ vvshDefaultQuality: e.target.value })}
+                    >
+                      <option value="auto">Auto (fits your network)</option>
+                      <option value="highest">Highest available</option>
+                      <option value="lowest">Lowest available</option>
+                    </select>
+                    <span className="hint">What the player starts on for a .vvsh video.</span>
+                  </label>
+                  <label className="field">
+                    Prefetch ahead (seconds)
+                    <input
+                      type="number"
+                      min={0}
+                      max={3600}
+                      defaultValue={s.vvshPrefetchSeconds}
+                      onBlur={(e) => void updateSettings({ vvshPrefetchSeconds: Number(e.target.value) })}
+                    />
+                    <span className="hint">
+                      While a video plays, its chunks keep downloading this far ahead (a minute by default). 0 fetches only what is playing.
+                    </span>
+                  </label>
+                  <label className="field">
+                    Arrow-key skip (seconds)
+                    <input
+                      type="number"
+                      min={1}
+                      max={120}
+                      defaultValue={s.vvshSkipSeconds}
+                      onBlur={(e) => void updateSettings({ vvshSkipSeconds: Number(e.target.value) })}
+                    />
+                    <span className="hint">How far the left and right arrows jump (10 by default · 1–120).</span>
+                  </label>
+                  <label className="field">
+                    Preview width (pixels)
+                    <input
+                      type="number"
+                      min={80}
+                      max={1280}
+                      step={20}
+                      defaultValue={s.vvshPreviewWidth}
+                      onBlur={(e) => void updateSettings({ vvshPreviewWidth: Number(e.target.value) })}
+                    />
+                    <span className="hint">Width of the scrubbing thumbnails captured when publishing (80–1280).</span>
+                  </label>
+                  <label className="field">
+                    Preview quality
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={1}
+                      step={0.05}
+                      defaultValue={s.vvshPreviewQuality}
+                      onBlur={(e) => void updateSettings({ vvshPreviewQuality: Number(e.target.value) })}
+                    />
+                    <span className="hint">JPEG quality of the previews (0.1–1 · 0.72 by default).</span>
+                  </label>
+                </div>
+              </div>
               <label className="field">
                 IPFS gateway
                 <input type="url" defaultValue={s.ipfsGateway} onBlur={(e) => void updateSettings({ ipfsGateway: e.target.value })} />
