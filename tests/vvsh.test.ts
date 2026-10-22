@@ -136,6 +136,61 @@ describe('the .vvsh verifiable video stream format', async () => {
     assert.ok(frames[1].data.length < 1000, 'a P frame over unchanged bytes costs almost nothing');
   });
 
+  it('really stores fewer bytes in the smaller encoding than the bigger one', async () => {
+    // Two encoded streams the way the browser transcoder makes them: one big and sharp,
+    // one small and soft. The tree must keep them apart — never two identical leaves.
+    const big = randomBytesOf(240_000);
+    const small = randomBytesOf(60_000);
+    const renditions = [
+      { id: 'hi', label: '1080p', height: 1080, kbps: 5_000, fps: 30 },
+      { id: 'lo', label: '480p', height: 480, kbps: 1_200, fps: 30 },
+    ];
+    const objects = new Map<VvshHash, Uint8Array>();
+    const { file: built } = await buildVvsh(
+      big,
+      {
+        totalSeconds: 30,
+        config: { bitrates: renditions, chunkSeconds: 10, gop: 8 },
+        sourceMime: 'video/webm',
+        streams: { hi: big, lo: small },
+      },
+      (hash, data) => {
+        objects.set(hash, data);
+      }
+    );
+    const hiBytes = built.meta.bitrates.find((r) => r.id === 'hi')!.bytes!;
+    const loBytes = built.meta.bitrates.find((r) => r.id === 'lo')!.bytes!;
+    assert.ok(loBytes < hiBytes / 2, `the smaller encoding is really smaller (${loBytes} vs ${hiBytes} bytes)`);
+    let leaves = 0;
+    for (const bytes of objects.values()) {
+      const node = parseVvshNode(bytes);
+      if (node?.kind === 'chunk') {
+        leaves++;
+        const hi = node.renditions.find((rendition) => rendition.id === 'hi')!;
+        const lo = node.renditions.find((rendition) => rendition.id === 'lo')!;
+        assert.notEqual(hi.hash, lo.hash, 'the two encodings are different bytes, not copies');
+        assert.ok(lo.size < hi.size);
+      }
+    }
+    assert.equal(leaves, 3, 'three chunks');
+    assert.deepEqual(Buffer.from(exportVvshStream(payloadsOf(objects, 'lo'))), Buffer.from(small), 'the small encoding reassembles to its own stream');
+    assert.deepEqual(Buffer.from(exportVvshStream(payloadsOf(objects, 'hi'))), Buffer.from(big), 'the big encoding reassembles to its own stream');
+    // A missing encoding is an error — never a silent copy of another one.
+    await assert.rejects(
+      buildVvsh(
+        big,
+        {
+          totalSeconds: 30,
+          config: { bitrates: renditions, chunkSeconds: 10, gop: 8 },
+          sourceMime: 'video/webm',
+          streams: { hi: big },
+        },
+        () => undefined
+      ),
+      /No encoded stream for lo/
+    );
+  });
+
   it('keeps a real upload intact in every encoding, so any of them plays', async () => {
     const real = new Map<VvshHash, Uint8Array>();
     const { file: realFile } = await buildVvsh(

@@ -298,8 +298,18 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
         onTouchStart={wake}
         style={
           full
-            ? { width: '100vw', height: '100vh', background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }
-            : { position: 'relative', background: '#000', borderRadius: 8, overflow: 'hidden' }
+            ? {
+                width: '100vw',
+                height: '100vh',
+                background: '#000',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                position: 'relative',
+                overflow: 'hidden',
+                cursor: controlsVisible ? 'auto' : 'none',
+              }
+            : { position: 'relative', background: '#000', borderRadius: 8, overflow: 'hidden', cursor: controlsVisible ? 'auto' : 'none' }
         }
       >
         <video

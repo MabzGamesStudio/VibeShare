@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CopyButton, Loading, Modal, StatusDot, Switch } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
-import { admin, message } from './api';
+import { admin, adminBytes, message } from './api';
+import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
+import { decodeVvshChunk, decodeVvshFrames } from '../../../src/shared/vvsh-encode.js';
 import { useToast } from './AdminApp';
 
 interface ContentRow {
@@ -219,6 +221,7 @@ interface ContentDetailsData {
     meta?: Record<string, unknown>;
     sources?: string[];
     creator?: { id: string; name?: string; kind?: string };
+    vvsh?: VvshFile;
   };
   chunks?: { id: string; size: number; backends: string[] }[];
   suggestions?: SuggestionRow[];
@@ -228,6 +231,7 @@ interface ContentDetailsData {
 function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) {
   const [data, setData] = useState<ContentDetailsData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showVvsh, setShowVvsh] = useState(false);
   const [toast, show] = useToast();
   useEffect(() => {
     admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`).then(setData).catch((e) => setError(message(e)));
@@ -253,8 +257,20 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             </dd>
             <dt>Chunks</dt>
             <dd>
-              {data.record.chunks} × {formatBytes(data.manifest?.chunkSize ?? 0)} on{' '}
-              {[...new Set((data.chunks ?? []).flatMap((chunk) => chunk.backends))].join(', ') || 'no backend'}
+              {data.manifest?.vvsh ? (
+                <>
+                  {data.manifest.vvsh.meta.chunkCount} chunks × {data.manifest.vvsh.meta.bitrates.length} encodings, each stored as its own object under
+                  the tree root — the .vvsh file is metadata and the root, so it lists no byte chunks.{' '}
+                  <button className="small" onClick={() => setShowVvsh(true)}>
+                    View .vvsh
+                  </button>
+                </>
+              ) : (
+                <>
+                  {data.record.chunks} × {formatBytes(data.manifest?.chunkSize ?? 0)} on{' '}
+                  {[...new Set((data.chunks ?? []).flatMap((chunk) => chunk.backends))].join(', ') || 'no backend'}
+                </>
+              )}
             </dd>
             <dt>Uploader</dt>
             <dd className="mono tiny">{data.record.uploader}</dd>
@@ -290,6 +306,7 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             <dd>{data.record.duplicates?.length ? data.record.duplicates.join(' · ') : 'None reported'}</dd>
           </dl>
           {meta.description && <p className="small">{meta.description}</p>}
+          {showVvsh && data.manifest?.vvsh && <VvshModal vvsh={data.manifest.vvsh} onClose={() => setShowVvsh(false)} />}
           <div className="row">
             <button
               className="small"
@@ -760,4 +777,180 @@ export function ProviderTabs({ tab }: { tab: string }) {
       </>
     );
   return null;
+}
+
+interface VvshChunkRow {
+  index: number;
+  node: string;
+  path: string[];
+  renditions: { id: string; hash: string; size: number; frames: { i: number; p: number; b: number } }[];
+}
+
+/** One .vvsh stream in full: its metadata, every chunk, and the merkle tree over them. */
+function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
+  const meta = vvsh.meta;
+  const [rows, setRows] = useState<VvshChunkRow[]>([]);
+  const [treeText, setTreeText] = useState('');
+  const [selected, setSelected] = useState(0);
+  const [preview, setPreview] = useState<{ url: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const chunks: VvshChunkRow[] = [];
+        const lines: string[] = [];
+        const walk = async (hash: string, depth: number, path: string[]): Promise<void> => {
+          if (cancelled || depth > 24) return;
+          const node = parseVvshNode(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(hash)}`), hash);
+          if (!node) {
+            lines.push(`${'  '.repeat(depth)}? ${hash} (its bytes hash to something else)`);
+            return;
+          }
+          if (node.kind === 'branch') {
+            lines.push(`${'  '.repeat(depth)}branch ${hash}`);
+            await walk(node.left, depth + 1, [...path, hash]);
+            await walk(node.right, depth + 1, [...path, hash]);
+          } else {
+            lines.push(`${'  '.repeat(depth)}chunk ${node.index} ${hash}`);
+            chunks.push({ index: node.index, node: hash, path: [...path, hash], renditions: node.renditions });
+          }
+        };
+        await walk(vvsh.root, 0, []);
+        if (cancelled) return;
+        chunks.sort((a, b) => a.index - b.index);
+        setRows(chunks);
+        setTreeText(lines.join('\n'));
+      } catch (e) {
+        if (!cancelled) setError(message(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vvsh]);
+
+  /** Fetches every chunk of one encoding from this node and plays the reassembled video. */
+  const play = async (rendition: string) => {
+    try {
+      setError(null);
+      const blocks: Uint8Array[] = [];
+      for (const row of rows) {
+        const leaf = row.renditions.find((entry) => entry.id === rendition);
+        if (!leaf) continue;
+        const payload = await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`);
+        blocks.push(...decodeVvshFrames(decodeVvshChunk(payload)));
+      }
+      const out = new Uint8Array(blocks.reduce((size, block) => size + block.length, 0));
+      let at = 0;
+      for (const block of blocks) {
+        out.set(block, at);
+        at += block.length;
+      }
+      const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type: meta.sourceMime ?? 'video/mp4' }));
+      setPreview((old) => {
+        if (old) URL.revokeObjectURL(old.url);
+        return { url };
+      });
+    } catch (e) {
+      setError(message(e));
+    }
+  };
+
+  const selectedRow = rows.find((row) => row.index === selected);
+  return (
+    <Modal title={`Stream · ${meta.chunkCount} chunks · ${meta.bitrates.length} encodings`} onClose={onClose} wide>
+      {error && <div className="banner danger small">{error}</div>}
+      <dl className="kv">
+        <dt>Version</dt>
+        <dd>
+          {meta.v} · {meta.codec}
+          {meta.sourceMime ? ` · ${meta.sourceMime}` : ''}
+        </dd>
+        <dt>Chunks</dt>
+        <dd>
+          {meta.chunkCount} × {meta.chunkSeconds}s · {meta.totalSeconds}s total
+        </dd>
+        <dt>Frames</dt>
+        <dd>
+          {meta.frames.gop} · {meta.frames.pattern}
+        </dd>
+        <dt>Previews</dt>
+        <dd>{meta.previews ? `${meta.previews.images.length} × ${meta.previews.seconds.toFixed(2)}s` : 'none'}</dd>
+        <dt>Root</dt>
+        <dd className="mono tiny">{vvsh.root}</dd>
+      </dl>
+      <div className="field">
+        <span>Encodings — click to fetch every chunk of that quality and play it</span>
+        {meta.bitrates.map((rendition) => (
+          <div className="row" key={rendition.id} style={{ gap: 8 }}>
+            <button className="small" onClick={() => void play(rendition.id)}>
+              ▶ {rendition.label}
+            </button>
+            <span className="small faint">
+              {rendition.height ? `${rendition.height}p` : ''}
+              {rendition.fps ? ` ${rendition.fps}fps` : ''} · {rendition.kbps} kbit/s · {rendition.bytes ? formatBytes(rendition.bytes) : '—'}
+            </span>
+          </div>
+        ))}
+      </div>
+      {preview && <video key={preview.url} src={preview.url} controls style={{ width: '100%' }} />}
+      <h3>Chunks</h3>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Chunk</th>
+            <th>Time</th>
+            <th>Encodings</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr
+              key={row.index}
+              style={{ cursor: 'pointer', outline: selected === row.index ? '1px solid var(--accent)' : undefined }}
+              onClick={() => setSelected(row.index)}
+            >
+              <td>{row.index}</td>
+              <td>
+                {Math.round(row.index * meta.chunkSeconds)}s – {Math.round(Math.min(meta.totalSeconds, (row.index + 1) * meta.chunkSeconds))}s
+              </td>
+              <td className="tiny mono">
+                {row.renditions.map((entry) => (
+                  <div key={entry.id}>
+                    {entry.id}: {formatBytes(entry.size)} · {entry.frames.i}I {entry.frames.p}P {entry.frames.b}B
+                  </div>
+                ))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {selectedRow && (
+        <div className="card form-stack">
+          <h3>Chunk {selectedRow.index}</h3>
+          <div className="mono tiny faint">node {selectedRow.node}</div>
+          {selectedRow.renditions.map((entry) => (
+            <div key={entry.id} className="small">
+              <strong>{entry.id}</strong> · {formatBytes(entry.size)} · {entry.frames.i} I / {entry.frames.p} P / {entry.frames.b} B
+              <div className="mono tiny faint">{entry.hash}</div>
+            </div>
+          ))}
+          <div>
+            <span className="small">Merkle path (root → this chunk)</span>
+            {selectedRow.path.map((hash) => (
+              <div key={hash} className="mono tiny">
+                {hash}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <h3>Merkle tree</h3>
+      <pre className="mono tiny" style={{ overflowX: 'auto' }}>
+        {treeText}
+      </pre>
+    </Modal>
+  );
 }

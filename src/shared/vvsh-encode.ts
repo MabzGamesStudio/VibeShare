@@ -288,7 +288,12 @@ export async function buildVvsh(
       // a real video's container can't survive thinning, so every encoding of a real
       // upload carries the stream intact (they share one object). Synthetic input is
       // thinned to its declared rate.
-      const stream = options.streams?.[rendition.id];
+      const stream = options.streams ? options.streams[rendition.id] : undefined;
+      if (options.streams && !stream) {
+        // Never silently fall back here: that is how two "encodings" end up holding the
+        // same bytes while claiming different qualities.
+        throw new Error(`No encoded stream for ${rendition.id}`);
+      }
       const piece = stream
         ? stream.subarray(Math.floor((index * stream.length) / chunkCount), Math.floor(((index + 1) * stream.length) / chunkCount))
         : options.sourceMime

@@ -38,6 +38,13 @@ export async function admin<T>(path: string, init: { method?: string; body?: unk
   return parsed as T;
 }
 
+/** Raw bytes from the node (a .vvsh object), with the same admin token. */
+export async function adminBytes(path: string): Promise<Uint8Array> {
+  const response = await fetch(path, { headers: { 'x-admin-token': current } });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 export function message(error: unknown): string {
   return (error as Error)?.message ?? String(error);
 }
