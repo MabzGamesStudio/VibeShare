@@ -1,4 +1,0 @@
-14:  unauthorized,
-373:    if (!account) throw unauthorized('An account is needed to download from this node');
-874:      if (price > 0 && !account) throw unauthorized('An account is needed to download from this node');
-D

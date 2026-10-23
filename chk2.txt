@@ -1,5 +1,0 @@
----
-> build
-> tsc --noEmit && vite build
-
-DONE
