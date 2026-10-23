@@ -898,7 +898,13 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
           {meta.frames.gop} · {meta.frames.pattern}
         </dd>
         <dt>Previews</dt>
-        <dd>{meta.previews ? `${meta.previews.images.length} × ${meta.previews.seconds.toFixed(2)}s` : 'none'}</dd>
+        <dd>
+          {meta.previews
+            ? `${meta.previews.images.length} × ${meta.previews.seconds.toFixed(2)}s` +
+              (meta.previews.width ? ` · ${meta.previews.width}px` : '') +
+              (meta.previews.quality ? ` · quality ${meta.previews.quality}` : '')
+            : 'none'}
+        </dd>
         <dt>Root</dt>
         <dd className="mono tiny">{vvsh.root}</dd>
       </dl>

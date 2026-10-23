@@ -221,7 +221,13 @@ export function VvshViewerPage() {
                 </tr>
                 <tr>
                   <td>Previews</td>
-                  <td>{file.meta.previews ? `${file.meta.previews.images.length} × ${file.meta.previews.seconds}s` : 'none'}</td>
+                  <td>
+                    {file.meta.previews
+                      ? `${file.meta.previews.images.length} × ${file.meta.previews.seconds}s` +
+                        (file.meta.previews.width ? ` · ${file.meta.previews.width}px` : '') +
+                        (file.meta.previews.quality ? ` · quality ${file.meta.previews.quality}` : '')
+                      : 'none'}
+                  </td>
                 </tr>
                 <tr>
                   <td>Root</td>

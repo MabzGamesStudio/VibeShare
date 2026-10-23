@@ -1,0 +1,26 @@
+total 1440
+drwxr-xr-x  6 mabz  staff     192 Oct 20 22:18 .
+drwxr-xr-x  8 mabz  staff     256 Oct 20 22:18 ..
+-rw-r--r--  1 mabz  staff   97138 Oct 20 22:18 local-WMfgyUW8.js
+-rw-r--r--  1 mabz  staff  595288 Oct 20 22:18 main-CbOLPDeD.js
+-rw-r--r--  1 mabz  staff   34366 Oct 20 22:18 main-GSC1bdBZ.css
+-rw-r--r--  1 mabz  staff    1078 Oct 20 22:18 start-D4QidrVH.js
+---
+gui/dist/assets/main-BSVvxfrm.js
+1
+gui/dist/assets/styles-CXHGqXFA.js
+0
+---
+distribution/web/assets/local-WMfgyUW8.js
+0
+distribution/web/assets/main-CbOLPDeD.js
+0
+distribution/web/assets/start-D4QidrVH.js
+0
+---
+package.json:15:    "build": "npm run build:node && npm run build:gui",
+package.json:17:    "build:gui": "npm --prefix gui run build",
+package.json:18:    "build:web": "npm --prefix gui run build:web",
+gui/package.json:7:    "build": "tsc --noEmit && vite build",
+gui/package.json:10:    "build:web": "tsc --noEmit && vite build -c vite.web.config.ts && vite build -c vite.sw.config.ts"
+OK

@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "npm run build:node && npm run build:gui",
+    "build": "npm run build:node && npm run build:gui && npm run build:web",
     "build:node": "tsc -p tsconfig.json",
     "build:gui": "npm --prefix gui run build",
     "build:web": "npm --prefix gui run build:web",

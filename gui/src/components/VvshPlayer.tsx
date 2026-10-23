@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Download, FileDown, Gauge, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { chunkAt, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
-import { decodeVvshChunk, decodeVvshFrames, exportVvshStream } from '../../../src/shared/vvsh-encode.js';
+import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream } from '../../../src/shared/vvsh-encode.js';
 import { fromBase64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage } from '../api';
 import { useApp } from '../state';
@@ -32,10 +32,13 @@ export function downloadName(name: string, mime?: string): string {
   return VIDEO_EXT.test(base) ? base : `${base}${EXT_BY_MIME[mime ?? ''] ?? '.mp4'}`;
 }
 
-/** The decoded stream bytes of one chunk: its I/P/B frames, in order. */
+/** The decoded stream bytes of one chunk: its I/P/B frames, in order. A segmented stream's
+ *  chunk is already a media segment and comes back as it stands. */
 async function fetchChunk(nodeId: string, file: VvshFile, index: number, rendition: string): Promise<Uint8Array> {
   const answer = await api<{ data: string }>('/api/vvsh/chunk', { body: { nodeId, file, index, rendition } });
-  const blocks = decodeVvshFrames(decodeVvshChunk(fromBase64url(answer.data)));
+  const raw = fromBase64url(answer.data);
+  if (file.meta.codec === 'vvsh-webm/1') return raw;
+  const blocks = decodeVvshFrames(decodeVvshChunk(raw));
   const out = new Uint8Array(blocks.reduce((total, block) => total + block.length, 0));
   let at = 0;
   for (const block of blocks) {
@@ -43,6 +46,12 @@ async function fetchChunk(nodeId: string, file: VvshFile, index: number, renditi
     at += block.length;
   }
   return out;
+}
+
+/** One content-addressed object by its hash (an encoding's init part, a tree record…). */
+async function fetchObject(nodeId: string, hash: string): Promise<Uint8Array> {
+  const answer = await api<{ data: string }>('/api/vvsh/object', { method: 'POST', body: { nodeId, hash } });
+  return fromBase64url(answer.data);
 }
 
 export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshFile; name: string }) {
@@ -67,6 +76,104 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   };
   const wantTime = useRef(0);
   const wantPlay = useRef(false);
+  // Segmented streams (`vvsh-webm/1`) play through MediaSource: each chunk is a media
+  // segment, so the player fetches and appends only what it needs around the playhead —
+  // skipping to chunk 70 fetches chunk 70 and plays it, never the 40 chunks in between.
+  // Where MediaSource with WebM is unavailable, the same chunks still play through the
+  // progressive path (init part + every chunk is a plain WebM file again).
+  const segmented = meta.codec === 'vvsh-webm/1';
+  const mseMime = segmented && meta.codecs ? `video/webm; codecs="${meta.codecs}"` : '';
+  const mseOk = segmented && typeof MediaSource !== 'undefined' && !!mseMime && MediaSource.isTypeSupported(mseMime);
+  const inits = useRef(new Map<string, Uint8Array>());
+  const mse = useRef<{
+    source: MediaSource;
+    buffer: SourceBuffer | null;
+    initHash: string;
+    appended: Set<number>;
+    queue: Uint8Array[];
+    working: boolean;
+  } | null>(null);
+
+  /** The encoding's init part (its header and tracks), fetched once per encoding. */
+  const ensureInit = async (id: string): Promise<Uint8Array> => {
+    const have = inits.current.get(id);
+    if (have) return have;
+    const rendition = meta.bitrates.find((entry) => entry.id === id) ?? meta.bitrates[0];
+    if (!segmented) return new Uint8Array(0);
+    const bytes = await fetchObject(nodeId, rendition.initHash ?? '');
+    inits.current.set(id, bytes);
+    return bytes;
+  };
+
+  /** Appends queued segments one at a time — a SourceBuffer only takes one at a time. */
+  const msePump = () => {
+    const st = mse.current;
+    if (!st || !st.buffer || st.working || st.buffer.updating) return;
+    const next = st.queue.shift();
+    if (!next) return;
+    st.working = true;
+    st.buffer.appendBuffer(next as unknown as BufferSource);
+    st.buffer.onupdateend = () => {
+      st.working = false;
+      msePump();
+    };
+  };
+  const mseAppend = (bytes: Uint8Array) => {
+    const st = mse.current;
+    if (!st) return;
+    st.queue.push(bytes);
+    msePump();
+  };
+
+  /** One chunk a moment needs: fetched (verified against the tree) and appended alone. */
+  const mseWant = async (index: number, id: string) => {
+    const st = mse.current;
+    if (!st || st.appended.has(index)) return;
+    st.appended.add(index); // before the fetch: nobody fetches the same chunk twice
+    const block = await fetchChunk(nodeId, file, index, id);
+    if (mse.current !== st) return;
+    mseAppend(block);
+  };
+
+  /** Only the window from what is playing to a minute ahead — never the chunks behind. */
+  const mseWindow = async (at: number, id: string) => {
+    const ahead = Math.max(meta.chunkSeconds, prefetchSeconds);
+    const from = chunkAt(meta, at);
+    const to = Math.min(meta.chunkCount - 1, chunkAt(meta, at + ahead));
+    const missing: number[] = [];
+    for (let index = from; index <= to; index++) if (!mse.current?.appended.has(index)) missing.push(index);
+    for (let start = 0; start < missing.length; start += 6) {
+      await Promise.all(missing.slice(start, start + 6).map((index) => mseWant(index, id)));
+    }
+  };
+
+  /** Opens a MediaSource for one encoding and plays from a moment of the video at once. */
+  const mseOpen = async (id: string, at: number, play: boolean) => {
+    const rendition = meta.bitrates.find((entry) => entry.id === id) ?? meta.bitrates[0];
+    const source = new MediaSource();
+    mse.current = { source, buffer: null, initHash: rendition.initHash ?? '', appended: new Set(), queue: [], working: false };
+    wantTime.current = at;
+    wantPlay.current = play;
+    const url = URL.createObjectURL(source);
+    setVideoUrl((old) => {
+      if (old) staleUrls.current.push(old);
+      return url;
+    });
+    await new Promise<void>((resolve) => {
+      source.onsourceopen = () => resolve();
+    });
+    const st = mse.current;
+    if (!st || mse.current !== st) return;
+    st.buffer = source.addSourceBuffer(mseMime);
+    mseAppend(Uint8Array.from(await ensureInit(id)));
+    await mseWant(chunkAt(meta, at), id); // the chunk being played goes first, always
+    const v = video.current;
+    if (v) {
+      v.currentTime = at;
+      if (play) void v.play().catch(() => undefined);
+    }
+    void mseWindow(at, id); // and then only what runs ahead of it
+  };
   // 'auto' (the default) keeps the best encoding the measured download speed can carry.
   const [rendition, setRendition] = useState<string>(() => {
     if (defaultQuality === 'highest') return meta.bitrates[0].id;
@@ -97,6 +204,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const panelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsBox = useRef<HTMLDivElement | null>(null);
   const skipSeconds = state?.settings?.vvshSkipSeconds ?? 10;
+  // How wide the scrub preview popup shows: the viewer's choice. The images themselves
+  // are captured and sized by the publisher — that is recorded in the file.
+  const scrubWidth = Math.min(640, Math.max(80, Number(state?.settings?.vvshScrubWidth ?? 220)));
 
   const keepPanel = useCallback((name: 'speed' | 'sound' | 'download') => {
     if (panelTimer.current) clearTimeout(panelTimer.current);
@@ -166,6 +276,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const pull = useCallback(
     async (upTo: number, id: string) => {
       const buffer = bufferOf(id);
+      await ensureInit(id); // a segmented stream's blob starts with its init part
       const wanted = Math.min(upTo, meta.chunkCount - 1);
       const missing: number[] = [];
       for (let index = 0; index <= wanted; index++) if (!buffer.has(index)) missing.push(index);
@@ -192,7 +303,10 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const swap = useCallback(
     (at: number, play: boolean) => {
       const buffer = bufferOf(active.current);
-      const parts: Uint8Array[] = [];
+      // A segmented stream plays as its init part followed by the segments — a plain
+      // WebM file again, which is exactly the fallback where MediaSource is unavailable.
+      const init = inits.current.get(active.current);
+      const parts: Uint8Array[] = init ? [Uint8Array.from(init)] : [];
       for (let index = 0; index < meta.chunkCount; index++) {
         const block = buffer.get(index);
         if (!block) break; // the stream is only handed over whole, from its start
@@ -243,6 +357,30 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** From one moment of the video: fetch what is missing up to it, then play there. */
   const playFrom = useCallback(
     async (at: number, play = true) => {
+      if (mseOk) {
+        // Sparse playback: the chunk that moment needs goes first, and only the window
+        // ahead follows — nothing between the old position and the new one is fetched.
+        try {
+          setError(null);
+          const want = meta.bitrates.find((entry) => entry.id === active.current) ?? meta.bitrates[0];
+          const st = mse.current;
+          if (!st || st.initHash !== (want.initHash ?? '')) {
+            await mseOpen(active.current, at, play);
+          } else {
+            await mseWant(chunkAt(meta, at), active.current);
+            const v = video.current;
+            if (v) {
+              v.currentTime = at;
+              if (play) void v.play().catch(() => undefined);
+            }
+            void mseWindow(at, active.current);
+          }
+          setFetched(mse.current?.appended.size ?? 0);
+        } catch (e) {
+          setError(errorMessage(e));
+        }
+        return;
+      }
       const target = chunkAt(meta, at);
       try {
         setError(null);
@@ -278,6 +416,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     void playFrom(0, false);
     // (Once, on open: the first chunk comes in so the video is on screen, and the
     //  prefetch window fills behind it before the user even presses play.)
+    if (mseOk) return; // segmented: MediaSource takes care of what is on screen
     void pull(Math.min(meta.chunkCount - 1, chunkAt(meta, prefetchSeconds)), active.current)
       .then(() => {
         const now = video.current;
@@ -329,6 +468,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   };
   const downloadVideo = async (pick?: string) => {
     const chosen = pick ?? rendition;
+    const chosenRendition = meta.bitrates.find((entry) => entry.id === chosen) ?? meta.bitrates[0];
     try {
       setError(null);
       setDownloadPct(0);
@@ -340,7 +480,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
         pieces.push(fromBase64url(answer.data));
         setDownloadPct(Math.round(((index + 1) / meta.chunkCount) * 100));
       }
-      const whole = exportVvshStream(pieces);
+      const whole = file.meta.codec === 'vvsh-webm/1'
+        ? assembleVvshWebm(await fetchObject(nodeId, chosenRendition.initHash ?? ''), pieces)
+        : exportVvshStream(pieces);
       const url = URL.createObjectURL(new Blob([Uint8Array.from(whole)], { type: meta.sourceMime ?? 'video/mp4' }));
       const link = document.createElement('a');
       link.href = url;
@@ -400,6 +542,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() => {
+            if (mseOk) return;
             // Some mp4s only play once the whole file is present (their index sits at the
             // end) — finish fetching and hand the complete stream over.
             if (bufferOf(active.current).size < meta.chunkCount) {
@@ -419,6 +562,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             if (wantPlay.current) void v.play().catch(() => undefined);
           }}
           onEnded={() => {
+            if (mseOk) return;
             // The stream runs out exactly when the fetched chunks do — carry on.
             if (bufferOf(active.current).size < meta.chunkCount) void playFrom(seconds + 0.2, true);
           }}
@@ -430,6 +574,11 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             // minute by default) — only those chunks get fetched, each verified and charged.
             const ahead = Math.max(meta.chunkSeconds, prefetchSeconds);
             const target = Math.min(meta.chunkCount - 1, chunkAt(meta, v.currentTime + ahead));
+            if (mseOk) {
+              // Segmented: keep only the window around what is playing filled.
+              void mseWindow(v.currentTime, active.current);
+              return;
+            }
             // Only the window's end is fetched here: what is already in the buffer stays,
             // and pulling adds just what is missing between here and there, in parallel.
             if (!bufferOf(active.current).has(target)) {
@@ -484,9 +633,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
                 style={{
                   position: 'absolute',
                   bottom: 26,
-                  left: `clamp(68px, ${(seconds / Math.max(1, meta.totalSeconds)) * 100}%, calc(100% - 68px))`,
+                  left: `clamp(${Math.round(scrubWidth / 2)}px, ${(seconds / Math.max(1, meta.totalSeconds)) * 100}%, calc(100% - ${Math.round(scrubWidth / 2)}px))`,
                   transform: 'translateX(-50%)',
-                  width: 128,
+                  width: scrubWidth,
                   borderRadius: 6,
                   boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
                   pointerEvents: 'none',

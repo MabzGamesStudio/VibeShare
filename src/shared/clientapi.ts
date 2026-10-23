@@ -276,10 +276,9 @@ export interface Settings {
   vvshSkipSeconds: number;
   /** What the player starts on: `auto`, `highest` or `lowest`. */
   vvshDefaultQuality: string;
-  /** Width of the preview thumbnails captured when publishing, in pixels. */
-  vvshPreviewWidth: number;
-  /** JPEG quality of the preview thumbnails (0–1). */
-  vvshPreviewQuality: number;
+  /** How wide the scrubbing preview popup shows, in pixels (the images themselves are
+   *  captured and stored by the publisher — their size and quality are in the file). */
+  vvshScrubWidth: number;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;

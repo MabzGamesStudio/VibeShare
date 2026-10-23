@@ -85,8 +85,7 @@ export function defaultSettings(): Settings {
     vvshPrefetchSeconds: 60,
     vvshSkipSeconds: 10,
     vvshDefaultQuality: 'auto',
-    vvshPreviewWidth: 320,
-    vvshPreviewQuality: 0.72,
+    vvshScrubWidth: 220,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
@@ -198,8 +197,10 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   merged.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(merged.vvshPrefetchSeconds) || 0));
   merged.vvshSkipSeconds = Math.min(120, Math.max(1, Number(merged.vvshSkipSeconds) || 10));
   merged.vvshDefaultQuality = ['auto', 'highest', 'lowest'].includes(String(merged.vvshDefaultQuality)) ? String(merged.vvshDefaultQuality) : 'auto';
-  merged.vvshPreviewWidth = Math.min(1280, Math.max(80, Number(merged.vvshPreviewWidth) || 320));
-  merged.vvshPreviewQuality = Math.min(1, Math.max(0.1, Number(merged.vvshPreviewQuality) || 0.72));
+  // The old preview capture settings are gone (capturing is the publisher's choice and
+  // lives in the file now); the width they held carries over as the scrub display size.
+  const old = merged as unknown as Record<string, unknown>;
+  merged.vvshScrubWidth = Math.min(640, Math.max(80, Number(merged.vvshScrubWidth) || Number(old.vvshPreviewWidth) || 220));
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -326,6 +327,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(next.vvshPrefetchSeconds) || 0));
   next.vvshSkipSeconds = Math.min(120, Math.max(1, Number(next.vvshSkipSeconds) || 10));
+  next.vvshScrubWidth = Math.min(640, Math.max(80, Number(next.vvshScrubWidth) || 220));
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
   const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];
   next.preferences.languages = [...new Set(languages.map((code) => baseLanguage(String(code))).filter((code) => /^[a-z]{2,3}$/.test(code)))].slice(0, 30);

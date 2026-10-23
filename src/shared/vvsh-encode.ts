@@ -9,6 +9,20 @@
 // Browser-safe: no Node imports.
 import type { VvshFrameStats, VvshMeta, VvshNode, VvshRendition } from './vvsh.js';
 import { vvshPayloadHash, vvshRecordBytes, type VvshFile, type VvshHash } from './vvsh.js';
+import { countClusterFrames, patchClusterTimecode, patchDuration, readClusterTimecode, splitWebm, webmCodecString } from './webm.js';
+
+/** Joins byte pieces into one block. */
+function concatBytes(pieces: Uint8Array[]): Uint8Array {
+  let size = 0;
+  for (const piece of pieces) size += piece.length;
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const piece of pieces) {
+    out.set(piece, at);
+    at += piece.length;
+  }
+  return out;
+}
 
 export type VvshFrameType = 'I' | 'P' | 'B';
 
@@ -242,6 +256,10 @@ export interface VvshBuildOptions {
   config: VvshBuildConfig;
   /** Real preview thumbnails (frames pulled from the video); generated when absent. */
   previews?: string[];
+  /** Width the previews were captured at, in pixels — recorded in the metadata. */
+  previewWidth?: number;
+  /** JPEG quality the previews were captured at (0–1) — recorded in the metadata. */
+  previewQuality?: number;
   /** The mime of the video that was uploaded, so players know what the stream holds. */
   sourceMime?: string;
   /**
@@ -251,6 +269,12 @@ export interface VvshBuildOptions {
    * renditions from `source` (a real upload stays intact at every level).
    */
   streams?: Record<string, Uint8Array>;
+  /**
+   * Segmented streams per rendition: one complete WebM recording per chunk, all renditions
+   * cut at the same instants. The build turns each into a self-contained media segment, so
+   * a player can fetch and play one chunk without any of the others (codec `vvsh-webm/1`).
+   */
+  webm?: Record<string, Uint8Array[]>;
 }
 
 /**
@@ -278,6 +302,44 @@ export async function buildVvsh(
 
   const nodeHashes: VvshHash[] = [];
   const bytesByRendition = new Map<string, number>();
+  // Segmented input: every chunk of every encoding becomes a media segment whose timecodes
+  // sit on the stream's own timeline, and whose first file supplies the shared init part.
+  const segments = new Map<
+    string,
+    { init: Uint8Array; initHash: VvshHash; chunks: { data: Uint8Array; frames: VvshFrameStats }[]; totals: VvshFrameStats }
+  >();
+  if (options.webm) {
+    const chunkUnits = (config.chunkSeconds * 1e9) / 1e6; // timecode units per chunk (ms by default)
+    for (const rendition of config.bitrates) {
+      const files = options.webm[rendition.id];
+      if (!files || !files.length) throw new Error(`No encoded stream for ${rendition.id}`);
+      if (files.length !== chunkCount) throw new Error(`Encoding ${rendition.id} has ${files.length} chunks, expected ${chunkCount}`);
+      const first = splitWebm(files[0]);
+      const init = Uint8Array.from(first.init);
+      patchDuration(init, options.totalSeconds * 1000);
+      const initHash = vvshPayloadHash(init);
+      await emit(initHash, init, 'payload');
+      bytesByRendition.set(rendition.id, init.length);
+      const totals: VvshFrameStats = { i: 0, p: 0, b: 0 };
+      const chunks = files.map((file, index) => {
+        const { clusters } = splitWebm(file);
+        const pieces: Uint8Array[] = [];
+        const frames: VvshFrameStats = { i: 0, p: 0, b: 0 };
+        for (const cluster of clusters) {
+          const piece = Uint8Array.from(cluster); // a copy: the timecode below is patched in place
+          patchClusterTimecode(piece, Math.round(index * chunkUnits + readClusterTimecode(piece)));
+          const counted = countClusterFrames(piece);
+          frames.i += counted.key;
+          frames.p += counted.delta;
+          pieces.push(piece);
+        }
+        totals.i += frames.i;
+        totals.p += frames.p;
+        return { data: concatBytes(pieces), frames };
+      });
+      segments.set(rendition.id, { init, initHash, chunks, totals });
+    }
+  }
   for (let index = 0; index < chunkCount; index++) {
     const start = Math.floor((index * source.length) / chunkCount);
     const end = Math.floor(((index + 1) * source.length) / chunkCount);
@@ -299,11 +361,22 @@ export async function buildVvsh(
         : options.sourceMime
           ? block
           : sample(block, Math.max(1, Math.round((block.length * rendition.kbps) / top)));
-      const frames = encodeVvshFrames(frameBlocks(piece, gop), framePattern(gop));
-      const data = encodeVvshChunk(frames);
+      const segmented = segments.get(rendition.id);
+      // A segmented chunk is its media segment as it stands; the built-in container wraps
+      // the thinned blocks in their I/P/B frames.
+      let data: Uint8Array;
+      let frames: VvshFrameStats;
+      if (segmented) {
+        data = segmented.chunks[index].data;
+        frames = segmented.chunks[index].frames;
+      } else {
+        const encoded = encodeVvshFrames(frameBlocks(piece, gop), framePattern(gop));
+        data = encodeVvshChunk(encoded);
+        frames = frameStats(encoded);
+      }
       const hash = vvshPayloadHash(data);
       await emit(hash, data, 'payload');
-      renditions.push({ id: rendition.id, hash, size: data.length, frames: frameStats(frames) });
+      renditions.push({ id: rendition.id, hash, size: data.length, frames });
       bytesByRendition.set(rendition.id, (bytesByRendition.get(rendition.id) ?? 0) + data.length);
     }
     const node: VvshNode = { v: 1, kind: 'chunk', index, renditions };
@@ -339,22 +412,50 @@ export async function buildVvsh(
       });
   const meta: VvshMeta = {
     v: 1,
-    codec: 'vvsh-frames/1',
+    codec: options.webm ? 'vvsh-webm/1' : 'vvsh-frames/1',
+    ...(options.webm ? { codecs: webmCodecString([...segments.values()][0].init) } : {}),
     sourceMime: options.streams ? (options.sourceMime ?? 'video/webm') : options.sourceMime,
     chunkSeconds: config.chunkSeconds,
     chunkCount,
     totalSeconds: options.totalSeconds,
     bitrates: [...config.bitrates]
       .sort((a, b) => b.kbps - a.kbps)
-      .map((rendition) => ({ ...rendition, bytes: bytesByRendition.get(rendition.id) ?? 0 })),
-    frames: { gop, pattern: framePattern(gop).join('') },
+      .map((rendition) => {
+        const segment = segments.get(rendition.id);
+        return {
+          ...rendition,
+          bytes: bytesByRendition.get(rendition.id) ?? 0,
+          ...(segment ? { initHash: segment.initHash, initBytes: segment.init.length } : {}),
+        };
+      }),
+    frames: options.webm
+      ? {
+          // Segments hold the encoder's own keyframes and delta frames.
+          gop: Math.max(1, Math.round(((segments.values().next().value?.totals.i ?? 1) + (segments.values().next().value?.totals.p ?? 0)) / Math.max(1, segments.values().next().value?.totals.i ?? 1))),
+          pattern: 'IP',
+        }
+      : { gop, pattern: framePattern(gop).join('') },
     avgChunkBytes:
       chunkCount * config.bitrates.length > 0
         ? Math.round([...bytesByRendition.values()].reduce((total, size) => total + size, 0) / (chunkCount * config.bitrates.length))
         : 0,
-    previews: images.length ? { seconds: options.totalSeconds / images.length, images } : undefined,
+    previews: images.length
+      ? {
+          seconds: options.totalSeconds / images.length,
+          // How the previews were captured is the publisher's choice and travels with
+          // the file; viewers only pick how big the scrub popup shows them.
+          ...(options.previewWidth ? { width: options.previewWidth } : {}),
+          ...(options.previewQuality ? { quality: options.previewQuality } : {}),
+          images,
+        }
+      : undefined,
   };
   return { file: { meta, root: level[0] }, objects };
+}
+
+/** A segmented stream back into one playable WebM file: its init part and every chunk. */
+export function assembleVvshWebm(init: Uint8Array, chunks: Uint8Array[]): Uint8Array {
+  return concatBytes([init, ...chunks]);
 }
 
 /** Pieces one bitrate's chunks back into the full stream (the file a user exports). */

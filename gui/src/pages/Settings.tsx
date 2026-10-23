@@ -983,28 +983,19 @@ export function SettingsPage() {
                     <span className="hint">How far the left and right arrows jump (10 by default · 1–120).</span>
                   </label>
                   <label className="field">
-                    Preview width (pixels)
+                    Scrub preview size (pixels)
                     <input
                       type="number"
                       min={80}
-                      max={1280}
+                      max={640}
                       step={20}
-                      defaultValue={s.vvshPreviewWidth}
-                      onBlur={(e) => void updateSettings({ vvshPreviewWidth: Number(e.target.value) })}
+                      defaultValue={s.vvshScrubWidth}
+                      onBlur={(e) => void updateSettings({ vvshScrubWidth: Number(e.target.value) })}
                     />
-                    <span className="hint">Width of the scrubbing thumbnails captured when publishing (80–1280).</span>
-                  </label>
-                  <label className="field">
-                    Preview quality
-                    <input
-                      type="number"
-                      min={0.1}
-                      max={1}
-                      step={0.05}
-                      defaultValue={s.vvshPreviewQuality}
-                      onBlur={(e) => void updateSettings({ vvshPreviewQuality: Number(e.target.value) })}
-                    />
-                    <span className="hint">JPEG quality of the previews (0.1–1 · 0.72 by default).</span>
+                    <span className="hint">
+                      How wide the floating preview shows while scrubbing (80–640). The images themselves are captured and sized by whoever
+                      published the video — that is recorded in the file.
+                    </span>
                   </label>
                 </div>
               </div>

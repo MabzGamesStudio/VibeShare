@@ -11,7 +11,17 @@ import { buildVvsh, vvshPlan } from '../../../src/shared/vvsh-encode.js';
 import { base64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage } from '../api';
 import { useApp } from '../state';
-import { defaultKbps, estimateBytes, FRAME_RATES, RESOLUTIONS, rowId, transcode, type EncodeRow } from '../media/transcode';
+import {
+  defaultKbps,
+  estimateBytes,
+  FRAME_RATES,
+  packSegments,
+  RESOLUTIONS,
+  rowId,
+  transcodeSegments,
+  unpackSegments,
+  type EncodeRow,
+} from '../media/transcode';
 import { clearJob, getBlob, getStoredFile, loadJob, newJobId, putBlob, saveJob, type VvshJob } from '../media/vvshjobs';
 
 /** Opens the picked video once to read its length and capture real preview thumbnails.
@@ -103,9 +113,16 @@ export function VvshCompose() {
   // Empty fields are fine while typing — the numbers are only read when they are filled.
   const chunkSecondsValue = Number(chunkSeconds) || 0;
   const previewSplits = Number(previews) || 0;
-  // Preview thumbnails follow the size and JPEG quality set in Settings → Video streams.
-  const previewWidth = Math.min(1280, Math.max(80, Number(state?.settings?.vvshPreviewWidth ?? 320)));
-  const previewQuality = Math.min(1, Math.max(0.1, Number(state?.settings?.vvshPreviewQuality ?? 0.72)));
+  // The preview capture size and JPEG quality are the publisher's choice — they go into
+  // the .vvsh metadata so every player knows how the images were made. (Viewers only pick
+  // how wide the scrub popup shows them.)
+  const [previewWidth, setPreviewWidth] = useState('320');
+  const [previewQuality, setPreviewQuality] = useState('0.72');
+  const previewWidthValue = Math.min(1280, Math.max(80, Number(previewWidth) || 320));
+  const previewQualityValue = Math.min(1, Math.max(0.1, Number(previewQuality) || 0.72));
+  // Rough JPEG weight at this width and quality, times how many previews there are.
+  const previewEstimateMb =
+    (Math.max(0, previewSplits) * previewWidthValue * Math.round((previewWidthValue * 9) / 16) * 0.3 * previewQualityValue) / 1_048_576;
   const bitrates: VvshRendition[] = rows.map((row) => ({
     id: row.id,
     label: `${row.height}p${row.fps}`,
@@ -137,7 +154,7 @@ export function VvshCompose() {
     setSeconds(0);
     try {
       // The length comes from the video itself — no typing needed.
-      const probe = await probeVideo(picked, 0, previewWidth, previewQuality);
+      const probe = await probeVideo(picked, 0, previewWidthValue, previewQualityValue);
       if (probe.seconds > 0) setSeconds(Math.round(probe.seconds));
     } catch {
       // Not something the browser can open; the run will say so clearly.
@@ -155,7 +172,7 @@ export function VvshCompose() {
       // exactly this, so a resumed job does not need the file to be chosen again.
       const source: Blob | null = file ?? (resuming ? await getStoredFile(`${resuming.id}:source`) : null);
       if (!source) throw new Error('Pick the video file first');
-      const probed = await probeVideo(source, previewSplits, previewWidth, previewQuality);
+      const probed = await probeVideo(source, previewSplits, previewWidthValue, previewQualityValue);
       const totalSeconds = probed.seconds || seconds;
       if (!(totalSeconds > 0)) throw new Error('Could not read a length from this video');
       if (!(chunkSecondsValue > 0)) throw new Error('Time per chunk must be 1 or more');
@@ -181,18 +198,19 @@ export function VvshCompose() {
       await saveJob(fresh);
       await putBlob(`${id}:source`, source);
       // 1) Each quality is encoded once and kept — a resumed job does not redo them.
-      const streams: Record<string, Uint8Array> = {};
+      // One WebM recording per chunk, so every chunk plays on its own (sparse playback).
+      const webm: Record<string, Uint8Array[]> = {};
       for (const row of rows) {
         const key = `${id}:enc:${row.id}`;
         const done = await getBlob(key);
         if (done) {
-          streams[row.id] = done;
+          webm[row.id] = unpackSegments(done);
           continue;
         }
         await persist({ stage: `Encoding ${row.height}p ${row.fps}fps`, pct: 0 });
-        const bytes = await transcode(source, row, (fraction) => void persist({ pct: Math.round(fraction * 99) }));
-        await putBlob(key, bytes);
-        streams[row.id] = bytes;
+        const chunks = await transcodeSegments(source, row, config.chunkSeconds, (fraction) => void persist({ pct: Math.round(fraction * 99) }));
+        await putBlob(key, packSegments(chunks));
+        webm[row.id] = chunks;
         await persist({ encoded: [...(jobRef.current?.encoded ?? []), row.id] });
       }
       // 2) Build and upload object by object; every hash is recorded, so a resume skips it.
@@ -200,8 +218,16 @@ export function VvshCompose() {
       const estimate = Math.max(1, (plan?.chunkCount ?? 1) * (rows.length + 1) + 64);
       const meta = title.trim() ? { title: title.trim(), durationSeconds: totalSeconds, format: 'video' as const } : undefined;
       const { file: vvsh } = await buildVvsh(
-        new Uint8Array(await source.arrayBuffer()),
-        { totalSeconds, config, previews: probed.previews, sourceMime: 'video/webm', streams },
+        new Uint8Array(0),
+        {
+          totalSeconds,
+          config,
+          previews: probed.previews,
+          previewWidth: previewWidthValue,
+          previewQuality: previewQualityValue,
+          sourceMime: 'video/webm',
+          webm,
+        },
         async (hash, data) => {
           if (jobRef.current?.uploaded.includes(hash)) return;
           await api('/api/vvsh/object', { method: 'PUT', body: { nodeId: provider.id, hash, data: base64url(data) } });
@@ -237,7 +263,7 @@ export function VvshCompose() {
     if (!provider || !file) return;
     try {
       setPassPct(0);
-      const probed = await probeVideo(file, previewSplits, previewWidth, previewQuality);
+      const probed = await probeVideo(file, previewSplits, previewWidthValue, previewQualityValue);
       const totalSeconds = probed.seconds || seconds;
       const name = (title.trim() || file.name.replace(/\.[^.]+$/, '') || 'video') + '.vvsh';
       const session = await api<{ jobId: string }>('/api/vvsh/session', {
@@ -350,15 +376,35 @@ export function VvshCompose() {
           />
           <span className="hint">
             0 or more · 0 = no previews ·{' '}
-            {previewWidth}px at {previewQuality} quality ≈{' '}
-            {(Math.max(0, previewSplits) * previewWidth * Math.round((previewWidth * 9) / 16) * 0.3 * previewQuality) / 1_048_576 > 0.01
-              ? `${(
-                  (Math.max(0, previewSplits) * previewWidth * Math.round((previewWidth * 9) / 16) * 0.3 * previewQuality) /
-                  1_048_576
-                ).toFixed(2)} MB`
-              : '0 MB'}{' '}
-            total
+            {previewWidthValue}px at quality {previewQualityValue} ≈{' '}
+            {previewEstimateMb > 0.01 ? `${previewEstimateMb.toFixed(2)} MB` : '0 MB'} total
           </span>
+        </label>
+        <label className="field">
+          Preview width (px)
+          <input
+            type="number"
+            min={80}
+            max={1280}
+            step={20}
+            value={previewWidth}
+            placeholder="320"
+            onChange={(e) => setPreviewWidth(e.target.value)}
+          />
+          <span className="hint">80–1280 · recorded in the video's file</span>
+        </label>
+        <label className="field">
+          Preview quality
+          <input
+            type="number"
+            min={0.1}
+            max={1}
+            step={0.05}
+            value={previewQuality}
+            placeholder="0.72"
+            onChange={(e) => setPreviewQuality(e.target.value)}
+          />
+          <span className="hint">0.1–1 · recorded in the video's file</span>
         </label>
         <label className="field">
           Title

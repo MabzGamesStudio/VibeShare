@@ -26,6 +26,10 @@ export interface VvshRendition {
   fps?: number;
   /** Total bytes this encoding takes across every chunk. */
   bytes?: number;
+  /** Segmented streams: the hash of this encoding's init part (its header and tracks). */
+  initHash?: string;
+  /** How many bytes that init part takes. */
+  initBytes?: number;
 }
 
 /** How many of each frame type a chunk holds. */
@@ -43,8 +47,11 @@ export interface VvshFrameStats {
 export interface VvshMeta {
   /** Data structure version of the format. */
   v: 1;
-  /** What the frames hold: `vvsh-frames/1` (the built-in container) or a real codec id. */
+  /** What the frames hold: `vvsh-frames/1` (the built-in container), `vvsh-webm/1`
+   *  (self-contained WebM segments), or a real codec id. */
   codec: string;
+  /** Segmented streams: the codec string MediaSource needs, e.g. `vp8,opus`. */
+  codecs?: string;
   /** The mime of the video that was uploaded, so players know what the stream holds. */
   sourceMime?: string;
   /** Length of time each chunk covers, in seconds. */
@@ -61,9 +68,10 @@ export interface VvshMeta {
   avgChunkBytes?: number;
   /**
    * Optional image previews: one image per `seconds` of video, so the client can scrub
-   * and see the overall progression without fetching any chunk down to the leaf.
+   * and see the overall progression without fetching any chunk down to the leaf. The
+   * capture size and JPEG quality are the publisher's choice and travel with the file.
    */
-  previews?: { seconds: number; images: string[] };
+  previews?: { seconds: number; width?: number; quality?: number; images: string[] };
 }
 
 /** The .vvsh file itself: metadata and the root of the stream's merkle tree. */
@@ -428,6 +436,7 @@ export function serializeVvshFile(file: VvshFile): Uint8Array {
   pack.varint(file.meta.frames.gop);
   pack.str(file.meta.frames.pattern);
   pack.varint(file.meta.avgChunkBytes ?? 0);
+  if (file.meta.codec === 'vvsh-webm/1') pack.str(file.meta.codecs ?? '');
   pack.varint(file.meta.bitrates.length);
   for (const rendition of file.meta.bitrates) {
     pack.str(rendition.id);
@@ -436,10 +445,24 @@ export function serializeVvshFile(file: VvshFile): Uint8Array {
     pack.varint(rendition.kbps);
     pack.varint(rendition.fps ?? 0);
     pack.varint(rendition.bytes ?? 0);
+    if (file.meta.codec === 'vvsh-webm/1') {
+      pack.u8(rendition.initHash ? 1 : 0);
+      if (rendition.initHash) {
+        pack.raw(hashBytes(rendition.initHash));
+        pack.varint(rendition.initBytes ?? 0);
+      }
+    }
   }
   if (file.meta.previews) {
-    pack.u8(1);
+    // Tag 2 adds the capture size and JPEG quality the publisher chose; tag 1 is the
+    // earlier layout without them, and still parses.
+    const tagged = file.meta.previews.width !== undefined || file.meta.previews.quality !== undefined;
+    pack.u8(tagged ? 2 : 1);
     pack.u32(Math.round(file.meta.previews.seconds * 1000));
+    if (tagged) {
+      pack.varint(Math.round(file.meta.previews.width ?? 0));
+      pack.varint(Math.round((file.meta.previews.quality ?? 0) * 100));
+    }
     pack.varint(file.meta.previews.images.length);
     for (const image of file.meta.previews.images) pack.str(image);
   } else {
@@ -469,6 +492,8 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
       const gop = unpack.varint();
       const pattern = unpack.str();
       const avgChunkBytes = unpack.varint();
+      const segmented = codec === 'vvsh-webm/1';
+      const codecs = segmented ? unpack.str() : undefined;
       const count = unpack.varint();
       if (count < 1 || count > 16) throw new Error('Invalid vvsh file: no bitrate encodings');
       const bitrates: VvshRendition[] = [];
@@ -479,6 +504,14 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
         const kbps = unpack.varint();
         const fps = unpack.varint();
         const bytes = unpack.varint();
+        let initHash: string | undefined;
+        let initBytes = 0;
+        if (segmented) {
+          if (unpack.u8() === 1) {
+            initHash = hashFromBytes(unpack.raw(32));
+            initBytes = unpack.varint();
+          }
+        }
         bitrates.push({
           id,
           label,
@@ -486,12 +519,21 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
           ...(height ? { height } : {}),
           ...(fps ? { fps } : {}),
           ...(bytes ? { bytes } : {}),
+          ...(initHash ? { initHash, initBytes } : {}),
         });
       }
+      const previewTag = unpack.u8();
       const previews =
-        unpack.u8() === 1
+        previewTag >= 1
           ? {
               seconds: unpack.u32() / 1000,
+              ...(previewTag >= 2
+                ? (() => {
+                    const width = unpack.varint();
+                    const quality = unpack.varint() / 100;
+                    return { ...(width ? { width } : {}), ...(quality ? { quality } : {}) };
+                  })()
+                : {}),
               images: Array.from({ length: unpack.varint() }, () => unpack.str()),
             }
           : undefined;
@@ -501,6 +543,7 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
         meta: {
           v: 1,
           codec,
+          ...(codecs ? { codecs } : {}),
           sourceMime: sourceMime || undefined,
           chunkSeconds,
           chunkCount,
