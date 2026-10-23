@@ -86,6 +86,8 @@ export function defaultSettings(): Settings {
     vvshSkipSeconds: 10,
     vvshDefaultQuality: 'auto',
     vvshScrubWidth: 220,
+    historyMode: 'pages',
+    debugLogs: false,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [] },
@@ -201,6 +203,8 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   // lives in the file now); the width they held carries over as the scrub display size.
   const old = merged as unknown as Record<string, unknown>;
   merged.vvshScrubWidth = Math.min(640, Math.max(80, Number(merged.vvshScrubWidth) || Number(old.vvshPreviewWidth) || 220));
+  merged.historyMode = merged.historyMode === 'lazy' ? 'lazy' : 'pages';
+  merged.debugLogs = merged.debugLogs === true;
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -328,6 +332,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(next.vvshPrefetchSeconds) || 0));
   next.vvshSkipSeconds = Math.min(120, Math.max(1, Number(next.vvshSkipSeconds) || 10));
   next.vvshScrubWidth = Math.min(640, Math.max(80, Number(next.vvshScrubWidth) || 220));
+  next.historyMode = next.historyMode === 'lazy' ? 'lazy' : 'pages';
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
   const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];
   next.preferences.languages = [...new Set(languages.map((code) => baseLanguage(String(code))).filter((code) => /^[a-z]{2,3}$/.test(code)))].slice(0, 30);

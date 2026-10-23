@@ -1,0 +1,93 @@
+start
+TSCDONE
+
+> typecheck
+> tsc --noEmit
+
+GUITSC
+▶ segmented .vvsh streams (WebM media segments)
+  ✔ splits a WebM file into its init part and its clusters (3.761124ms)
+  ✔ moves clusters onto the stream timeline and counts their frames (1.99306ms)
+  ✔ builds a stream whose chunks play alone, and round-trips its file (12.87482ms)
+  ✔ refuses a chunk count that does not match the stream (1.158268ms)
+✔ segmented .vvsh streams (WebM media segments) (21.995201ms)
+▶ the .vvsh verifiable video stream format
+  ✔ takes the metadata the format names: version, bitrates, chunk length, counts and length (2.378556ms)
+  ✔ uses I, P and B frames in every chunk, and the last tree layers split into the encodings (1.675448ms)
+  ✔ finds one node with a single path down the tree, and refuses a tampered step (1.883931ms)
+  ✔ seeks by timestamp to one chunk and shows the preview of that section (0.348158ms)
+  ✔ reassembles one bitrate back into the exact video, and round-trips the file (18.866464ms)
+  ✔ packs the file and the records as bytes, with the JSON only as a translation (0.772935ms)
+  ✔ packs large frames without allocating past anything (123.613139ms)
+  ✔ really stores fewer bytes in the smaller encoding than the bigger one (34.519198ms)
+  ✔ keeps a real upload intact in every encoding, so any of them plays (14.437549ms)
+✔ the .vvsh verifiable video stream format (200.483413ms)
+▶ a provider storing a .vvsh stream
+  ✔ keeps the file (metadata and root) and stores every branch and child on its own (54.588875ms)
+  ✔ charges per chunk for every object a user pulls while walking down from a branch (16.190295ms)
+  ✔ quotes a conversion from the metadata, the length and the encodings, and runs it (22.680075ms)
+✔ a provider storing a .vvsh stream (98.550921ms)
+▶ the video prefetch setting
+  ✔ keeps fetching a minute ahead by default, configurable within bounds (0.65903ms)
+✔ the video prefetch setting (0.778625ms)
+▶ a client streaming and exporting a .vvsh
+  ✔ skips to a timestamp and retrieves only that chunk, verified (39.219036ms)
+  ✔ downloads the whole stream at one bitrate as a full video file (29.884625ms)
+✔ a client streaming and exporting a .vvsh (74.780422ms)
+ℹ tests 19
+ℹ suites 5
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1660.945333
+TESTDONE
+
+> vibeshare@0.1.0 build:gui
+> npm --prefix gui run build
+
+
+> build
+> tsc --noEmit && vite build
+
+vite v7.3.7 building client environment for production...
+transforming...
+✓ 1800 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                    0.54 kB │ gzip:  0.32 kB
+dist/admin.html                    0.55 kB │ gzip:  0.33 kB
+dist/assets/styles-GSC1bdBZ.css   34.37 kB │ gzip:  7.53 kB
+dist/assets/admin-HNx2QCbs.js    114.06 kB │ gzip: 28.42 kB
+dist/assets/styles-CpxdHjqU.js   297.73 kB │ gzip: 97.65 kB
+dist/assets/main-D7jK2U6c.js     317.03 kB │ gzip: 96.62 kB
+✓ built in 8.76s
+GUIDONE
+
+> vibeshare@0.1.0 build:web
+> npm --prefix gui run build:web
+
+
+> build:web
+> tsc --noEmit && vite build -c vite.web.config.ts && vite build -c vite.sw.config.ts
+
+vite v7.3.7 building client environment for production...
+transforming...
+✓ 1817 modules transformed.
+rendering chunks...
+computing gzip size...
+../distribution/web/index.html                  0.46 kB │ gzip:   0.29 kB
+../distribution/web/assets/main-GSC1bdBZ.css   34.37 kB │ gzip:   7.53 kB
+../distribution/web/assets/start-DVPbMJCv.js    1.08 kB │ gzip:   0.57 kB
+../distribution/web/assets/local-TqqSeJRr.js   99.14 kB │ gzip:  30.12 kB
+../distribution/web/assets/main-Cytk9l9q.js   632.66 kB │ gzip: 200.70 kB
+✓ built in 6.37s
+vite v7.3.7 building client environment for production...
+transforming...
+✓ 55 modules transformed.
+rendering chunks...
+computing gzip size...
+../distribution/web/sw.js  183.76 kB │ gzip: 61.29 kB
+✓ built in 1.85s
+ALLDONE

@@ -1,0 +1,2 @@
+/Users/mabz/Desktop/Projects/InProgress/VibeShare/src//shared/content.ts:128:export function validateManifest(value: unknown): Manifest {
+D

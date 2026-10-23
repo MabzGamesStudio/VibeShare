@@ -1,0 +1,5 @@
+45:import { walkToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
+1498:    const steps = pathToChunk(ref.chunkCount, index);
+1505:      const record = bytes ? parseVvshNode(bytes, hash) : null;
+1511:    const chunkNode = bytes ? parseVvshNode(bytes, hash) : null;
+D

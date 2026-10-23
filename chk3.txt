@@ -1,0 +1,15 @@
+distribution/web/assets:
+local-CLTAYZD-.js
+main-BMZMhzNV.js
+main-GSC1bdBZ.css
+start-B_X2Y4iw.js
+
+gui/dist/assets:
+admin-Cp45hNaZ.js
+main-BnqXVSdn.js
+styles-DZyWc9j_.js
+styles-GSC1bdBZ.css
+---
+---
+> tsc --noEmit && vite build -c vite.web.config.ts && vite build -c vite.sw.config.ts
+

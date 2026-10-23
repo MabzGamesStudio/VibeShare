@@ -279,6 +279,10 @@ export interface Settings {
   /** How wide the scrubbing preview popup shows, in pixels (the images themselves are
    *  captured and stored by the publisher — their size and quality are in the file). */
   vvshScrubWidth: number;
+  /** How history lists read: `pages` (Previous/Next) or `lazy` (more as you scroll). */
+  historyMode: 'pages' | 'lazy';
+  /** Keep debug logs of what the app asks of the nodes (Settings → Logs). Off by default. */
+  debugLogs: boolean;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;

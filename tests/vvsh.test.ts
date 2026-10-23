@@ -308,11 +308,21 @@ describe('a client streaming and exporting a .vvsh', async () => {
 
   it('skips to a timestamp and retrieves only that chunk, verified', async () => {
     const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
-    const chunk = await api<{ data: string; frames: { i: number; p: number; b: number } }>('/api/vvsh/chunk', {
-      body: { nodeId, file, index: 2, rendition: '1080p' },
+    // The request is just where to look: the root, the index and the encoding.
+    const chunk = await api<{ data: string; frames: { i: number; p: number; b: number }; path: string[] }>('/api/vvsh/chunk', {
+      body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index: 2, rendition: '1080p' },
     });
     assert.ok(chunk.frames.i >= 1, 'the chunk node carried its frame statistics');
+    assert.ok(chunk.path.length >= 2, 'the answer carries the merkle path it walked');
+    assert.equal(chunk.path[0], file.root, 'the path starts at the root');
     assert.ok(chunk.data.length > 0);
+
+    // Starting from a branch the caller already checked walks only the rest of the path.
+    const again = await api<{ data: string; path: string[] }>('/api/vvsh/chunk', {
+      body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index: 2, rendition: '1080p', from: { hash: chunk.path[1], depth: 1 } },
+    });
+    assert.equal(again.data, chunk.data, 'the same verified chunk comes back from a starting branch');
+    assert.equal(again.path.length, chunk.path.length - 1, 'only the rest of the path is walked');
   });
 
   it('downloads the whole stream at one bitrate as a full video file', async () => {

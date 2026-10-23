@@ -365,9 +365,21 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   });
 
   on('POST', '/api/vvsh/chunk', async (request) => {
-    const body = await request.json<{ nodeId?: string; file?: VvshFile; index?: number; rendition?: string }>();
-    const chunk = await core.vvshChunk(nodes.require(String(body.nodeId ?? '')), body.file as VvshFile, Number(body.index ?? 0), String(body.rendition ?? ''));
-    return { data: base64url(chunk.data), frames: chunk.frames };
+    const body = await request.json<{
+      nodeId?: string;
+      root?: string;
+      chunkCount?: number;
+      index?: number;
+      rendition?: string;
+      from?: { hash: string; depth: number };
+    }>();
+    const chunk = await core.vvshChunk(
+      nodes.require(String(body.nodeId ?? '')),
+      { root: String(body.root ?? ''), chunkCount: Number(body.chunkCount ?? 0), from: body.from },
+      Number(body.index ?? 0),
+      String(body.rendition ?? '')
+    );
+    return { data: base64url(chunk.data), frames: chunk.frames, path: chunk.path };
   });
 
   on('POST', '/api/vvsh/export', async (request) => {

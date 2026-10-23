@@ -791,7 +791,7 @@ export function AdminApp() {
           <div>
             <h1>{status.info.name}</h1>
             <p>
-              {provider ? 'Content provider' : 'Search algorithm'} node · {status.info.software}
+              {provider ? 'Content provider' : 'Search algorithm'} node · {status.info.software} · page built {__VS_BUILD__}
             </p>
           </div>
         </div>

@@ -1,0 +1,9 @@
+start
+TSCDONE
+▶ client profiles
+  ✔ keeps each profile apart and protects it with a password (3230.840215ms)
+  ✔ renames, protects and deletes profiles (80.628469ms)
+✔ client profiles (3319.357567ms)
+▶ hidden profiles
+  ✔ does not appear anywhere and keeps its data encrypted (3942.013367ms)
+D

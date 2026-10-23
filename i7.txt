@@ -1,0 +1,2 @@
+957:                <select value={s.theme} onChange={(e) => void updateSettings({ theme: e.target.value as Settings['theme'] })}>
+D

@@ -1,0 +1,16 @@
+// TEMPORARY — a page to open and parse a .vvsh file for testing: its metadata, the merkle
+// tree (fetched and verified node by node from the root) and every chunk with its bitrate
+// leaves and I/P/B frame counts. Not part of the product; it comes out again once the
+// format settles.
+import { useCallback, useRef, useState } from 'react';
+import { useApp } from '../state';
+import { api, errorMessage } from '../api';
+import { fromBase64url } from '../../../src/shared/encoding.js';
+import { parseVvshFile, parseVvshNode, vvshFileJson, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
+
+type Walked = { hash: string; node: VvshNode | null; children: Walked[] };
+
+async function walk(nodeId: string, hash: string, depth: number, seen: Set<string>): Promise<Walked> {
+  if (seen.has(hash) || depth > 24) return { hash, node: null, children: [] };
+  seen.add(hash);
+D

@@ -42,7 +42,7 @@ import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js
 import { signData } from '../shared/crypto.js';
 import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
 import { DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
-import { walkToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
+import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -1477,15 +1477,17 @@ export class ClientCore {
   }
 
   /**
-   * One verified chunk of one bitrate at one time: walks the tree down from the root in
-   * the file (single path, every step checked), then fetches just that chunk's payload.
+   * One verified chunk of one bitrate at one time. The request is just where to look —
+   * the tree root (or a branch the caller already verified), the chunk index and the
+   * encoding — and the walk down (single path, every step checked against its parent)
+   * fetches only the records it needs, answering with the path it took and the leaf.
    */
   async vvshChunk(
     node: NodeEntry,
-    file: VvshFile,
+    ref: { root: string; chunkCount: number; from?: { hash: string; depth: number } },
     index: number,
     rendition: string
-  ): Promise<{ data: Uint8Array; frames: VvshFrameStats }> {
+  ): Promise<{ data: Uint8Array; frames: VvshFrameStats; path: string[] }> {
     const fetchRecord = async (hash: string): Promise<Uint8Array | null> => {
       try {
         return await this.vvshObject(node, hash);
@@ -1493,19 +1495,38 @@ export class ClientCore {
         return null;
       }
     };
-    const chunkNode = await walkToChunk(file.root, file.meta.chunkCount, index, fetchRecord);
-    if (!chunkNode) throw new Error('The node did not give a verifiable path to that chunk');
+    const steps = pathToChunk(ref.chunkCount, index);
+    // A starting branch the caller already checked: only the rest of the path is walked.
+    const fromDepth = ref.from && ref.from.depth >= 0 && ref.from.depth < steps.length ? ref.from.depth : 0;
+    const path: string[] = [];
+    let hash = ref.from && fromDepth ? ref.from.hash : ref.root;
+    for (const side of steps.slice(fromDepth)) {
+      const bytes = await fetchRecord(hash);
+      const record = bytes ? parseVvshNode(bytes, hash) : null;
+      if (!record || record.kind !== 'branch') throw new Error('The node did not give a verifiable path to that chunk');
+      path.push(hash);
+      hash = record[side];
+    }
+    const bytes = await fetchRecord(hash);
+    const chunkNode = bytes ? parseVvshNode(bytes, hash) : null;
+    if (!chunkNode || chunkNode.kind !== 'chunk') throw new Error('The node did not give a verifiable path to that chunk');
+    path.push(hash);
     const leaf = chunkNode.renditions.find((entry) => entry.id === rendition);
     if (!leaf) throw new Error('This stream has no such bitrate encoding');
     const data = await this.vvshObject(node, leaf.hash);
-    return { data, frames: leaf.frames };
+    path.push(leaf.hash);
+    return { data, frames: leaf.frames, path };
   }
 
   /** Every chunk of one bitrate, reassembled into the full video file to save. */
-  async exportVvsh(node: NodeEntry, file: VvshFile, rendition: string): Promise<Uint8Array> {
+  async exportVvsh(
+    node: NodeEntry,
+    file: VvshFile,
+    rendition: string
+  ): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     for (let index = 0; index < file.meta.chunkCount; index++) {
-      chunks.push((await this.vvshChunk(node, file, index, rendition)).data);
+      chunks.push((await this.vvshChunk(node, { root: file.root, chunkCount: file.meta.chunkCount }, index, rendition)).data);
     }
     return exportVvshStream(chunks);
   }

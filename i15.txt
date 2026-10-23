@@ -1,0 +1,16 @@
+2:// tree (fetched and verified node by node from the root) and every chunk with its bitrate
+34:  const label = walked.node?.kind === 'branch' ? 'branch' : walked.node ? `chunk ${walked.node.index}` : 'unverified';
+57:  const [chunks, setChunks] = useState<{ index: number; renditions: { id: string; size: number; frames: { i: number; p: number; b: number } }[] }[]>([]);
+88:        const found: typeof chunks = [];
+90:          if (node.node?.kind === 'chunk' && node.node.renditions.length > 1) found.push({ index: node.node.index, renditions: node.node.renditions });
+104:    [state, chunks]
+197:                  <td>Time per chunk</td>
+198:                  <td>{file.meta.chunkSeconds}s</td>
+202:                  <td>{file.meta.chunkCount}</td>
+217:                  <td>Frames per chunk</td>
+263:          {chunks.length > 0 && (
+274:                  {chunks.map((chunk) => (
+275:                    <tr key={chunk.index}>
+276:                      <td>{chunk.index}</td>
+278:                        {chunk.renditions.map((rendition) => (
+D

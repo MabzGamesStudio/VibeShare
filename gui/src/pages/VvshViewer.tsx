@@ -7,6 +7,7 @@ import { useApp } from '../state';
 import { api, errorMessage } from '../api';
 import { fromBase64url } from '../../../src/shared/encoding.js';
 import { parseVvshFile, parseVvshNode, vvshFileJson, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
+import { decodeVvshChunk, decodeVvshFrames } from '../../../src/shared/vvsh-encode.js';
 
 type Walked = { hash: string; node: VvshNode | null; children: Walked[] };
 
@@ -55,8 +56,43 @@ export function VvshViewerPage() {
   const [file, setFile] = useState<VvshFile | null>(null);
   const [tree, setTree] = useState<Walked | null>(null);
   const [chunks, setChunks] = useState<{ index: number; renditions: { id: string; size: number; frames: { i: number; p: number; b: number } }[] }[]>([]);
+  const [playing, setPlaying] = useState<{ url: string; label: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const provider = state?.nodes.find((node) => node.type === 'provider');
+
+  /** Plays one chunk and nothing else: its own verified bytes, with the stream's init
+   *  part prepended where the container needs one. */
+  const playChunk = async (index: number, renditionId: string) => {
+    try {
+      setError(null);
+      if (!provider || !file) return;
+      const answer = await api<{ data: string }>('/api/vvsh/chunk', {
+        body: { nodeId: provider.id, root: file.root, chunkCount: file.meta.chunkCount, index, rendition: renditionId },
+      });
+      const payload = fromBase64url(answer.data);
+      const parts: Uint8Array[] = [];
+      let type = file.meta.sourceMime ?? 'video/mp4';
+      if (file.meta.codec === 'vvsh-webm/1') {
+        type = 'video/webm';
+        const rendition = file.meta.bitrates.find((entry) => entry.id === renditionId);
+        if (rendition?.initHash) {
+          const init = await api<{ data: string }>('/api/vvsh/object', { method: 'POST', body: { nodeId: provider.id, hash: rendition.initHash } });
+          parts.push(fromBase64url(init.data));
+        }
+        parts.push(payload);
+      } else {
+        // The built-in container: its I/P/B frames decode to that chunk's piece of the file.
+        parts.push(...decodeVvshFrames(decodeVvshChunk(payload)));
+      }
+      const url = URL.createObjectURL(new Blob(parts.map((part) => Uint8Array.from(part)), { type }));
+      setPlaying((old) => {
+        if (old) URL.revokeObjectURL(old.url);
+        return { url, label: `chunk ${index} · ${renditionId}` };
+      });
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
 
   const parse = useCallback(
     async (source: Uint8Array | string) => {
@@ -276,8 +312,13 @@ export function VvshViewerPage() {
                       <td>{chunk.index}</td>
                       <td className="small">
                         {chunk.renditions.map((rendition) => (
-                          <div key={rendition.id} className="mono tiny">
-                            {rendition.id}: {rendition.size} bytes · {rendition.frames.i} I / {rendition.frames.p} P / {rendition.frames.b} B
+                          <div key={rendition.id} className="row between" style={{ gap: 8 }}>
+                            <span className="mono tiny">
+                              {rendition.id}: {rendition.size} bytes · {rendition.frames.i} I / {rendition.frames.p} P / {rendition.frames.b} B
+                            </span>
+                            <button className="small ghost" onClick={() => void playChunk(chunk.index, rendition.id)}>
+                              ▶ only this chunk
+                            </button>
                           </div>
                         ))}
                       </td>
@@ -285,6 +326,29 @@ export function VvshViewerPage() {
                   ))}
                 </tbody>
               </table>
+              {playing && (
+                <div className="form-stack" style={{ marginTop: 12 }}>
+                  <div className="row between">
+                    <strong>Playing only {playing.label}</strong>
+                    <button
+                      className="small"
+                      onClick={() =>
+                        setPlaying((old) => {
+                          if (old) URL.revokeObjectURL(old.url);
+                          return null;
+                        })
+                      }
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <video key={playing.url} src={playing.url} controls autoPlay playsInline style={{ width: '100%', borderRadius: 8 }} />
+                  <p className="hint">
+                    Nothing before or after it: this is that chunk's own verified bytes (with the stream's init part prepended where the container
+                    needs one). Chunks of `vvsh-frames/1` streams are a piece of the original file and may not play standing alone.
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </>

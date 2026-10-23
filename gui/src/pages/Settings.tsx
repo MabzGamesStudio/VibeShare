@@ -21,6 +21,8 @@ import { PageEditor } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { useApp } from '../state';
+import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
+import { HistorySection } from './History';
 import { splitList } from '../util';
 import { AUTH_LABELS } from './Nodes';
 
@@ -773,8 +775,11 @@ function ProfilesCard() {
 const SETTINGS_TABS: [string, string][] = [
   ['feed', 'Feed'],
   ['seen', 'Seen content'],
+  ['media', 'Media controls'],
   ['privacy', 'Privacy'],
   ['profiles', 'Profiles'],
+  ['history', 'History'],
+  ['logs', 'Logs'],
 ];
 
 /** Which tab a deep link (settings#profiles…) lands on. */
@@ -782,21 +787,71 @@ function tabForHash(hash: string): string {
   const groups: Record<string, string> = {
     pages: 'feed',
     feed: 'feed',
-    playback: 'feed',
-    storage: 'feed',
-    history: 'seen',
+    storage: 'media',
+    media: 'media',
+    playback: 'media',
+    video: 'media',
+    history: 'history',
     seen: 'seen',
     'seen-mode': 'seen',
     'seen-selected': 'seen',
     'seen-preview': 'seen',
     'seen-node': 'seen',
     tor: 'privacy',
-    sharing: 'privacy',
+    sharing: 'profiles',
     privacy: 'privacy',
     profiles: 'profiles',
     identity: 'profiles',
+    logs: 'logs',
+    log: 'logs',
+    debug: 'logs',
   };
   return groups[hash.slice(1)] ?? 'feed';
+}
+
+/** Debug logs: a live view of what the app asks of the nodes (Settings → Logs). */
+function LogsCard() {
+  const { state, updateSettings } = useApp();
+  const [, setTick] = useState(0);
+  useEffect(() => subscribeLogs(() => setTick((n) => n + 1)), []);
+  const on = Boolean(state?.settings.debugLogs);
+  useEffect(() => {
+    setDebugLogs(on);
+  }, [on]);
+  const lines = logLines();
+  return (
+    <div className="card form-stack">
+      <h2>Debug logs</h2>
+      <Switch
+        checked={on}
+        onChange={(debugLogs) => void updateSettings({ debugLogs })}
+        label="Keep debug logs (off by default)"
+      />
+      <p className="hint">
+        When on, the app records what it asks of the nodes while a .vvsh video plays: every chunk fetch (which index, which encoding, from which
+        branch), what came back, the merkle path it verified, and what the player decided to load. That is how to check that a 10-second-chunk
+        video with a 60-second window loads chunks 0–6 first, and only 100–106 after skipping to chunk 100.
+      </p>
+      {lines.length > 0 && (
+        <div className="row">
+          <button className="small" onClick={clearLogs}>
+            <Trash2 size={14} /> Clear
+          </button>
+        </div>
+      )}
+      <div className="mono tiny" style={{ maxHeight: 460, overflowY: 'auto' }}>
+        {lines.length === 0 ? (
+          <p className="hint">{on ? 'Nothing logged yet — play a .vvsh video.' : 'Turn logging on, then play a .vvsh video.'}</p>
+        ) : (
+          lines.map((line, index) => (
+            <div key={index} style={{ padding: '3px 0', borderBottom: '1px solid var(--border, #eee)' }}>
+              <span className="faint">{line.at}</span> <strong>[{line.kind}]</strong> {line.text}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function SettingsPage() {
@@ -943,69 +998,19 @@ export function SettingsPage() {
                 Cache size (MiB)
                 <input type="number" min={16} defaultValue={s.cacheMiB} onBlur={(e) => void updateSettings({ cacheMiB: Number(e.target.value) })} />
               </label>
-              <div className="field" style={{ gridColumn: '1 / -1' }}>
-                <strong>Video streams</strong>
-                <div className="form-grid">
-                  <label className="field">
-                    Default quality
-                    <select
-                      value={s.vvshDefaultQuality}
-                      onChange={(e) => void updateSettings({ vvshDefaultQuality: e.target.value })}
-                    >
-                      <option value="auto">Auto (fits your network)</option>
-                      <option value="highest">Highest available</option>
-                      <option value="lowest">Lowest available</option>
-                    </select>
-                    <span className="hint">What the player starts on for a .vvsh video.</span>
-                  </label>
-                  <label className="field">
-                    Prefetch ahead (seconds)
-                    <input
-                      type="number"
-                      min={0}
-                      max={3600}
-                      defaultValue={s.vvshPrefetchSeconds}
-                      onBlur={(e) => void updateSettings({ vvshPrefetchSeconds: Number(e.target.value) })}
-                    />
-                    <span className="hint">
-                      While a video plays, its chunks keep downloading this far ahead (a minute by default). 0 fetches only what is playing.
-                    </span>
-                  </label>
-                  <label className="field">
-                    Arrow-key skip (seconds)
-                    <input
-                      type="number"
-                      min={1}
-                      max={120}
-                      defaultValue={s.vvshSkipSeconds}
-                      onBlur={(e) => void updateSettings({ vvshSkipSeconds: Number(e.target.value) })}
-                    />
-                    <span className="hint">How far the left and right arrows jump (10 by default · 1–120).</span>
-                  </label>
-                  <label className="field">
-                    Scrub preview size (pixels)
-                    <input
-                      type="number"
-                      min={80}
-                      max={640}
-                      step={20}
-                      defaultValue={s.vvshScrubWidth}
-                      onBlur={(e) => void updateSettings({ vvshScrubWidth: Number(e.target.value) })}
-                    />
-                    <span className="hint">
-                      How wide the floating preview shows while scrubbing (80–640). The images themselves are captured and sized by whoever
-                      published the video — that is recorded in the file.
-                    </span>
-                  </label>
-                </div>
-              </div>
               <label className="field">
                 IPFS gateway
                 <input type="url" defaultValue={s.ipfsGateway} onBlur={(e) => void updateSettings({ ipfsGateway: e.target.value })} />
               </label>
               <label className="field">
                 Theme
-                <select value={s.theme} onChange={(e) => void updateSettings({ theme: e.target.value as Settings['theme'] })}>
+                <select
+                  value={s.theme}
+                  onChange={(e) => {
+                    const picked = e.target.value;
+                    if (picked === 'system' || picked === 'dark' || picked === 'light') void updateSettings({ theme: picked });
+                  }}
+                >
                   <option value="system">System</option>
                   <option value="dark">Dark</option>
                   <option value="light">Light</option>
@@ -1016,18 +1021,84 @@ export function SettingsPage() {
         </>
       )}
 
+      {tab === 'media' && (
+        <div className="card form-stack">
+          <h2>Video streams</h2>
+          <p className="small muted">How the player handles .vvsh video streams.</p>
+          <div className="form-grid">
+            <label className="field">
+              Default quality
+              <select value={s.vvshDefaultQuality} onChange={(e) => void updateSettings({ vvshDefaultQuality: e.target.value })}>
+                <option value="auto">Auto (fits your network)</option>
+                <option value="highest">Highest available</option>
+                <option value="lowest">Lowest available</option>
+              </select>
+              <span className="hint">What the player starts on for a .vvsh video.</span>
+            </label>
+            <label className="field">
+              Prefetch ahead (seconds)
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                defaultValue={s.vvshPrefetchSeconds}
+                onBlur={(e) => void updateSettings({ vvshPrefetchSeconds: Number(e.target.value) })}
+              />
+              <span className="hint">
+                While a video plays, its chunks keep downloading this far ahead (a minute by default). 0 fetches only what is playing.
+              </span>
+            </label>
+            <label className="field">
+              Arrow-key skip (seconds)
+              <input
+                type="number"
+                min={1}
+                max={120}
+                defaultValue={s.vvshSkipSeconds}
+                onBlur={(e) => void updateSettings({ vvshSkipSeconds: Number(e.target.value) })}
+              />
+              <span className="hint">How far the left and right arrows jump (10 by default · 1–120).</span>
+            </label>
+            <label className="field">
+              Scrub preview size (pixels)
+              <input
+                type="number"
+                min={80}
+                max={640}
+                step={20}
+                defaultValue={s.vvshScrubWidth}
+                onBlur={(e) => void updateSettings({ vvshScrubWidth: Number(e.target.value) })}
+              />
+              <span className="hint">
+                How wide the floating preview shows while scrubbing (80–640). The images themselves are captured and sized by whoever published
+                the video — that is recorded in the file.
+              </span>
+            </label>
+          </div>
+        </div>
+      )}
+
+      {tab === 'history' && (
+        <div className="card form-stack">
+          <h2>History</h2>
+          <HistorySection />
+        </div>
+      )}
+
+      {tab === 'logs' && <LogsCard />}
+
       {tab === 'seen' && <SeenFiltersSection />}
 
       {tab === 'privacy' && (
         <>
           <TorCard />
-          <SharingCard />
         </>
       )}
 
       {tab === 'profiles' && (
         <>
           <ProfilesCard />
+          <SharingCard />
 
       <div className="card form-stack">
         <h2>Creator profile</h2>
@@ -1056,6 +1127,9 @@ export function SettingsPage() {
           <IdentityCard />
         </>
       )}
+      <p className="tiny faint" style={{ marginTop: 16 }}>
+        Page built {__VS_BUILD__}
+      </p>
     </div>
   );
 }

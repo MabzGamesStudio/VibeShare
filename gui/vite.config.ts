@@ -12,7 +12,7 @@ export default defineConfig({
   // The GUI always runs in a browser: shared modules get the browser crypto here too.
   plugins: [react(), webModules()],
   base: '/',
-  define: { __VIBESHARE_WEB__: 'false' },
+  define: { __VIBESHARE_WEB__: 'false', __VS_BUILD__: JSON.stringify(new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC') },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

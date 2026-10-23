@@ -1,0 +1,13 @@
+            <input
+              type="text"
+              defaultValue={s.profile.name}
+              onBlur={(e) => void updateSettings({ profile: { ...s.profile, name: e.target.value } })}
+            />
+          </label>
+          <label className="field">
+            You are a
+            <select value={s.profile.kind} onChange={(e) => void updateSettings({ profile: { ...s.profile, kind: e.target.value as CreatorKind } })}>
+              {CREATOR_KINDS.filter((k) => k !== 'unknown').map((k) => (
+                <option key={k} value={k}>
+    1077 gui/src/pages/Settings.tsx
+D

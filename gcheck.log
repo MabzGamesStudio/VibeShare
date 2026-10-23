@@ -1,0 +1,6 @@
+start
+
+> typecheck
+> tsc --noEmit
+
+DONE

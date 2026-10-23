@@ -1,0 +1,19 @@
+distribution/web/assets/:
+total 1512
+drwxr-xr-x  6 mabz  staff     192 Oct 22 21:22 .
+drwxr-xr-x  8 mabz  staff     256 Oct 22 21:22 ..
+-rw-r--r--  1 mabz  staff   98650 Oct 22 21:22 local-CLTAYZD-.js
+-rw-r--r--  1 mabz  staff  626709 Oct 22 21:22 main-BMZMhzNV.js
+-rw-r--r--  1 mabz  staff   34366 Oct 22 21:22 main-GSC1bdBZ.css
+-rw-r--r--  1 mabz  staff    1078 Oct 22 21:22 start-B_X2Y4iw.js
+
+gui/dist/assets/:
+total 1488
+drwxr-xr-x  6 mabz  staff     192 Oct 22 21:22 .
+drwxr-xr-x  6 mabz  staff     192 Oct 22 21:22 ..
+-rw-r--r--  1 mabz  staff  114015 Oct 22 21:22 admin-9kqCmbxH.js
+-rw-r--r--  1 mabz  staff  311039 Oct 22 21:22 main-1A0Qx2el.js
+-rw-r--r--  1 mabz  staff  297515 Oct 22 21:22 styles-DZyWc9j_.js
+-rw-r--r--  1 mabz  staff   34366 Oct 22 21:22 styles-GSC1bdBZ.css
+---
+OK

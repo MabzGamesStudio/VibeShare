@@ -6,10 +6,11 @@
 // player while the bytes still arrive chunk by chunk.
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Download, FileDown, Gauge, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
-import { chunkAt, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
+import { chunkAt, pathToChunk, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
 import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream } from '../../../src/shared/vvsh-encode.js';
 import { fromBase64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage } from '../api';
+import { debugLog, setDebugLogs } from '../log';
 import { useApp } from '../state';
 
 const VIDEO_EXT = /\.(mp4|m4v|webm|mov|mkv|ogv|avi|wav|mp3|m4a|ogg)$/i;
@@ -32,11 +33,35 @@ export function downloadName(name: string, mime?: string): string {
   return VIDEO_EXT.test(base) ? base : `${base}${EXT_BY_MIME[mime ?? ''] ?? '.mp4'}`;
 }
 
-/** The decoded stream bytes of one chunk: its I/P/B frames, in order. A segmented stream's
- *  chunk is already a media segment and comes back as it stands. */
+/** One verified chunk: the request only names where to look — the tree root (or a branch
+ *  already verified), the chunk index and the encoding — and the answer is the merkle
+ *  path walked plus the leaf bytes. No metadata travels with it. */
+const walked = new Map<string, { index: number; path: string[] }>();
+
 async function fetchChunk(nodeId: string, file: VvshFile, index: number, rendition: string): Promise<Uint8Array> {
-  const answer = await api<{ data: string }>('/api/vvsh/chunk', { body: { nodeId, file, index, rendition } });
+  const started = performance.now();
+  // A branch already verified for a nearby chunk shortens the walk: the answer's path
+  // says which branch sits above which chunks.
+  const previous = walked.get(file.root);
+  let from: { hash: string; depth: number } | undefined;
+  if (previous) {
+    const before = pathToChunk(file.meta.chunkCount, previous.index);
+    const want = pathToChunk(file.meta.chunkCount, index);
+    let common = 0;
+    while (common < before.length && common < want.length && before[common] === want[common]) common++;
+    if (common > 0 && previous.path[common - 1]) from = { hash: previous.path[common - 1], depth: common - 1 };
+  }
+  const answer = await api<{ data: string; path: string[] }>('/api/vvsh/chunk', {
+    body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index, rendition, ...(from ? { from } : {}) },
+  });
+  walked.set(file.root, { index, path: answer.path });
   const raw = fromBase64url(answer.data);
+  debugLog(
+    'chunk',
+    `chunk ${index} (${rendition})${from ? ` from branch ${from.hash.slice(0, 10)}… depth ${from.depth}` : ' from root'} → ${raw.length} bytes · ${
+      answer.path.length
+    } steps · ${Math.round(performance.now() - started)}ms`
+  );
   if (file.meta.codec === 'vvsh-webm/1') return raw;
   const blocks = decodeVvshFrames(decodeVvshChunk(raw));
   const out = new Uint8Array(blocks.reduce((total, block) => total + block.length, 0));
@@ -128,7 +153,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** One chunk a moment needs: fetched (verified against the tree) and appended alone. */
   const mseWant = async (index: number, id: string) => {
     const st = mse.current;
-    if (!st || st.appended.has(index)) return;
+    if (!alive.current || !st || st.appended.has(index)) return;
     st.appended.add(index); // before the fetch: nobody fetches the same chunk twice
     const block = await fetchChunk(nodeId, file, index, id);
     if (mse.current !== st) return;
@@ -142,7 +167,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     const to = Math.min(meta.chunkCount - 1, chunkAt(meta, at + ahead));
     const missing: number[] = [];
     for (let index = from; index <= to; index++) if (!mse.current?.appended.has(index)) missing.push(index);
+    debugLog('fetch', `window chunks ${from}–${to} for ${id} (${missing.length} missing)`);
     for (let start = 0; start < missing.length; start += 6) {
+      if (!alive.current) return; // the page was left: stop fetching
       await Promise.all(missing.slice(start, start + 6).map((index) => mseWant(index, id)));
     }
   };
@@ -159,8 +186,14 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
       if (old) staleUrls.current.push(old);
       return url;
     });
-    await new Promise<void>((resolve) => {
-      source.onsourceopen = () => resolve();
+    await new Promise<void>((resolve, reject) => {
+      // If the browser never opens the stream, give up quickly: the same chunks then
+      // play as one file instead of the player sitting there doing nothing.
+      const timer = setTimeout(() => reject(new Error('The browser would not open the video stream')), 4000);
+      source.onsourceopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
     });
     const st = mse.current;
     if (!st || mse.current !== st) return;
@@ -204,6 +237,15 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const panelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsBox = useRef<HTMLDivElement | null>(null);
   const skipSeconds = state?.settings?.vvshSkipSeconds ?? 10;
+  // Leaving the page stops every in-flight fetch: nothing keeps asking for chunks.
+  const alive = useRef(true);
+  useEffect(() => {
+    setDebugLogs(Boolean(state?.settings.debugLogs));
+    return () => {
+      alive.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // How wide the scrub preview popup shows: the viewer's choice. The images themselves
   // are captured and sized by the publisher — that is recorded in the file.
   const scrubWidth = Math.min(640, Math.max(80, Number(state?.settings?.vvshScrubWidth ?? 220)));
@@ -281,7 +323,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
       const missing: number[] = [];
       for (let index = 0; index <= wanted; index++) if (!buffer.has(index)) missing.push(index);
       const lanes = 8;
+      debugLog('fetch', `need chunks 0–${wanted} for ${id} — filling in groups of ${lanes}`);
       for (let at = 0; at < missing.length; at += lanes) {
+        if (!alive.current) return; // the page was left: stop fetching
         await Promise.all(
           missing.slice(at, at + lanes).map(async (index) => {
             const started = performance.now();
@@ -337,6 +381,13 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** Moves playback to another encoding without stopping it. */
   const switchTo = useCallback(
     async (id: string, at: number, play: boolean) => {
+      if (mseOk) {
+        // Segments from the new encoding simply carry on at the playhead.
+        active.current = id;
+        if (!autoRef.current) setRendition(id);
+        await playFrom(at, play);
+        return;
+      }
       active.current = id;
       if (!autoRef.current) setRendition(id);
       const buffer = bufferOf(id);
@@ -357,6 +408,13 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** From one moment of the video: fetch what is missing up to it, then play there. */
   const playFrom = useCallback(
     async (at: number, play = true) => {
+      debugLog(
+        'seek',
+        `seek to ${at.toFixed(1)}s → chunk ${chunkAt(meta, at)}` +
+          (mseOk
+            ? ` · sparse: this chunk plus the ${prefetchSeconds}s window ahead`
+            : ` · ${meta.codec} plays as one file — the chunks before it are part of it and get filled`)
+      );
       if (mseOk) {
         // Sparse playback: the chunk that moment needs goes first, and only the window
         // ahead follows — nothing between the old position and the new one is fetched.
@@ -376,10 +434,11 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             void mseWindow(at, active.current);
           }
           setFetched(mse.current?.appended.size ?? 0);
-        } catch (e) {
-          setError(errorMessage(e));
+          return;
+        } catch {
+          // MediaSource would not run here: fall through and play the chunks as one file.
+          mse.current = null;
         }
-        return;
       }
       const target = chunkAt(meta, at);
       try {
@@ -542,7 +601,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() => {
-            if (mseOk) return;
+            if (mse.current) return;
             // Some mp4s only play once the whole file is present (their index sits at the
             // end) — finish fetching and hand the complete stream over.
             if (bufferOf(active.current).size < meta.chunkCount) {
@@ -562,7 +621,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             if (wantPlay.current) void v.play().catch(() => undefined);
           }}
           onEnded={() => {
-            if (mseOk) return;
+            if (mse.current) return;
             // The stream runs out exactly when the fetched chunks do — carry on.
             if (bufferOf(active.current).size < meta.chunkCount) void playFrom(seconds + 0.2, true);
           }}

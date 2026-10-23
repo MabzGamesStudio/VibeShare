@@ -1,0 +1,34 @@
+start
+TSCDONE
+▶ the .vvsh verifiable video stream format
+  ✔ takes the metadata the format names: version, bitrates, chunk length, counts and length (30.26071ms)
+  ✔ uses I, P and B frames in every chunk, and the last tree layers split into the encodings (91.025093ms)
+  ✔ finds one node with a single path down the tree, and refuses a tampered step (15.092793ms)
+  ✔ seeks by timestamp to one chunk and shows the preview of that section (2.372392ms)
+  ✔ reassembles one bitrate back into the exact video, and round-trips the file (52.542388ms)
+  ✔ packs the file and the records as bytes, with the JSON only as a translation (1.916622ms)
+  ✔ packs large frames without allocating past anything (598.753889ms)
+  ✔ really stores fewer bytes in the smaller encoding than the bigger one (270.550936ms)
+  ✔ keeps a real upload intact in every encoding, so any of them plays (130.307908ms)
+✔ the .vvsh verifiable video stream format (1226.949767ms)
+▶ a provider storing a .vvsh stream
+  ✔ keeps the file (metadata and root) and stores every branch and child on its own (442.272636ms)
+  ✔ charges per chunk for every object a user pulls while walking down from a branch (38.531077ms)
+  ✔ quotes a conversion from the metadata, the length and the encodings, and runs it (125.34568ms)
+✔ a provider storing a .vvsh stream (613.158211ms)
+▶ the video prefetch setting
+  ✔ keeps fetching a minute ahead by default, configurable within bounds (1.244384ms)
+✔ the video prefetch setting (1.48344ms)
+▶ a client streaming and exporting a .vvsh
+  ✔ skips to a timestamp and retrieves only that chunk, verified (76.183139ms)
+  ✔ downloads the whole stream at one bitrate as a full video file (252.804238ms)
+✔ a client streaming and exporting a .vvsh (343.563078ms)
+ℹ tests 15
+ℹ suites 4
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7164.624664
+DONE

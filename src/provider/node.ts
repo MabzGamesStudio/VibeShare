@@ -964,9 +964,19 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const account = this.auth.account(ctx);
       const data = await this.store.getChunk(hash);
       if (!data) throw notFound('This node does not have the object');
+      // A direct URL open (a browser address bar) carries no account: it reads for
+      // free. The app streams authenticated and pays per MiB as configured below.
+      if (!account) {
+        ctx.res
+          .writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': data.length,
+            'x-vs-charged': '0',
+          })
+          .end(data);
+        return;
+      }
       // .vvsh chunks are priced per MiB of the chunk — configurable on this node.
-      const price = Math.ceil((data.length / MiB) * this.config.vvsh.chunkPerMiB);
-      if (price > 0 && !account) throw unauthorized('An account is needed to download from this node');
       const { charged, balance } = this.charge(account, data.length, undefined, 'vvsh chunk');
       if (balance !== undefined) ctx.res.setHeader('x-vs-balance', String(balance));
       ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length, 'x-vs-charged': String(charged) }).end(data);
@@ -1155,6 +1165,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
               createdAt: manifest.createdAt,
               meta: manifest.meta,
               sources: manifest.sources,
+              vvsh: manifest.vvsh,
               creator: manifest.creator
                 ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind }
                 : undefined,

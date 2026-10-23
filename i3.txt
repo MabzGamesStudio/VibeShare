@@ -1,0 +1,4 @@
+805:  const [tab, setTab] = useState(() => tabForHash(location.hash));
+808:    if (target) setTab(target);
+830:          <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+D

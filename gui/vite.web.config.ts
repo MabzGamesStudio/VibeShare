@@ -39,7 +39,10 @@ function siteFiles(): Plugin {
 export default defineConfig({
   plugins: [react(), webModules(), siteFiles()],
   base: './',
-  define: { __VIBESHARE_WEB__: 'true' },
+  define: {
+    __VIBESHARE_WEB__: 'true',
+    __VS_BUILD__: JSON.stringify(new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC'),
+  },
   build: {
     outDir: WEB_OUT,
     emptyOutDir: true,
