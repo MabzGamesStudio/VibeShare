@@ -22,8 +22,11 @@ export function debugLogging(): boolean {
 
 export function debugLog(kind: string, text: string): void {
   if (!enabled) return;
-  lines.unshift({ at: new Date().toISOString().slice(11, 23), kind, text });
+  const at = new Date().toISOString().slice(11, 23);
+  lines.unshift({ at, kind, text });
   if (lines.length > 500) lines.length = 500;
+  // In the browser only — nothing is ever written to disk.
+  console.debug(`[${kind}] ${text}`);
   emit();
 }
 

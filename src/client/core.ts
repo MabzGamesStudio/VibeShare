@@ -1487,7 +1487,7 @@ export class ClientCore {
     ref: { root: string; chunkCount: number; from?: { hash: string; depth: number } },
     index: number,
     rendition: string
-  ): Promise<{ data: Uint8Array; frames: VvshFrameStats; path: string[] }> {
+  ): Promise<{ data: Uint8Array; frames: VvshFrameStats; path: string[]; pathDepth: number }> {
     const fetchRecord = async (hash: string): Promise<Uint8Array | null> => {
       try {
         return await this.vvshObject(node, hash);
@@ -1515,7 +1515,9 @@ export class ClientCore {
     if (!leaf) throw new Error('This stream has no such bitrate encoding');
     const data = await this.vvshObject(node, leaf.hash);
     path.push(leaf.hash);
-    return { data, frames: leaf.frames, path };
+    // `path` starts wherever the walk started: `pathDepth` says which depth that is, so
+    // a caller reusing a branch knows exactly which hash sits at which depth.
+    return { data, frames: leaf.frames, path, pathDepth: fromDepth };
   }
 
   /** Every chunk of one bitrate, reassembled into the full video file to save. */

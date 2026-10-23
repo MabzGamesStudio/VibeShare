@@ -36,25 +36,42 @@ export function downloadName(name: string, mime?: string): string {
 /** One verified chunk: the request only names where to look — the tree root (or a branch
  *  already verified), the chunk index and the encoding — and the answer is the merkle
  *  path walked plus the leaf bytes. No metadata travels with it. */
-const walked = new Map<string, { index: number; path: string[] }>();
+const walked = new Map<string, { index: number; path: string[]; base: number }>();
+// One fetch per chunk at a time: the prefetch and the player may both ask, and paying
+// twice for the same chunk helps nobody.
+const inflight = new Map<string, Promise<Uint8Array>>();
 
 async function fetchChunk(nodeId: string, file: VvshFile, index: number, rendition: string): Promise<Uint8Array> {
+  const key = `${nodeId}:${file.root}:${index}:${rendition}`;
+  const running = inflight.get(key);
+  if (running) return running;
+  const task = fetchChunkOnce(nodeId, file, index, rendition);
+  inflight.set(key, task);
+  void task
+    .catch(() => undefined)
+    .then(() => inflight.delete(key));
+  return task;
+}
+
+async function fetchChunkOnce(nodeId: string, file: VvshFile, index: number, rendition: string): Promise<Uint8Array> {
   const started = performance.now();
   // A branch already verified for a nearby chunk shortens the walk: the answer's path
-  // says which branch sits above which chunks.
+  // says which branch sits above which chunks (its first hash is at `pathDepth`).
   const previous = walked.get(file.root);
   let from: { hash: string; depth: number } | undefined;
   if (previous) {
     const before = pathToChunk(file.meta.chunkCount, previous.index);
     const want = pathToChunk(file.meta.chunkCount, index);
-    let common = 0;
-    while (common < before.length && common < want.length && before[common] === want[common]) common++;
-    if (common > 0 && previous.path[common - 1]) from = { hash: previous.path[common - 1], depth: common - 1 };
+    let shared = 0;
+    while (shared < before.length && shared < want.length && before[shared] === want[shared]) shared++;
+    // The deepest branch the paths share that the earlier answer actually named.
+    const deepest = Math.min(shared, previous.base + previous.path.length - 2);
+    if (deepest > 0 && deepest >= previous.base) from = { hash: previous.path[deepest - previous.base], depth: deepest };
   }
-  const answer = await api<{ data: string; path: string[] }>('/api/vvsh/chunk', {
+  const answer = await api<{ data: string; path: string[]; pathDepth: number }>('/api/vvsh/chunk', {
     body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index, rendition, ...(from ? { from } : {}) },
   });
-  walked.set(file.root, { index, path: answer.path });
+  walked.set(file.root, { index, path: answer.path, base: answer.pathDepth ?? 0 });
   const raw = fromBase64url(answer.data);
   debugLog(
     'chunk',

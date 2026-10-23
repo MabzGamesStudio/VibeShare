@@ -379,7 +379,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       Number(body.index ?? 0),
       String(body.rendition ?? '')
     );
-    return { data: base64url(chunk.data), frames: chunk.frames, path: chunk.path };
+    return { data: base64url(chunk.data), frames: chunk.frames, path: chunk.path, pathDepth: chunk.pathDepth };
   });
 
   on('POST', '/api/vvsh/export', async (request) => {

@@ -789,84 +789,52 @@ interface VvshChunkRow {
 /** One .vvsh stream in full: its metadata, every chunk, and the merkle tree over them. */
 function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
   const meta = vvsh.meta;
-  const [rows, setRows] = useState<VvshChunkRow[]>([]);
-  const [treeText, setTreeText] = useState('');
-  const [selected, setSelected] = useState(0);
-  const [preview, setPreview] = useState<{ url: string } | null>(null);
+  const [chunkPlay, setChunkPlay] = useState<{ url: string; label: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const chunks: VvshChunkRow[] = [];
-        const lines: string[] = [];
-        const walk = async (hash: string, depth: number, path: string[]): Promise<void> => {
-          if (cancelled || depth > 24) return;
-          const node = parseVvshNode(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(hash)}`), hash);
-          if (!node) {
-            lines.push(`${'  '.repeat(depth)}? ${hash} (its bytes hash to something else)`);
-            return;
-          }
-          if (node.kind === 'branch') {
-            lines.push(`${'  '.repeat(depth)}branch ${hash}`);
-            await walk(node.left, depth + 1, [...path, hash]);
-            await walk(node.right, depth + 1, [...path, hash]);
-          } else {
-            lines.push(`${'  '.repeat(depth)}chunk ${node.index} ${hash}`);
-            chunks.push({ index: node.index, node: hash, path: [...path, hash], renditions: node.renditions });
-          }
-        };
-        await walk(vvsh.root, 0, []);
-        if (cancelled) return;
-        chunks.sort((a, b) => a.index - b.index);
-        setRows(chunks);
-        setTreeText(lines.join('\n'));
-      } catch (e) {
-        if (!cancelled) setError(message(e));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [vvsh]);
-
-  /** Fetches every chunk of one encoding from this node and plays the reassembled video. */
-  const play = async (rendition: string) => {
+  /** Plays one chunk's own bytes as a video — that block and nothing else. */
+  const playChunk = async (index: number, renditionId: string) => {
     try {
       setError(null);
-      const blocks: Uint8Array[] = [];
-      for (const row of rows) {
-        const leaf = row.renditions.find((entry) => entry.id === rendition);
-        if (!leaf) continue;
-        const payload = await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`);
-        blocks.push(...decodeVvshFrames(decodeVvshChunk(payload)));
+      const leaf = cursorNode?.kind === 'chunk' ? cursorNode.renditions.find((entry) => entry.id === renditionId) : undefined;
+      if (!leaf) return;
+      const payload = await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`);
+      const parts: Uint8Array[] = [];
+      let type = meta.sourceMime ?? 'video/mp4';
+      if (meta.codec === 'vvsh-webm/1') {
+        type = 'video/webm';
+        const rendition = meta.bitrates.find((entry) => entry.id === renditionId);
+        if (rendition?.initHash) parts.push(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(rendition.initHash)}`));
+        parts.push(payload);
+      } else {
+        // The built-in container: its I/P/B frames decode to that chunk's piece of the file.
+        parts.push(...decodeVvshFrames(decodeVvshChunk(payload)));
       }
-      const out = new Uint8Array(blocks.reduce((size, block) => size + block.length, 0));
+      const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
       let at = 0;
-      for (const block of blocks) {
-        out.set(block, at);
-        at += block.length;
+      for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
       }
-      const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type: meta.sourceMime ?? 'video/mp4' }));
-      setPreview((old) => {
+      const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type }));
+      setChunkPlay((old) => {
         if (old) URL.revokeObjectURL(old.url);
-        return { url };
+        return { url, label: `chunk ${index} · ${renditionId} (${out.length} bytes)` };
       });
     } catch (e) {
       setError(message(e));
     }
   };
-
-  const selectedRow = rows.find((row) => row.index === selected);
   // Exploring the stored tree by hand: a cursor on one node, moving left/right/down.
   const [cursor, setCursor] = useState<string[]>([vvsh.root]);
   const cursorHash = cursor[cursor.length - 1];
   const [cursorNode, setCursorNode] = useState<NonNullable<ReturnType<typeof parseVvshNode>> | null>(null);
-  const [chunkView, setChunkView] = useState('');
   useEffect(() => {
     let cancelled = false;
-    setChunkView('');
+    setChunkPlay((old) => {
+      if (old) URL.revokeObjectURL(old.url);
+      return null;
+    });
     setCursorNode(null);
     void adminBytes(`/v1/vvsh/objects/${encodeURIComponent(cursorHash)}`)
       .then((bytes) => {
@@ -952,106 +920,35 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
         {cursorNode?.kind === 'chunk' && (
           <div className="row">
             {cursorNode.renditions.map((leaf) => (
-              <button
-                key={leaf.id}
-                onClick={() => {
-                  void adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`)
-                    .then((bytes) => {
-                      const frames = (() => {
-                        try {
-                          return decodeVvshChunk(bytes)
-                            .map((frame) => frame.type)
-                            .join('');
-                        } catch {
-                          return 'unreadable';
-                        }
-                      })();
-                      setChunkView(
-                        `${leaf.id}: ${bytes.length} bytes, hash ${leaf.hash}\nframes: ${frames}\nhex: ${[...bytes.slice(0, 48)]
-                          .map((byte) => byte.toString(16).padStart(2, '0'))
-                          .join(' ')} …`
-                      );
-                    })
-                    .catch((e) => setChunkView(message(e)));
-                }}
-              >
-                view {leaf.id} chunk
+              <button key={leaf.id} onClick={() => void playChunk(cursorNode.index, leaf.id)}>
+                ▶ play {leaf.id} (this block only)
               </button>
             ))}
           </div>
         )}
-        {chunkView && <pre className="mono tiny">{chunkView}</pre>}
-      </details>
-      <div className="field">
-        <span>Encodings — click to fetch every chunk of that quality and play it</span>
-        {meta.bitrates.map((rendition) => (
-          <div className="row" key={rendition.id} style={{ gap: 8 }}>
-            <button className="small" onClick={() => void play(rendition.id)}>
-              ▶ {rendition.label}
-            </button>
-            <span className="small faint">
-              {rendition.height ? `${rendition.height}p` : ''}
-              {rendition.fps ? ` ${rendition.fps}fps` : ''} · {rendition.kbps} kbit/s · {rendition.bytes ? formatBytes(rendition.bytes) : '—'}
-            </span>
-          </div>
-        ))}
-      </div>
-      {preview && <video key={preview.url} src={preview.url} controls style={{ width: '100%' }} />}
-      <h3>Chunks</h3>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Chunk</th>
-            <th>Time</th>
-            <th>Encodings</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr
-              key={row.index}
-              style={{ cursor: 'pointer', outline: selected === row.index ? '1px solid var(--accent)' : undefined }}
-              onClick={() => setSelected(row.index)}
-            >
-              <td>{row.index}</td>
-              <td>
-                {Math.round(row.index * meta.chunkSeconds)}s – {Math.round(Math.min(meta.totalSeconds, (row.index + 1) * meta.chunkSeconds))}s
-              </td>
-              <td className="tiny mono">
-                {row.renditions.map((entry) => (
-                  <div key={entry.id}>
-                    {entry.id}: {formatBytes(entry.size)} · {entry.frames.i}I {entry.frames.p}P {entry.frames.b}B
-                  </div>
-                ))}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {selectedRow && (
-        <div className="card form-stack">
-          <h3>Chunk {selectedRow.index}</h3>
-          <div className="mono tiny faint">node {selectedRow.node}</div>
-          {selectedRow.renditions.map((entry) => (
-            <div key={entry.id} className="small">
-              <strong>{entry.id}</strong> · {formatBytes(entry.size)} · {entry.frames.i} I / {entry.frames.p} P / {entry.frames.b} B
-              <div className="mono tiny faint">{entry.hash}</div>
+        {chunkPlay && (
+          <div className="form-stack" style={{ marginTop: 8 }}>
+            <div className="row between">
+              <span className="small">
+                Playing only {chunkPlay.label} — this block's own bytes, nothing before or after it
+                {meta.codec === 'vvsh-frames/1' ? ' (a slice of the original file: it may not stand alone)' : ''}
+              </span>
+              <button
+                className="small"
+                onClick={() =>
+                  setChunkPlay((old) => {
+                    if (old) URL.revokeObjectURL(old.url);
+                    return null;
+                  })
+                }
+              >
+                Close
+              </button>
             </div>
-          ))}
-          <div>
-            <span className="small">Merkle path (root → this chunk)</span>
-            {selectedRow.path.map((hash) => (
-              <div key={hash} className="mono tiny">
-                {hash}
-              </div>
-            ))}
+            <video key={chunkPlay.url} src={chunkPlay.url} controls autoPlay playsInline style={{ width: '100%', borderRadius: 6 }} />
           </div>
-        </div>
-      )}
-      <h3>Merkle tree</h3>
-      <pre className="mono tiny" style={{ overflowX: 'auto' }}>
-        {treeText}
-      </pre>
+        )}
+      </details>
     </Modal>
   );
 }
