@@ -325,6 +325,20 @@ describe('a client streaming and exporting a .vvsh', async () => {
     assert.equal(again.path.length, chunk.path.length - 1, 'only the rest of the path is walked');
   });
 
+  it('hands out byte ranges of the decoded stream, fetching only the chunks they fall in', async () => {
+    const rendition = file.meta.bitrates.find((entry) => entry.id === '1080p')!;
+    assert.equal(rendition.decodedBytes, source.length, 'the metadata knows the decoded size — that maps bytes to chunks');
+    const spec = base64url(new TextEncoder().encode(JSON.stringify({ n: nodeId, r: file.root, c: file.meta.chunkCount, q: '1080p', d: rendition.decodedBytes })));
+    const response = await fetch(`${client.url()}/stream/vvsh.${spec}?t=${client.token}`, { headers: { range: 'bytes=0-99' } });
+    assert.equal(response.status, 206, 'a range is answered as a part of the file');
+    assert.equal(response.headers.get('content-range'), `bytes 0-99/${source.length}`);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), source.subarray(0, 100), 'the first bytes come back exactly');
+    // A small range far into the stream: only the chunk that holds it is fetched.
+    const tail = await fetch(`${client.url()}/stream/vvsh.${spec}?t=${client.token}`, { headers: { range: 'bytes=29000-29099' } });
+    assert.equal(tail.status, 206);
+    assert.deepEqual(Buffer.from(await tail.arrayBuffer()), source.subarray(29000, 29100), 'the bytes of a far seek come back exactly');
+  });
+
   it('downloads the whole stream at one bitrate as a full video file', async () => {
     const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
     const whole = await api<{ data: string; name: string }>('/api/vvsh/export', { body: { nodeId, file, rendition: '8k', name: 'movie.mp4' } });

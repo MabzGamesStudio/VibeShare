@@ -1,0 +1,97 @@
+start
+▶ the .vvsh verifiable video stream format
+  ✔ takes the metadata the format names: version, bitrates, chunk length, counts and length (3.710061ms)
+  ✔ uses I, P and B frames in every chunk, and the last tree layers split into the encodings (3.066132ms)
+  ✔ finds one node with a single path down the tree, and refuses a tampered step (2.499691ms)
+  ✔ seeks by timestamp to one chunk and shows the preview of that section (0.487123ms)
+  ✔ reassembles one bitrate back into the exact video, and round-trips the file (23.306421ms)
+  ✔ packs the file and the records as bytes, with the JSON only as a translation (1.326053ms)
+  ✔ packs large frames without allocating past anything (187.730409ms)
+  ✔ really stores fewer bytes in the smaller encoding than the bigger one (88.419082ms)
+  ✔ keeps a real upload intact in every encoding, so any of them plays (33.969026ms)
+✔ the .vvsh verifiable video stream format (347.491683ms)
+▶ a provider storing a .vvsh stream
+  ✔ keeps the file (metadata and root) and stores every branch and child on its own (82.193167ms)
+  ✔ charges per chunk for every object a user pulls while walking down from a branch (17.524338ms)
+  ✔ quotes a conversion from the metadata, the length and the encodings, and runs it (61.067373ms)
+✔ a provider storing a .vvsh stream (163.309546ms)
+▶ the video prefetch setting
+  ✔ keeps fetching a minute ahead by default, configurable within bounds (0.578257ms)
+✔ the video prefetch setting (0.703741ms)
+▶ a client streaming and exporting a .vvsh
+  ✔ skips to a timestamp and retrieves only that chunk, verified (45.848936ms)
+  ✖ hands out byte ranges of the decoded stream, fetching only the chunks they fall in (17.627589ms)
+  ✔ downloads the whole stream at one bitrate as a full video file (35.3483ms)
+✖ a client streaming and exporting a .vvsh (105.454168ms)
+ℹ tests 16
+ℹ suites 4
+ℹ pass 15
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2051.932781
+
+✖ failing tests:
+
+test at tests/vvsh.test.ts:328:3
+✖ hands out byte ranges of the decoded stream, fetching only the chunks they fall in (17.627589ms)
+  AssertionError [ERR_ASSERTION]: the first bytes come back exactly
+  + actual - expected
+  
+  + Uint8Array(100) [
+  - Buffer(100) [Uint8Array] [
+      198,
+      126,
+      223,
+      184,
+      113,
+  
+      at TestContext.<anonymous> (/Users/mabz/Desktop/Projects/InProgress/VibeShare/tests/vvsh.test.ts:335:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+      at async Test.run (node:internal/test_runner/test:1113:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: Uint8Array(100) [
+      198, 126, 223, 184, 113, 236,  30, 209, 156, 230, 206, 157,
+       82, 170, 130, 126, 152,  65, 151, 181, 126,   1, 207,  65,
+      253,  14,  35,  85,  19, 201,  54, 220,  47, 204, 121, 149,
+       93, 148,   9, 132, 137, 130, 200,  10, 244, 133, 127, 150,
+      167,  75, 112,  49,  20, 245, 122, 236, 251, 198, 152,  47,
+      192, 212,  45, 112, 137,  42, 233,  56, 246, 123,  56,  84,
+       42, 129,  69,   5, 237, 116, 123,   7, 148, 147, 124,  11,
+       22, 132, 122,  68, 218, 249, 155,  71, 119, 203, 236,  15,
+      189, 174,  14,  11
+    ],
+    expected: <Buffer c6 7e df b8 71 ec 1e d1 9c e6 ce 9d 52 aa 82 7e 98 41 97 b5 7e 01 cf 41 fd 0e 23 55 13 c9 36 dc 2f cc 79 95 5d 94 09 84 89 82 c8 0a f4 85 7f 96 a7 4b ... 50 more bytes>,
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+TESTDONE
+
+> vibeshare@0.1.0 build:gui
+> npm --prefix gui run build
+
+
+> build
+> tsc --noEmit && vite build
+
+src/web/backend.ts(146,56): error TS2304: Cannot find name 'fromBase64url'.
+src/web/backend.ts(159,27): error TS2345: Argument of type 'Uint8Array<ArrayBufferLike> | null' is not assignable to parameter of type 'BodyInit | null | undefined'.
+  Type 'Uint8Array<ArrayBufferLike>' is not assignable to type 'BodyInit | null | undefined'.
+    Type 'Uint8Array<ArrayBufferLike>' is missing the following properties from type 'URLSearchParams': size, append, delete, get, and 2 more.
+GUIDONE
+
+> vibeshare@0.1.0 build:web
+> npm --prefix gui run build:web
+
+
+> build:web
+> tsc --noEmit && vite build -c vite.web.config.ts && vite build -c vite.sw.config.ts
+
+src/web/backend.ts(146,56): error TS2304: Cannot find name 'fromBase64url'.
+src/web/backend.ts(159,27): error TS2345: Argument of type 'Uint8Array<ArrayBufferLike> | null' is not assignable to parameter of type 'BodyInit | null | undefined'.
+  Type 'Uint8Array<ArrayBufferLike>' is not assignable to type 'BodyInit | null | undefined'.
+    Type 'Uint8Array<ArrayBufferLike>' is missing the following properties from type 'URLSearchParams': size, append, delete, get, and 2 more.
+ALLDONE

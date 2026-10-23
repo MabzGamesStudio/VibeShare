@@ -41,7 +41,7 @@ import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
 import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
-import { DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
+import { DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
@@ -1520,6 +1520,11 @@ export class ClientCore {
     return { data, frames: leaf.frames, path, pathDepth: fromDepth };
   }
 
+  /** A byte range of one decoded stream by node id — what the /stream/vvsh routes call. */
+  async vvshStreamRange(spec: { n: string; r: string; c: number; q: string; d: number }, start: number, end: number): Promise<Uint8Array> {
+    return this.vvshRange(this.nodes.require(spec.n), { root: spec.r, chunkCount: spec.c }, spec.q, spec.d, start, end);
+  }
+
   /** Every chunk of one bitrate, reassembled into the full video file to save. */
   async exportVvsh(
     node: NodeEntry,
@@ -1531,6 +1536,70 @@ export class ClientCore {
       chunks.push((await this.vvshChunk(node, { root: file.root, chunkCount: file.meta.chunkCount }, index, rendition)).data);
     }
     return exportVvshStream(chunks);
+  }
+
+  /** Decoded chunks kept briefly, so repeated byte ranges of one stream are cheap. */
+  private vvshDecoded = new Map<string, Uint8Array>();
+
+  /** One chunk's decoded bytes (its piece of the video), kept for the next range. */
+  private async vvshDecodedChunk(
+    node: NodeEntry,
+    ref: { root: string; chunkCount: number },
+    index: number,
+    rendition: string
+  ): Promise<Uint8Array> {
+    const key = `${ref.root}:${rendition}:${index}`;
+    const cached = this.vvshDecoded.get(key);
+    if (cached) return cached;
+    const chunk = await this.vvshChunk(node, ref, index, rendition);
+    const blocks = decodeVvshFrames(decodeVvshChunk(chunk.data));
+    const out = new Uint8Array(blocks.reduce((size, block) => size + block.length, 0));
+    let at = 0;
+    for (const block of blocks) {
+      out.set(block, at);
+      at += block.length;
+    }
+    if (this.vvshDecoded.size > 64) this.vvshDecoded.delete(this.vvshDecoded.keys().next().value!);
+    this.vvshDecoded.set(key, out);
+    return out;
+  }
+
+  /**
+   * One byte range of one bitrate's decoded stream — exactly the chunks that hold it and
+   * nothing else. With the rendition's `decodedBytes` the chunk boundaries are known
+   * arithmetic (`floor(i · bytes / chunks)` — the same cut the build made), so a seek to
+   * any part of the video fetches only the chunk or two it lands on.
+   */
+  async vvshRange(
+    node: NodeEntry,
+    ref: { root: string; chunkCount: number; from?: { hash: string; depth: number } },
+    rendition: string,
+    decodedBytes: number,
+    start: number,
+    end: number
+  ): Promise<Uint8Array> {
+    const total = Math.max(0, decodedBytes);
+    const from = Math.max(0, Math.min(start, total));
+    const to = Math.max(from, Math.min(end, total));
+    if (to <= from || !total) return new Uint8Array(0);
+    const count = ref.chunkCount;
+    const first = Math.min(count - 1, Math.floor((from * count) / total));
+    const last = Math.min(count - 1, Math.floor(((to - 1) * count) / total));
+    const pieces: Uint8Array[] = [];
+    for (let index = first; index <= last; index++) {
+      const chunkStart = Math.floor((index * total) / count);
+      const decoded = await this.vvshDecodedChunk(node, ref, index, rendition);
+      const takeStart = Math.max(0, from - chunkStart);
+      const takeEnd = Math.min(decoded.length, to - chunkStart);
+      if (takeEnd > takeStart) pieces.push(decoded.subarray(takeStart, takeEnd));
+    }
+    const out = new Uint8Array(pieces.reduce((size, piece) => size + piece.length, 0));
+    let at = 0;
+    for (const piece of pieces) {
+      out.set(piece, at);
+      at += piece.length;
+    }
+    return out;
   }
 
   /** Puts a published .vvsh stream in front of the search algorithm nodes as well. */

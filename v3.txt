@@ -1,0 +1,8 @@
+90:      streamUrl: (base, download) => `/stream/${base}?${download ? 'download=1&' : ''}t=${this.token}`,
+148:    if ((path.startsWith('/api/') || path.startsWith('/stream/')) && !this.authorized(ctx)) {
+213:        const safeType = ['image/jpeg', 'image/png', 'image/webp'].find((allowed) => type.startsWith(allowed)) ?? 'application/octet-stream';
+230:      ctx.res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+248:    r.get('/stream/:id', async (ctx) => {
+250:      if (!parsed?.native) throw badRequest('Only native content (vs1…) can be streamed from providers');
+287:        // A part stopped mid-stream (it could not be fetched again and verified): end here
+D

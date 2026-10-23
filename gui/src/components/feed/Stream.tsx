@@ -9,6 +9,7 @@ import { watchPath } from '../../util';
 import { ShareButton } from '../Share';
 import { Fields } from './Fields';
 import { MediaView, Poster } from './Player';
+import { formatDuration } from '../../util';
 import { useInView } from './usePaged';
 
 function StreamPost({ item, page, ipfsGateway }: { item: FeedItem; page: PageConfig; ipfsGateway: string }) {
@@ -27,15 +28,22 @@ function StreamPost({ item, page, ipfsGateway }: { item: FeedItem; page: PageCon
             <Poster item={item} src={imageFor(item)} fit="contain" />
           </Link>
         ) : (
-          <MediaView
-            item={item}
-            active={inView && (started || (page.options.autoplay && kind !== 'iframe'))}
-            muted={page.options.muted}
-            controls
-            fit="contain"
-            ipfsGateway={ipfsGateway}
-            onActivate={() => setStarted(true)}
-          />
+          <>
+            {!started && item.durationSeconds ? (
+              <span className="thumb-overlay">
+                <span className="thumb-label">{formatDuration(item.durationSeconds)}</span>
+              </span>
+            ) : null}
+            <MediaView
+              item={item}
+              active={inView && (started || (page.options.autoplay && kind !== 'iframe'))}
+              muted={page.options.muted}
+              controls
+              fit="contain"
+              ipfsGateway={ipfsGateway}
+              onActivate={() => setStarted(true)}
+            />
+          </>
         )}
       </div>
       <div className="post-footer">

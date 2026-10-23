@@ -1,0 +1,66 @@
+        <span>Encodings — one row per quality: resolution and frame rate</span>
+        {rows.map((row, index) => (
+          <div className="row" key={`${index}-${row.id}`} style={{ gap: 8, flexWrap: 'nowrap', alignItems: 'center' }}>
+            <select value={row.height} onChange={(e) => updateRow(index, { height: Number(e.target.value) })} aria-label="Resolution">
+              {RESOLUTIONS.map((height) => (
+                <option key={height} value={height}>
+                  {height}p
+                </option>
+              ))}
+            </select>
+            <select value={row.fps} onChange={(e) => updateRow(index, { fps: Number(e.target.value) })} aria-label="Frame rate">
+              {FRAME_RATES.map((fps) => (
+                <option key={fps} value={fps}>
+                  {fps} fps
+                </option>
+              ))}
+            </select>
+            <span className="hint" style={{ minWidth: 96, whiteSpace: 'nowrap' }}>
+              ≈ {(estimateBytes(row, seconds) / (1024 * 1024)).toFixed(1)} MB
+            </span>
+            <button className="small" onClick={() => setRows((current) => current.filter((_, i) => i !== index))} disabled={rows.length <= 1}>
+              ×
+            </button>
+          </div>
+        ))}
+        <button
+          className="small"
+          onClick={() => setRows((current) => [...current, { id: rowId(720, 30), height: 720, fps: 30, kbps: defaultKbps(720, 30) }])}
+        >
+          + Add encoding
+        </button>
+        <span className="hint">Each row is really encoded to its resolution and frame rate, so the sizes and sharpness differ.</span>
+      </div>
+      {plan && (
+        <span className="hint">
+          {plan.chunkCount} chunk{plan.chunkCount === 1 ? '' : 's'} × {bitrates.length} encoding{bitrates.length === 1 ? '' : 's'} · {plan.previewCount} preview
+          {plan.previewCount === 1 ? '' : 's'}
+        </span>
+      )}
+      <div className="row">
+        <button className="primary small" disabled={!file || !provider || !rows.length || job?.status === 'working'} onClick={() => void run(job)}>
+          {job && job.status !== 'done' ? 'Resume publishing' : 'Process & publish'}
+        </button>
+        <button className="small" disabled={!file || !provider || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
+          Convert on the provider (source quality)
+        </button>
+        {job && job.status !== 'done' && (
+          <button
+            className="small"
+            onClick={() => {
+              void clearJob().then(() => {
+                jobRef.current = null;
+                setJob(null);
+              });
+            }}
+          >
+            Discard the unfinished job
+          </button>
+        )}
+      </div>
+      {passPct !== null && (
+        <div className="card form-stack">
+          <div className="row between">
+            <strong>Uploading to the provider</strong>
+            <span className="hint">{passPct}%</span>
+          </div>

@@ -160,6 +160,12 @@ function MasonryTile({ item, page, inline }: { item: FeedItem; page: PageConfig;
     <div className="masonry-tile" ref={seen}>
       <div className="masonry-media" style={aspect ? { aspectRatio: String(aspect) } : undefined}>
         <TileMedia item={item} inline={inline} src={src} />
+        {(item.durationSeconds || item.seen) && (
+          <span className="thumb-overlay">
+            {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
+            {item.seen ? <WatchedBadge className="thumb-label" /> : null}
+          </span>
+        )}
         <span className="thumb-actions">
           <SaveCidButton id={item.id} title={item.title} className="overlay-button" compact />
           <PostDownload item={item} />

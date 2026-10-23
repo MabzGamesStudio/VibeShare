@@ -425,7 +425,11 @@ export async function buildVvsh(
         return {
           ...rendition,
           bytes: bytesByRendition.get(rendition.id) ?? 0,
-          ...(segment ? { initHash: segment.initHash, initBytes: segment.init.length } : {}),
+          ...(segment
+            ? { initHash: segment.initHash, initBytes: segment.init.length }
+            : // The decoded stream's size maps byte ranges to chunks exactly — that is how
+              // a player can ask for one part of the file without the rest of it.
+              { decodedBytes: options.streams ? (options.streams[rendition.id]?.length ?? 0) : source.length }),
         };
       }),
     frames: options.webm

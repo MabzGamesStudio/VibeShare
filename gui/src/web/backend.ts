@@ -6,6 +6,7 @@ import { ClientCore } from '../../../src/client/core';
 import { FetchError } from '../../../src/client/fetcher';
 import type { ServiceStatus } from '../../../src/shared/clientapi';
 import { MiB } from '../../../src/shared/content';
+import { fromBase64url } from '../../../src/shared/encoding';
 import { badRequest, HttpError } from '../../../src/shared/errors';
 import { parseNodeRefs } from '../../../src/shared/noderef';
 import { SOFTWARE } from '../../../src/shared/protocol';
@@ -140,6 +141,24 @@ export async function createBackend(options: BackendOptions): Promise<Backend> {
   const routes: Compiled[] = clientRoutes(core).map((route) => ({ route, parts: route.path.split('/').filter(Boolean) }));
 
   async function stream(request: Request, id: string, url: URL): Promise<Response> {
+    // A .vvsh stream as byte ranges: the browser's own seeking drives it, and only the
+    // chunks that hold the asked-for bytes are fetched from the provider.
+    if (id.startsWith('vvsh.')) {
+      const spec = JSON.parse(new TextDecoder().decode(fromBase64url(id.slice(5)))) as { n: string; r: string; c: number; q: string; d: number };
+      const total = spec.d;
+      const range = /bytes=(\d*)-(\d*)/.exec(request.headers.get('range') ?? '');
+      const start = range && range[1] ? Number(range[1]) : 0;
+      const end = range && range[2] ? Math.min(Number(range[2]) + 1, total) : total;
+      const bytes = await core.vvshStreamRange(spec, start, end);
+      const headers: Record<string, string> = {
+        'content-type': 'video/mp4',
+        'accept-ranges': 'bytes',
+        'content-length': String(bytes.length),
+      };
+      const status = range ? 206 : 200;
+      if (range) headers['content-range'] = `bytes ${start}-${start + bytes.length - 1}/${total}`;
+      return new Response(request.method === 'HEAD' ? null : (bytes.slice().buffer as ArrayBuffer), { status, headers });
+    }
     const parsed = parseContentId(id);
     if (!parsed?.native) throw badRequest('Only native content (vs1…) can be streamed from providers');
     try {

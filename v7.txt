@@ -1,0 +1,57 @@
+    assert.equal(quoted.quote.breakdown.chunks, 6, 'three chunks of two encodings');
+    assert.equal(quoted.quote.breakdown.previews, 3);
+    assert.ok(quoted.quote.credits > 0);
+    const before = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
+    const started = await account.json<{ jobId: string; quote: { credits: number } }>('/v1/vvsh/convert', {
+      body: { name: 'made-here.vvsh', bytes: source.length, totalSeconds: 30, config },
+    });
+    await account.json(`/v1/vvsh/convert/${started.jobId}/piece`, { method: 'PUT', raw: source });
+    const converted = await account.json<{ manifest: Manifest; quote: { credits: number } }>(`/v1/vvsh/convert/${started.jobId}/finish`, {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(converted.manifest.vvsh?.meta.chunkCount, 3);
+    assert.equal(converted.manifest.vvsh?.meta.chunkSeconds, 10);
+    const after = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
+    assert.equal(after, before - converted.quote.credits, 'the quote was charged before the work ran');
+    const root = await account.fetch(`/v1/vvsh/objects/${encodeURIComponent(converted.manifest.vvsh!.root)}`);
+    assert.equal(root.status, 200, 'the converted stream is queryable from its root');
+    const committed = await account.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: converted.manifest } });
+    assert.match(committed.cid, /^vs1/);
+  });
+});
+
+describe('the video prefetch setting', () => {
+  it('keeps fetching a minute ahead by default, configurable within bounds', () => {
+    const settings = defaultSettings();
+    assert.equal(settings.vvshPrefetchSeconds, 60, 'a minute ahead by default');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 99_999 }).vvshPrefetchSeconds, 3_600, 'clamped to an hour');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 0 }).vvshPrefetchSeconds, 0, '0 fetches only what is playing');
+    assert.equal(normalizeSettings({ vvshPrefetchSeconds: 30 }).vvshPrefetchSeconds, 30);
+    assert.equal(normalizeSettings({}).vvshPrefetchSeconds, 60, 'older settings pick up the default');
+  });
+});
+
+describe('a client streaming and exporting a .vvsh', async () => {
+  const provider = await startProvider();
+  const { dir, cleanup } = tempDir();
+  const { client, api } = await startClient(dir);
+  after(async () => {
+    await client.stop();
+    await provider.stop();
+    cleanup();
+  });
+  await api('/api/nodes', { body: { text: provider.reference() } });
+  const source = randomBytesOf(30_000);
+  const config: VvshBuildConfig = { bitrates: RENDITIONS, chunkSeconds: 10, previewSplits: 3, gop: 8 };
+  const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
+  const session = await api<{ jobId: string }>('/api/vvsh/session', {
+    body: { mode: 'publish', nodeId, name: 'stream.vvsh', totalSeconds: 30, config, sourceMime: 'video/mp4' },
+  });
+  await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(source) } });
+  const published = await api<{ cid: string; manifest: Manifest }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+  const file = published.manifest.vvsh!;
+
+  it('skips to a timestamp and retrieves only that chunk, verified', async () => {
+    const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
+D

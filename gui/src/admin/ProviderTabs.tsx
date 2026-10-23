@@ -816,6 +816,18 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
         out.set(part, at);
         at += part.length;
       }
+      // Only a block that starts a container can play on its own. A middle slice of the
+      // original file cannot: say so instead of showing a dead player.
+      const startsContainer =
+        out.length > 8 &&
+        ((out[4] === 0x66 && out[5] === 0x74 && out[6] === 0x79 && out[7] === 0x70) || // mp4 ftyp
+          (out[0] === 0x1a && out[1] === 0x45 && out[2] === 0xdf && out[3] === 0xa3)); // webm EBML
+      if (!startsContainer) {
+        setError(
+          'This block is a slice of the original file, and a browser cannot play a slice on its own — only a block that begins a container (like chunk 0) or a segmented (vvsh-webm/1) stream plays per block.'
+        );
+        return;
+      }
       const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type }));
       setChunkPlay((old) => {
         if (old) URL.revokeObjectURL(old.url);

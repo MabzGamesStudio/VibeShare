@@ -16,6 +16,7 @@ import {
   sendJson,
   type Ctx,
 } from '../shared/http.js';
+import { fromBase64url } from '../shared/encoding.js';
 import { log } from '../shared/log.js';
 import type { Transport } from '../shared/remote.js';
 import { isOnionUrl, torFetch, TorRouter } from '../shared/tor.js';
@@ -246,6 +247,39 @@ export class ClientNode {
 
     // Streaming and downloads (Range requests from <video>, <audio>, <img>, downloads)
     r.get('/stream/:id', async (ctx) => {
+      // A .vvsh stream as byte ranges: the browser's own seeking drives it, and only the
+      // chunks that hold the asked-for bytes are fetched from the provider.
+      if (ctx.params.id.startsWith('vvsh.')) {
+        const spec = JSON.parse(new TextDecoder().decode(fromBase64url(ctx.params.id.slice(5)))) as {
+          n: string;
+          r: string;
+          c: number;
+          q: string;
+          d: number;
+        };
+        const total = spec.d;
+        const match = /bytes=(\d*)-(\d*)/.exec(String(ctx.req.headers.range ?? ''));
+        const start = match && match[1] ? Number(match[1]) : 0;
+        const end = match && match[2] ? Math.min(Number(match[2]) + 1, total) : total;
+        const bytes = await this.core.vvshRange(
+          this.nodes.require(spec.n),
+          { root: spec.r, chunkCount: spec.c },
+          spec.q,
+          total,
+          start,
+          end
+        );
+        const headers: Record<string, string> = {
+          'content-type': 'video/mp4',
+          'accept-ranges': 'bytes',
+          'content-length': String(bytes.length),
+          'cache-control': 'private, max-age=3600',
+        };
+        const status = match ? 206 : 200;
+        if (match) headers['content-range'] = `bytes ${start}-${start + bytes.length - 1}/${total}`;
+        ctx.res.writeHead(status, headers).end(Buffer.from(bytes));
+        return;
+      }
       const parsed = parseContentId(ctx.params.id);
       if (!parsed?.native) throw badRequest('Only native content (vs1…) can be streamed from providers');
       let answer;

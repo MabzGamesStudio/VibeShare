@@ -24,14 +24,24 @@ import {
 } from '../media/transcode';
 import { clearJob, getBlob, getStoredFile, loadJob, newJobId, putBlob, saveJob, type VvshJob } from '../media/vvshjobs';
 
-/** Opens the picked video once to read its length and capture real preview thumbnails.
- *  Size and JPEG quality come from Settings → Video streams. */
+/** The video's length as hours:minutes:seconds.milliseconds, as the form shows it. */
+function formatClock(seconds: number): string {
+  const whole = Math.floor(seconds);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = whole % 60;
+  const ms = Math.min(99, Math.floor((seconds - whole) * 100));
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+}
+
+/** Opens the picked video once to read its length, shape and preview thumbnails.
+ *  Size and JPEG quality come from the settings below. */
 async function probeVideo(
   file: Blob,
   splits: number,
   width = 320,
   quality = 0.72
-): Promise<{ seconds: number; previews: string[] }> {
+): Promise<{ seconds: number; previews: string[]; width: number; height: number; fps: number }> {
   const url = URL.createObjectURL(file);
   try {
     const video = document.createElement('video');
@@ -51,6 +61,23 @@ async function probeVideo(
       video.load();
     });
     const seconds = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const sourceWidth = video.videoWidth || 0;
+    const sourceHeight = video.videoHeight || 0;
+    // The frame rate the file really carries, measured over a moment of playing.
+    let fps = 0;
+    try {
+      video.muted = true;
+      video.currentTime = 0;
+      await video.play();
+      const startedAt = performance.now();
+      const frames0 = video.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const frames1 = video.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
+      if (frames1 > frames0) fps = Math.round(((frames1 - frames0) * 1000) / (performance.now() - startedAt));
+      video.pause();
+    } catch {
+      fps = 0;
+    }
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = Math.max(90, Math.round(((video.videoHeight || 180) / (video.videoWidth || 320)) * width));
@@ -65,7 +92,7 @@ async function probeVideo(
       canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
       previews.push(canvas.toDataURL('image/jpeg', quality));
     }
-    return { seconds, previews };
+    return { seconds, previews, width: sourceWidth, height: sourceHeight, fps };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -85,8 +112,8 @@ export function VvshCompose() {
   const [seconds, setSeconds] = useState(0);
   const [title, setTitle] = useState('');
   const [rows, setRows] = useState<EncodeRow[]>(DEFAULT_ROWS);
-  const [chunkSeconds, setChunkSeconds] = useState('10');
-  const [previews, setPreviews] = useState('6');
+  const [chunkSeconds, setChunkSeconds] = useState('5');
+  const [previews, setPreviews] = useState('100');
   const [job, setJob] = useState<VvshJob | null>(null);
   const jobRef = useRef<VvshJob | null>(null);
   const [passPct, setPassPct] = useState<number | null>(null);
@@ -116,13 +143,23 @@ export function VvshCompose() {
   // The preview capture size and JPEG quality are the publisher's choice — they go into
   // the .vvsh metadata so every player knows how the images were made. (Viewers only pick
   // how wide the scrub popup shows them.)
-  const [previewWidth, setPreviewWidth] = useState('320');
-  const [previewQuality, setPreviewQuality] = useState('0.72');
+  const [previewWidth, setPreviewWidth] = useState('256');
+  const [previewQuality, setPreviewQuality] = useState('0.5');
+  // What the picked video really is: its size and frame rate — an encoding above them
+  // only adds bytes, so the form says so.
+  const [source, setSource] = useState<{ width: number; height: number; fps: number } | null>(null);
   const previewWidthValue = Math.min(1280, Math.max(80, Number(previewWidth) || 320));
   const previewQualityValue = Math.min(1, Math.max(0.1, Number(previewQuality) || 0.72));
   // Rough JPEG weight at this width and quality, times how many previews there are.
   const previewEstimateMb =
     (Math.max(0, previewSplits) * previewWidthValue * Math.round((previewWidthValue * 9) / 16) * 0.3 * previewQualityValue) / 1_048_576;
+  // An encoding above what the video really carries only adds bytes, and two of the same
+  // add nothing at all — the form points both out.
+  const overSource = (row: { height: number; fps: number }) =>
+    Boolean(source && (row.height > source.height || (source.fps > 0 && row.fps > source.fps)));
+  const seenConfigs = new Map<string, number>();
+  for (const row of rows) seenConfigs.set(rowId(row.height, row.fps), (seenConfigs.get(rowId(row.height, row.fps)) ?? 0) + 1);
+  const duplicates = [...seenConfigs.entries()].filter(([, count]) => count > 1).map(([id]) => id);
   const bitrates: VvshRendition[] = rows.map((row) => ({
     id: row.id,
     label: `${row.height}p${row.fps}`,
@@ -153,9 +190,17 @@ export function VvshCompose() {
     setFile(picked);
     setSeconds(0);
     try {
-      // The length comes from the video itself — no typing needed.
+      // The length and the shape come from the video itself — no typing needed.
       const probe = await probeVideo(picked, 0, previewWidthValue, previewQualityValue);
-      if (probe.seconds > 0) setSeconds(Math.round(probe.seconds));
+      if (probe.seconds > 0) setSeconds(probe.seconds);
+      setSource({ width: probe.width, height: probe.height, fps: probe.fps });
+      // Sensible defaults, filled in for the user: 5-second chunks, and at least 100
+      // previews (or one every 10 seconds of video — whichever gives more), small and
+      // light images.
+      setChunkSeconds('5');
+      setPreviews(String(Math.max(100, Math.ceil(probe.seconds / 10))));
+      setPreviewWidth('256');
+      setPreviewQuality('0.5');
     } catch {
       // Not something the browser can open; the run will say so clearly.
     }
@@ -323,7 +368,7 @@ export function VvshCompose() {
           <div>
             <strong>{file.name}</strong>
             <div className="small muted">
-              {file.type || 'video'} · {(file.size / (1024 * 1024)).toFixed(1)} MB{seconds ? ` · ${Math.round(seconds)}s` : ''}
+              {file.type || 'video'} · {(file.size / (1024 * 1024)).toFixed(1)} MB{seconds ? ` · ${formatClock(seconds)}` : ''}
             </div>
           </div>
           <button
@@ -345,72 +390,78 @@ export function VvshCompose() {
         onChange={(e) => e.target.files?.[0] && void choose(e.target.files[0])}
       />
       <div className="form-grid">
-        <div className="field">
-          <span>Length (seconds)</span>
-          <span className="mono" style={{ display: 'block' }}>
-            {seconds > 0 ? `${seconds} s` : '—'}
-          </span>
-          <span className="hint" style={{ display: 'block' }}>
-            Read from the video itself · 1 or more
-          </span>
-        </div>
-        <label className="field">
-          Time per chunk (seconds)
-          <input
-            type="number"
-            min={0}
-            value={chunkSeconds}
-            placeholder="10"
-            onChange={(e) => setChunkSeconds(e.target.value)}
-          />
-          <span className="hint">1 or more · chunks = length ÷ this</span>
-        </label>
-        <label className="field">
-          Image previews
-          <input
-            type="number"
-            min={0}
-            value={previews}
-            placeholder="6"
-            onChange={(e) => setPreviews(e.target.value)}
-          />
-          <span className="hint">
-            0 or more · 0 = no previews ·{' '}
-            {previewWidthValue}px at quality {previewQualityValue} ≈{' '}
-            {previewEstimateMb > 0.01 ? `${previewEstimateMb.toFixed(2)} MB` : '0 MB'} total
-          </span>
-        </label>
-        <label className="field">
-          Preview width (px)
-          <input
-            type="number"
-            min={80}
-            max={1280}
-            step={20}
-            value={previewWidth}
-            placeholder="320"
-            onChange={(e) => setPreviewWidth(e.target.value)}
-          />
-          <span className="hint">80–1280 · recorded in the video's file</span>
-        </label>
-        <label className="field">
-          Preview quality
-          <input
-            type="number"
-            min={0.1}
-            max={1}
-            step={0.05}
-            value={previewQuality}
-            placeholder="0.72"
-            onChange={(e) => setPreviewQuality(e.target.value)}
-          />
-          <span className="hint">0.1–1 · recorded in the video's file</span>
-        </label>
         <label className="field">
           Title
           <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={file?.name ?? 'My video'} />
         </label>
+        <div className="field">
+          <span>Video length</span>
+          <span className="mono" style={{ display: 'block', fontSize: '1.1em' }}>
+            {seconds > 0 ? formatClock(seconds) : '—'}
+          </span>
+          <span className="hint" style={{ display: 'block' }}>
+            Read from the video itself{source?.width ? ` · ${source.width}×${source.height}` : ''}
+            {source?.fps ? ` · ${source.fps} fps` : ''}
+          </span>
+        </div>
       </div>
+      <details className="field">
+        <summary style={{ cursor: 'pointer' }}>Advanced settings — chunks and previews (filled in with sensible defaults)</summary>
+        <div className="form-grid" style={{ marginTop: 10 }}>
+          <label className="field">
+            Time per chunk (seconds)
+            <input
+              type="number"
+              min={0}
+              value={chunkSeconds}
+              placeholder="5"
+              onChange={(e) => setChunkSeconds(e.target.value)}
+            />
+            <span className="hint">1 or more · chunks = length ÷ this · 5 by default</span>
+          </label>
+          <label className="field">
+            Image previews
+            <input
+              type="number"
+              min={0}
+              value={previews}
+              placeholder="100"
+              onChange={(e) => setPreviews(e.target.value)}
+            />
+            <span className="hint">
+              0 or more · 0 = no previews · at least 100, or one every 10 seconds ·{' '}
+              {previewWidthValue}px at quality {previewQualityValue} ≈{' '}
+              {previewEstimateMb > 0.01 ? `${previewEstimateMb.toFixed(2)} MB` : '0 MB'} total
+            </span>
+          </label>
+          <label className="field">
+            Preview width (px)
+            <input
+              type="number"
+              min={80}
+              max={1280}
+              step={20}
+              value={previewWidth}
+              placeholder="256"
+              onChange={(e) => setPreviewWidth(e.target.value)}
+            />
+            <span className="hint">80–1280 · 256 by default · recorded in the video's file</span>
+          </label>
+          <label className="field">
+            Preview quality
+            <input
+              type="number"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={previewQuality}
+              placeholder="0.5"
+              onChange={(e) => setPreviewQuality(e.target.value)}
+            />
+            <span className="hint">0.1–1 · 0.5 by default · recorded in the video's file</span>
+          </label>
+        </div>
+      </details>
       <div className="field">
         <span>Encodings — one row per quality: resolution and frame rate</span>
         {rows.map((row, index) => (
@@ -429,6 +480,11 @@ export function VvshCompose() {
                 </option>
               ))}
             </select>
+            {overSource(row) && (
+              <span className="small" title="This encoding is above what the video itself carries — the extra bytes add no detail" style={{ color: 'var(--warning, #b8860b)' }}>
+                ⚠
+              </span>
+            )}
             <span className="hint" style={{ minWidth: 96, whiteSpace: 'nowrap' }}>
               ≈ {(estimateBytes(row, seconds) / (1024 * 1024)).toFixed(1)} MB
             </span>
@@ -444,6 +500,17 @@ export function VvshCompose() {
           + Add encoding
         </button>
         <span className="hint">Each row is really encoded to its resolution and frame rate, so the sizes and sharpness differ.</span>
+        {source && (source.height > 0 || source.fps > 0) && rows.some(overSource) && (
+          <span className="banner warning small">
+            This video is {source.height}p{source.fps ? ` at ${source.fps} fps` : ''} — encoding it higher than that adds bytes without adding
+            detail. The marked rows are above the source.
+          </span>
+        )}
+        {duplicates.length > 0 && (
+          <span className="banner warning small">
+            Two encodings are configured the same ({duplicates.join(', ')}) — one of them is redundant and only adds bytes.
+          </span>
+        )}
       </div>
       {plan && (
         <span className="hint">

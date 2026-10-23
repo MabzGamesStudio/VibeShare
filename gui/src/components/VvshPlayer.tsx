@@ -8,8 +8,8 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { Download, FileDown, Gauge, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { chunkAt, pathToChunk, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
 import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream } from '../../../src/shared/vvsh-encode.js';
-import { fromBase64url } from '../../../src/shared/encoding.js';
-import { api, errorMessage } from '../api';
+import { fromBase64url, base64url } from '../../../src/shared/encoding.js';
+import { api, errorMessage, streamUrl } from '../api';
 import { debugLog, setDebugLogs } from '../log';
 import { useApp } from '../state';
 
@@ -124,6 +124,16 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   // Where MediaSource with WebM is unavailable, the same chunks still play through the
   // progressive path (init part + every chunk is a plain WebM file again).
   const segmented = meta.codec === 'vvsh-webm/1';
+  // A frames-mode stream with a known decoded size plays as a plain URL: the browser asks
+  // for the byte ranges its seek needs and only those chunks are fetched — skipping to
+  // chunk 267 fetches chunk 267 and starts there, never the 266 in between.
+  const native = useRef<string | null>(null);
+  const nativeFor = (id: string): string | null => {
+    const rendition = meta.bitrates.find((entry) => entry.id === id) ?? meta.bitrates[0];
+    if (segmented || !rendition.decodedBytes) return null;
+    const spec = { n: nodeId, r: file.root, c: meta.chunkCount, q: id, d: rendition.decodedBytes };
+    return streamUrl(`vvsh.${base64url(new TextEncoder().encode(JSON.stringify(spec)))}`);
+  };
   const mseMime = segmented && meta.codecs ? `video/webm; codecs="${meta.codecs}"` : '';
   const mseOk = segmented && typeof MediaSource !== 'undefined' && !!mseMime && MediaSource.isTypeSupported(mseMime);
   const inits = useRef(new Map<string, Uint8Array>());
@@ -258,6 +268,12 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const alive = useRef(true);
   useEffect(() => {
     setDebugLogs(Boolean(state?.settings.debugLogs));
+    const url = nativeFor(active.current);
+    if (url) {
+      native.current = url;
+      debugLog('play', 'range streaming on — the browser fetches only the byte ranges a seek needs');
+      setVideoUrl(url);
+    }
     return () => {
       alive.current = false;
     };
@@ -398,6 +414,25 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** Moves playback to another encoding without stopping it. */
   const switchTo = useCallback(
     async (id: string, at: number, play: boolean) => {
+      if (native.current) {
+        // A range stream: quality change is a new URL picked up at the same moment.
+        const v = video.current;
+        const here = v?.currentTime ?? at;
+        active.current = id;
+        if (!autoRef.current) setRendition(id);
+        const url = nativeFor(id);
+        if (url) {
+          native.current = url;
+          wantTime.current = here;
+          wantPlay.current = play;
+          debugLog('play', `quality ${id} — range stream continues at ${here.toFixed(1)}s`);
+          setVideoUrl((old) => {
+            if (old) staleUrls.current.push(old);
+            return url;
+          });
+        }
+        return;
+      }
       if (mseOk) {
         // Segments from the new encoding simply carry on at the playhead.
         active.current = id;
@@ -425,6 +460,15 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** From one moment of the video: fetch what is missing up to it, then play there. */
   const playFrom = useCallback(
     async (at: number, play = true) => {
+      if (native.current) {
+        debugLog('seek', `seek to ${at.toFixed(1)}s — range streaming: only the bytes this seek needs are fetched`);
+        const v = video.current;
+        if (v) {
+          v.currentTime = at;
+          if (play) void v.play().catch(() => undefined);
+        }
+        return;
+      }
       debugLog(
         'seek',
         `seek to ${at.toFixed(1)}s → chunk ${chunkAt(meta, at)}` +
@@ -646,6 +690,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             const v = e.currentTarget;
             // The thumb follows the video only while the user is not holding it.
             if (!scrubbingRef.current) setSeconds(v.currentTime);
+            if (native.current) return; // the browser's readahead handles what comes next
             // Keep the stream filled a configurable distance ahead while it plays (a
             // minute by default) — only those chunks get fetched, each verified and charged.
             const ahead = Math.max(meta.chunkSeconds, prefetchSeconds);

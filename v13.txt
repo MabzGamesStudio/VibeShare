@@ -1,0 +1,18 @@
+          <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Big previews: fewer items per screen, and fewer fetched at once.
+const MIN_WIDTH = { small: 240, medium: 340, large: 440 };
+
+function GridCard({ item, page, inline }: { item: FeedItem; page: PageConfig; inline: boolean }) {
+  const seen = usePreviewSeen(item);
+  return (
+    <div className={`content-card ${page.thumbnail ? '' : 'text-only'}`} ref={seen}>
+      {page.thumbnail && <ItemThumb item={item} inline={inline} />}
+      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap', gap: 4 }}>
+        <Fields item={item} fields={page.fields} variant="card" />
+        {!page.thumbnail && <ShareButton target={{ id: item.id, title: item.title }} />}

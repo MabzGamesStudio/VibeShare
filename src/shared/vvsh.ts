@@ -30,6 +30,9 @@ export interface VvshRendition {
   initHash?: string;
   /** How many bytes that init part takes. */
   initBytes?: number;
+  /** The decoded stream's total size in bytes: with `chunkCount` it maps byte ranges to
+   *  chunks exactly, so a player can ask for just the part of the file it needs. */
+  decodedBytes?: number;
 }
 
 /** How many of each frame type a chunk holds. */
@@ -427,7 +430,7 @@ const FILE_MAGIC = Uint8Array.from([0x56, 0x56, 0x53, 0x48]); // "VVSH"
 export function serializeVvshFile(file: VvshFile): Uint8Array {
   const pack = new Pack();
   pack.raw(FILE_MAGIC);
-  pack.u8(1);
+  pack.u8(2);
   pack.str(file.meta.codec);
   pack.str(file.meta.sourceMime ?? '');
   pack.u32(Math.round(file.meta.chunkSeconds * 1000));
@@ -445,6 +448,7 @@ export function serializeVvshFile(file: VvshFile): Uint8Array {
     pack.varint(rendition.kbps);
     pack.varint(rendition.fps ?? 0);
     pack.varint(rendition.bytes ?? 0);
+    pack.varint(rendition.decodedBytes ?? 0);
     if (file.meta.codec === 'vvsh-webm/1') {
       pack.u8(rendition.initHash ? 1 : 0);
       if (rendition.initHash) {
@@ -483,7 +487,8 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
     try {
       const unpack = new Unpack(bytes);
       unpack.raw(4);
-      if (unpack.u8() !== 1) throw new Error('Unsupported vvsh file version');
+      const version = unpack.u8();
+      if (version !== 1 && version !== 2) throw new Error('Unsupported vvsh file version');
       const codec = unpack.str();
       const sourceMime = unpack.str();
       const chunkSeconds = unpack.u32() / 1000;
@@ -504,6 +509,7 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
         const kbps = unpack.varint();
         const fps = unpack.varint();
         const bytes = unpack.varint();
+        const decodedBytes = version >= 2 ? unpack.varint() : 0;
         let initHash: string | undefined;
         let initBytes = 0;
         if (segmented) {
@@ -519,6 +525,7 @@ export function parseVvshFile(input: Uint8Array | string): VvshFile {
           ...(height ? { height } : {}),
           ...(fps ? { fps } : {}),
           ...(bytes ? { bytes } : {}),
+          ...(decodedBytes ? { decodedBytes } : {}),
           ...(initHash ? { initHash, initBytes } : {}),
         });
       }

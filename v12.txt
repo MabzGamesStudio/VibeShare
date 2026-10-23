@@ -1,0 +1,26 @@
+  ✔ keeps the file (metadata and root) and stores every branch and child on its own (140.482197ms)
+  ✔ charges per chunk for every object a user pulls while walking down from a branch (40.967578ms)
+  ✔ quotes a conversion from the metadata, the length and the encodings, and runs it (31.18697ms)
+✔ a provider storing a .vvsh stream (214.432109ms)
+▶ the video prefetch setting
+  ✔ keeps fetching a minute ahead by default, configurable within bounds (0.642325ms)
+✔ the video prefetch setting (0.775195ms)
+▶ a client streaming and exporting a .vvsh
+  ✔ skips to a timestamp and retrieves only that chunk, verified (27.938838ms)
+  ✔ hands out byte ranges of the decoded stream, fetching only the chunks they fall in (20.231946ms)
+  ✔ downloads the whole stream at one bitrate as a full video file (34.776573ms)
+✔ a client streaming and exporting a .vvsh (88.86865ms)
+ℹ tests 20
+ℹ suites 5
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1970.176349
+TESTDONE
+
+> vibeshare@0.1.0 build:gui
+> npm --prefix gui run build
+
+
