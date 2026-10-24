@@ -1,8 +1,9 @@
 import { ExternalLink, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { FeedItem } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
-import { controlEmbed, placeholderFor, playableFor, useMediaSrc, type Playable } from '../../media';
+import { controlEmbed, embedsBlocked, placeholderFor, playableFor, useMediaSrc, type Playable } from '../../media';
 import { gradientFor } from '../../util';
 import { FormatIcon } from '../ContentCard';
 
@@ -87,6 +88,14 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
     return (
       <div className="media-view">
         <Poster item={item} src={posterSrc} fit="cover" />
+        {embedsBlocked() && (
+          <p className="small faint embed-placeholder-text" style={{ position: 'absolute', bottom: 8, left: 10, right: 10, textAlign: 'center' }}>
+            Third-party embeds are off (they carry third-party tracking cookies) — allow them in{' '}
+            <Link className="link" to="/settings#privacy">
+              Settings → Privacy
+            </Link>
+          </p>
+        )}
         {page && (
           <a className="media-open button" href={page} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
             <ExternalLink size={15} /> Open on {platformOf(item.id).name}

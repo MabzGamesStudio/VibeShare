@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import type { ContentItem, Page } from '../src/shared/clientapi.js';
+import { BloomFilter } from '../src/shared/bloom.js';
+import { admin, clientFor, startAlgorithm } from './helpers.js';
+
+describe('search suggests VibeShare-published content first', () => {
+  it('puts matching published content at the front, seen or not', async () => {
+    const node = await startAlgorithm();
+    const url = node.url();
+    try {
+      const vid = `vs1${'e'.repeat(52)}`;
+      await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: `${vid}~yt:pub1`, title: 'Aurora published', format: 'video', rating: 'all' } });
+      await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:aur1', title: 'Aurora from elsewhere', format: 'video', rating: 'all' } });
+
+      const client = clientFor(url);
+      const search = (body: Record<string, unknown>) => client.json<Page<ContentItem>>('/v1/search', { body, auth: false });
+
+      const first = await search({ query: 'aurora' });
+      assert.equal(first.items[0].id, `${vid}~yt:pub1`, 'the VibeShare-published match comes first');
+
+      // Even once the reader has seen both, the published match is still suggested
+      // (marked as seen) while the rest of the seen content steps aside.
+      const seen = new BloomFilter(10_000);
+      seen.add(`${vid}~yt:pub1`);
+      seen.add('yt:aur1');
+      const withSeen = await search({ query: 'aurora', bloom: seen.toJSON() });
+      assert.ok(withSeen.items.some((item) => item.id === `${vid}~yt:pub1`), 'still suggested even though it was seen');
+      assert.ok(withSeen.items[0].id === `${vid}~yt:pub1`, 'and still first');
+      assert.ok(!withSeen.items.some((item) => item.id === 'yt:aur1'), 'the rest respects the seen filter');
+    } finally {
+      await node.stop();
+    }
+  });
+});

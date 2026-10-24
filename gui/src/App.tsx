@@ -8,9 +8,11 @@ import { PageIconView } from './components/feed/icons';
 import { PageEditor, pagePath } from './components/feed/PageEditor';
 import { PageView } from './components/feed/PageView';
 import { ShareProvider } from './components/Share';
+import { CookieConsent } from './components/CookieConsent';
 import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
 import { DualPage } from './pages/Dual';
+import { DevDataPage } from './pages/DevData';
 import { EarnPage } from './pages/Earn';
 import { HistoryPage } from './pages/History';
 import { LibraryPage } from './pages/Library';
@@ -195,10 +197,19 @@ export function App() {
   const location = useLocation();
   useEffect(() => setOpen(false), [location.pathname]);
 
+  // The local static data host page exists in developer builds only.
+  const [devBuild, setDevBuild] = useState(false);
+  useEffect(() => {
+    api<{ dev: boolean }>('/api/dev/info')
+      .then((answer) => setDevBuild(answer.dev))
+      .catch(() => setDevBuild(false));
+  }, []);
+
   const pages = state?.settings.pages.filter((page) => page.sidebar) ?? [];
 
   return (
     <ShareProvider>
+      <CookieConsent />
       <div className="app">
         <aside className={`sidebar ${open ? 'open' : ''}`}>
           <div className="brand">
@@ -220,6 +231,7 @@ export function App() {
           <NavItem to="/library" icon={<BookMarked size={19} />} label="Library" />
           <NavItem to="/history" icon={<History size={19} />} label="History" />
           <NavItem to="/publish" icon={<Upload size={19} />} label="Publish" />
+          {devBuild && <NavItem to="/devdata" icon={<Server size={19} />} label="Dev data" />}
           <div className="nav-section">Network</div>
           <NavItem to="/nodes" icon={<Network size={19} />} label="Nodes" count={state?.nodes.length} />
           <NavItem to="/wallet" icon={<Coins size={19} />} label="Credits" />
@@ -280,6 +292,7 @@ export function App() {
               <Route path="/watch/:id" element={<WatchPage />} />
               <Route path="/creator/:id" element={<CreatorPage />} />
               <Route path="/publish" element={<PublishPage />} />
+              <Route path="/devdata" element={<DevDataPage />} />
               <Route path="/library" element={<LibraryPage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/nodes" element={<NodesPage />} />

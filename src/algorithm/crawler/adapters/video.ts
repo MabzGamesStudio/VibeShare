@@ -347,6 +347,9 @@ export function mapArchive(doc: ArchiveDoc, apiUrl: string): Discovered | null {
     tags,
     publishedAt: toIso(doc.publicdate),
     creator: creator ? { id: `archive:${creator.toLowerCase().slice(0, 80)}`, name: creator.slice(0, 120) } : undefined,
+    // Images are their own media: the item's picture loads right in the feed, no
+    // embedded player and no play button over it.
+    ...(format === 'image' ? { media: { url: `${base}/services/img/${encodeURIComponent(identifier)}`, type: 'image' as const } } : {}),
     thumbnailUrl: `${base}/services/img/${encodeURIComponent(identifier)}`,
     pageUrl: `${base}/details/${encodeURIComponent(identifier)}`,
     stats: { views: doc.downloads },

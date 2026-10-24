@@ -2948,3 +2948,35 @@ button.layout-option.on {
 .thumb.thumb-image img {
   object-fit: contain;
 }
+
+/* First-visit cookie choice: third-party embeds bring third-party tracking cookies,
+   and nothing of the sort loads before the person chooses. Non-blocking, two equal
+   answers, and the site is fully usable either way. */
+.cookie-consent {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 500;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.cookie-consent-body {
+  pointer-events: auto;
+  max-width: 640px;
+  width: 100%;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cookie-consent-body .row {
+  flex-wrap: wrap;
+}

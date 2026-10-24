@@ -6,6 +6,7 @@ import { AlgorithmNode, type AlgorithmConfig } from './algorithm/node.js';
 import { ClientNode } from './client/daemon.js';
 import type { BaseConfig, DeepPartial } from './commerce/node.js';
 import { startDemo } from './demo/demo.js';
+import { sampleCommentChain, startMaliciousLoops, startMaliciousNetwork } from './demo/malicious.js';
 import { ProviderNode, type ProviderConfig } from './provider/node.js';
 import { findGuiDir } from './shared/assets.js';
 import { log } from './shared/log.js';
@@ -180,6 +181,36 @@ async function runDemo(flags: Flags): Promise<void> {
   const dataDir = resolve(str(flags, 'data') ?? defaultDataDir('demo'));
   const basePort = num(flags, 'port') ?? 7700;
   const demo = await startDemo({ dataDir, basePort, guiDir: findGuiDir() });
+  // `demo --malicious`: three extra servers — a lying provider, a lying algorithm node
+  // and a misbehaving client — wired into the demo network as peers and client nodes.
+  // Developer testing only; none of this reaches production builds.
+  let stopMalicious = () => {};
+  if (flags.malicious) {
+    const network = await startMaliciousNetwork();
+    network.algorithm.setComments(sampleCommentChain(), 'tamper');
+    const admin = async (url: string, token: string, path: string, body: unknown) => {
+      await fetch(url + path, {
+        method: 'PUT',
+        headers: { 'x-admin-token': token, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch(() => undefined);
+    };
+    await admin(demo.provider.url(), demo.provider.adminToken, '/v1/admin/peers', {
+      peers: [{ ref: network.provider.reference(), send: false, receive: true }],
+    });
+    await admin(demo.algorithm.url(), demo.algorithm.adminToken, '/v1/admin/peers', {
+      peers: [{ ref: network.algorithm.reference(), fetch: true }],
+    });
+    await demo.client.nodes.add(`${network.provider.reference()}\n${network.algorithm.reference()}`);
+    const stopLoops = startMaliciousLoops(network, { providerUrl: demo.provider.url(), algorithmUrl: demo.algorithm.url() });
+    stopMalicious = () => {
+      stopLoops();
+      void network.stop();
+    };
+    console.log(`  Malicious network:   provider ${network.provider.reference()}
+                         algorithm ${network.algorithm.reference()}   (its comment chain is tampered)
+`);
+  }
   console.log(`
   VibeShare demo network is running.
 
@@ -197,7 +228,10 @@ async function runDemo(flags: Flags): Promise<void> {
   Data: ${dataDir} (delete it to start over)
 `);
   if (flags.open) openInBrowser(demo.client.url());
-  onShutdown(() => demo.stop());
+  onShutdown(() => {
+    stopMalicious();
+    void demo.stop();
+  });
 }
 
 function info(flags: Flags): void {

@@ -963,8 +963,12 @@ export function WatchPage() {
                 <p style={{ marginTop: 14, fontWeight: 600 }}>{title}</p>
                 {creator && <p className="small muted">{creator.name}</p>}
                 <p className="small faint embed-placeholder-text" style={{ marginTop: 10, maxWidth: 340 }}>
-                  External content is turned off. Only content hosted on the network plays here — this is a placeholder standing in for the
-                  platform's player.
+                  This is a placeholder standing in for the platform's player. Third-party embeds are turned off: an embedded player from another
+                  platform brings <strong>third-party tracking cookies</strong> with it. You can allow them — and change your mind at any time — in{' '}
+                  <Link className="link" to="/settings#privacy">
+                    Settings → Privacy
+                  </Link>
+                  .
                 </p>
               </div>
             </div>

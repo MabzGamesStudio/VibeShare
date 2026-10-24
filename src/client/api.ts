@@ -3,6 +3,7 @@
 // routes in a service worker. Browser-safe.
 import type { CommentPostRequest, ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
 import { MiB, type ManifestMeta } from '../shared/content.js';
+import { isDevBuild } from '../shared/devbuild.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, Preferences } from '../shared/protocol.js';
@@ -80,6 +81,23 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       results.push(await nodes.client(entry).json('/v1/content-urls', { body: item }));
     }
     return { results };
+  });
+  // Pull a copy now — the provider downloads from the offered URL and pays for it. With
+  // the dev host below, the whole URL → credits round trip can be tested on one machine.
+  on('POST', '/api/nodes/:id/content-urls/fetch', async (request) => {
+    const entry = node(request);
+    const body = await request.json<{ cid?: string }>();
+    return nodes.client(entry).json('/v1/content-urls/fetch', { body: { cid: body.cid } });
+  });
+  // Developer builds only: a static data host on the provider, so a full or base URL can
+  // be offered and fetched locally. Production builds do not carry these endpoints.
+  on('GET', '/api/dev/info', () => ({ dev: isDevBuild() }));
+  on('GET', '/api/nodes/:id/dev-host', (request) => nodes.client(node(request)).json('/v1/dev/host'));
+  on('POST', '/api/nodes/:id/dev-host', async (request) => {
+    const entry = node(request);
+    const body = await request.json<{ cid?: string; data?: string }>(64 * 1024 * 1024);
+    const data = fromBase64url(String(body.data ?? ''));
+    return nodes.client(entry).json(`/v1/dev/host/${encodeURIComponent(String(body.cid ?? ''))}`, { method: 'PUT', raw: data });
   });
   on('GET', '/api/nodes/:id/payments', (request) => nodes.client(node(request)).json('/v1/payments', { auth: false }));
   on('POST', '/api/nodes/:id/invoices', async (request) => {

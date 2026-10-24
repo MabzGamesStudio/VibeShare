@@ -28,6 +28,7 @@ import {
 import { ensureDir, JsonFile } from '../shared/store.js';
 import { Auth, type SignupConfig } from './auth.js';
 import { Ledger } from './ledger.js';
+import { Moderation } from './moderation.js';
 import { Payments, type PaymentConfig } from './payments.js';
 import { serveStatic } from '../shared/assets.js';
 
@@ -112,6 +113,8 @@ export abstract class BaseNode<C extends BaseConfig> {
   readonly ledger: Ledger;
   readonly auth: Auth;
   readonly payments: Payments;
+  /** Bans, suspensions and rate limits for accounts, IPs and peers — shared with peers. */
+  readonly moderation: Moderation;
   protected readonly configFile: JsonFile<C>;
   private overrides: DeepPartial<C>;
   private server: Server | null = null;
@@ -137,6 +140,7 @@ export abstract class BaseNode<C extends BaseConfig> {
     this.overrides = options.overrides ?? {};
     this.ledger = new Ledger(this.path('ledger.json'), this.path('ledger-audit.jsonl'));
     this.auth = new Auth(this.ledger, () => this.identity.id, () => this.config.signup);
+    this.moderation = new Moderation(this.path('moderation.json'));
     this.payments = new Payments(this.path('payments.json'), this.ledger, () => this.config.payments);
     this.tor = new TorRouter(() => ({ mode: this.config.tor.outbound, proxy: this.config.tor.proxy }));
   }
@@ -345,6 +349,90 @@ export abstract class BaseNode<C extends BaseConfig> {
       this.ledger.setNote(ctx.params.id, String(body.note ?? '').slice(0, 500));
       return { ok: true };
     });
+
+    // ---- moderation: bans, suspensions and rate limits (accounts, IPs and peers)
+    router.get('/v1/admin/moderation', (ctx) => {
+      this.requireAdmin(ctx);
+      return { entries: this.moderation.list() };
+    });
+    router.post('/v1/admin/moderation', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ subject?: string; target?: string; action?: string; until?: string; perMinute?: number; reason?: string }>(ctx.req);
+      const entry = this.moderation.add({
+        subject: body.subject as never,
+        target: String(body.target ?? ''),
+        action: body.action as never,
+        until: body.until,
+        perMinute: body.perMinute,
+        reason: body.reason,
+      });
+      // A new ban travels: peers pick it up at once instead of at the next sync round.
+      void this.syncModeration();
+      return { entry };
+    });
+    router.delete('/v1/admin/moderation/:id', (ctx) => {
+      this.requireAdmin(ctx);
+      if (!this.moderation.remove(ctx.params.id)) throw notFound('No such moderation entry');
+      return { ok: true };
+    });
+    router.post('/v1/admin/moderation/sync', async (ctx) => {
+      this.requireAdmin(ctx);
+      return this.syncModeration();
+    });
+
+    // ---- moderation between peers: what this node has, and what it takes in
+    const peerCaller = (ctx: Ctx): string => {
+      const account = this.auth.require(ctx);
+      const peers = this.moderationPeers();
+      if (!peers.some((ref) => parseNodeRef(ref)?.id === account.id)) throw forbidden('Not a peer of this node');
+      return account.id;
+    };
+    router.get('/v1/peers/moderation', (ctx) => {
+      peerCaller(ctx);
+      return { entries: this.moderation.export() };
+    });
+    router.post('/v1/peers/moderation', async (ctx) => {
+      const from = peerCaller(ctx);
+      const body = await readJson<{ entries?: unknown[] }>(ctx.req);
+      // The answer carries this node's list back: one round is a two-way exchange.
+      return { accepted: this.moderation.merge(body.entries ?? [], from), entries: this.moderation.export() };
+    });
+  }
+
+  /** Peers this node exchanges moderation entries with (node references). */
+  protected moderationPeers(): string[] {
+    return [];
+  }
+
+  /** Two-way moderation exchange with every peer: what they banned, what we banned. */
+  async syncModeration(): Promise<{ peers: number; accepted: number }> {
+    const { NodeClient } = await import('../shared/nodeclient.js');
+    let peers = 0;
+    let accepted = 0;
+    for (const ref of this.moderationPeers()) {
+      const parsed = parseNodeRef(ref);
+      if (!parsed) continue;
+      try {
+        const client = new NodeClient({
+          url: parsed.url,
+          expectedId: parsed.id,
+          expectedType: parsed.type,
+          auth: 'identity',
+          identity: this.identity,
+          transport: () => this.transport(parsed.url),
+        });
+        const answer = await client.json<{ entries?: unknown[]; accepted?: number }>('/v1/peers/moderation', {
+          method: 'POST',
+          body: { entries: this.moderation.export() },
+          timeoutMs: 15_000,
+        });
+        accepted += this.moderation.merge(answer.entries ?? [], parsed.id);
+        peers++;
+      } catch (error) {
+        log.debug(`Moderation sync with ${parsed.id.slice(0, 12)}: ${(error as Error).message}`);
+      }
+    }
+    return { peers, accepted };
   }
 
   protected adminStatus(): Record<string, unknown> {
@@ -382,6 +470,14 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
       cors: true,
       trustProxy: this.config.trustProxy,
       name: this.type,
+      // Bans, suspensions and rate limits apply to every request before routing — the
+      // admin itself is never locked out (it is how bans get lifted again).
+      guard: (ctx) => {
+        const header = ctx.req.headers.authorization ?? '';
+        const token = String(ctx.req.headers['x-admin-token'] ?? (header.startsWith('Bearer ') ? header.slice(7) : ''));
+        if (token && safeEqual(token.trim(), this.adminToken)) return;
+        this.moderation.enforce({ ip: ctx.ip, account: this.auth.peek(ctx)?.id });
+      },
       fallback: async (ctx) => {
         if (ctx.req.method !== 'GET' && ctx.req.method !== 'HEAD') return false;
         if (ctx.url.pathname === '/') {

@@ -104,6 +104,13 @@ export class Auth {
 
   /** The account behind the request's bearer token, if any. */
   account(ctx: Ctx): Account | undefined {
+    const found = this.peek(ctx);
+    if (found === null) throw unauthorized('Unknown or expired token');
+    return found ?? undefined;
+  }
+
+  /** The account behind the request's bearer token, without throwing: null = a bad token. */
+  peek(ctx: Ctx): Account | null | undefined {
     const header = ctx.req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!token) return undefined;
@@ -111,7 +118,7 @@ export class Auth {
     let account: Account | undefined;
     if (session && session.expires > Date.now()) account = this.ledger.get(session.accountId);
     else account = this.ledger.byToken(sha256hex(token));
-    if (!account) throw unauthorized('Unknown or expired token');
+    if (!account) return null;
     this.ledger.touch(account);
     return account;
   }

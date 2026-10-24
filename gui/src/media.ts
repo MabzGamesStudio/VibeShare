@@ -34,6 +34,11 @@ export function setBlockExternalEmbeds(blocked: boolean): void {
   blockExternal = blocked;
 }
 
+/** True when external content is turned off (settings or the cookie choice). */
+export function embedsBlocked(): boolean {
+  return blockExternal;
+}
+
 /** True when this item is external (no cid) and external content is disabled. */
 export function placeholderFor(item: Pick<FeedItem, 'id'>): boolean {
   return blockExternal && !parseContentId(item.id)?.native;
@@ -59,6 +64,12 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
   if (item.media && /^https?:\/\//.test(item.media.url)) {
     return { kind: item.media.type, src: item.media.url, page: item.pageUrl ?? embed.page, fallback: embed.kind !== 'none' ? embed : undefined };
   }
+  // An Internet Archive image with no media URL still shows as the image itself — the
+  // feed renders it right away instead of an embedded player with a play button.
+  const source = parsed?.sources[0];
+  if (item.format === 'image' && source?.scheme === 'ia') {
+    return { kind: 'image', src: `https://archive.org/services/img/${encodeURIComponent(source.value)}`, page: item.pageUrl ?? embed.page };
+  }
   return { ...embed, page: item.pageUrl ?? embed.page };
 }
 
@@ -69,6 +80,9 @@ export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumb
   if (item.format === 'image') {
     if (parsed?.native) return streamUrl(parsed.base);
     if (item.media?.type === 'image') return item.media.url;
+    // An Internet Archive image is its own picture: it loads in the feed at once.
+    const ia = parsed?.sources[0];
+    if (ia?.scheme === 'ia') return `https://archive.org/services/img/${encodeURIComponent(ia.value)}`;
   }
   return item.thumbnailUrl;
 }

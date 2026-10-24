@@ -216,9 +216,39 @@ function Accounts() {
                   <td className="small">{row.spent}</td>
                   <td className="tiny faint">{timeAgo(row.lastSeen ?? row.createdAt)}</td>
                   <td>
-                    <button className="small" onClick={() => setAdjusting(row)}>
-                      Adjust
-                    </button>
+                    <div className="row" style={{ gap: 4 }}>
+                      <button className="small" onClick={() => setAdjusting(row)}>
+                        Adjust
+                      </button>
+                      <button
+                        className="small"
+                        title="Ban this account for good"
+                        onClick={async () => {
+                          try {
+                            await admin('/v1/admin/moderation', { body: { subject: 'account', target: row.id, action: 'permaban', reason: 'banned by operator' } });
+                            show(`Banned ${row.id.slice(0, 16)}…`);
+                          } catch (e) {
+                            show(message(e));
+                          }
+                        }}
+                      >
+                        Ban
+                      </button>
+                      <button
+                        className="small"
+                        title="Hold this account to 30 requests a minute"
+                        onClick={async () => {
+                          try {
+                            await admin('/v1/admin/moderation', { body: { subject: 'account', target: row.id, action: 'ratelimit', perMinute: 30, reason: 'rate limited by operator' } });
+                            show(`Rate limited ${row.id.slice(0, 16)}… to 30/min`);
+                          } catch (e) {
+                            show(message(e));
+                          }
+                        }}
+                      >
+                        Limit
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -260,6 +290,172 @@ function Accounts() {
             </label>
           </div>
         </Modal>
+      )}
+    </div>
+  );
+}
+
+interface ModRow {
+  id: string;
+  subject: string;
+  target: string;
+  action: string;
+  until?: string;
+  perMinute?: number;
+  reason?: string;
+  by: string;
+}
+
+/** Bans, suspensions and rate limits for accounts, IPs and node peers — kept and shared. */
+function ModerationPanel() {
+  const [rows, setRows] = useState<ModRow[] | null>(null);
+  const [subject, setSubject] = useState('account');
+  const [target, setTarget] = useState('');
+  const [action, setAction] = useState('permaban');
+  const [until, setUntil] = useState('');
+  const [perMinute, setPerMinute] = useState('30');
+  const [reason, setReason] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [toast, show] = useToast();
+  const load = useCallback(() => {
+    admin<{ entries: ModRow[] }>('/v1/admin/moderation')
+      .then((r) => setRows(r.entries))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+  const add = async () => {
+    if (!target) return show('Give the account id, IP address or peer node id to moderate');
+    try {
+      await admin('/v1/admin/moderation', {
+        body: {
+          subject,
+          target,
+          action,
+          reason,
+          ...(action === 'tempban' ? { until: until ? new Date(until).toISOString() : undefined } : {}),
+          ...(action === 'ratelimit' ? { perMinute: Number(perMinute) || 30 } : {}),
+        },
+      });
+      setTarget('');
+      load();
+    } catch (e) {
+      show(message(e));
+    }
+  };
+  return (
+    <div className="card form-stack">
+      <h3>Moderation</h3>
+      <p className="small muted">
+        Ban for good, suspend for a while, or hold to so many requests a minute — accounts, whole IP addresses and node peers alike. Entries live on this
+        node and travel to its peers when they sync, so a ban here reaches the rest of the network.
+      </p>
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="form-grid">
+        <label className="field">
+          Subject
+          <select value={subject} onChange={(e) => setSubject(e.target.value)}>
+            <option value="account">Account</option>
+            <option value="ip">IP address</option>
+            <option value="peer">Node peer</option>
+          </select>
+        </label>
+        <label className="field">
+          Target
+          <input value={target} onChange={(e) => setTarget(e.target.value)} placeholder={subject === 'ip' ? '203.0.113.5' : 'vk1… or account id'} />
+        </label>
+        <label className="field">
+          Action
+          <select value={action} onChange={(e) => setAction(e.target.value)}>
+            <option value="permaban">Ban for good</option>
+            <option value="tempban">Suspend for a while</option>
+            <option value="ratelimit">Rate limit</option>
+          </select>
+        </label>
+        {action === 'tempban' && (
+          <label className="field">
+            Until
+            <input type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
+          </label>
+        )}
+        {action === 'ratelimit' && (
+          <label className="field">
+            Requests / minute
+            <input type="number" min={1} value={perMinute} onChange={(e) => setPerMinute(e.target.value)} />
+          </label>
+        )}
+        <label className="field">
+          Reason
+          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="spam, abuse, flooding…" />
+        </label>
+      </div>
+      <div className="row">
+        <button className="primary" onClick={() => void add()}>
+          Apply
+        </button>
+        <button
+          disabled={syncing}
+          onClick={async () => {
+            setSyncing(true);
+            try {
+              const answer = await admin<{ peers: number; accepted: number }>('/v1/admin/moderation/sync', { method: 'POST', body: {} });
+              show(`Synced with ${answer.peers} peer${answer.peers === 1 ? '' : 's'} — took in ${answer.accepted}`);
+              load();
+            } catch (e) {
+              show(message(e));
+            }
+            setSyncing(false);
+          }}
+        >
+          {syncing ? 'Syncing…' : 'Sync with peers'}
+        </button>
+      </div>
+      {!rows ? (
+        <Loading />
+      ) : rows.length === 0 ? (
+        <p className="small muted">Nothing moderated right now.</p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Subject</th>
+              <th>Target</th>
+              <th>Action</th>
+              <th>Reason</th>
+              <th>By</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="small">{row.subject}</td>
+                <td className="mono tiny" title={row.target}>
+                  {row.target.length > 26 ? `${row.target.slice(0, 26)}…` : row.target}
+                </td>
+                <td className="small">
+                  {row.action === 'permaban'
+                    ? 'banned for good'
+                    : row.action === 'tempban'
+                      ? `suspended until ${new Date(row.until ?? '').toLocaleString()}`
+                      : `${row.perMinute ?? 30}/min`}
+                </td>
+                <td className="small">{row.reason ?? '—'}</td>
+                <td className="tiny faint">{row.by}</td>
+                <td>
+                  <button
+                    className="small"
+                    onClick={async () => {
+                      await admin(`/v1/admin/moderation/${row.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                      load();
+                    }}
+                  >
+                    Lift
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );
@@ -812,7 +1008,12 @@ export function AdminApp() {
         ))}
       </div>
       {tab === 'overview' && <Overview status={status} />}
-      {tab === 'accounts' && <Accounts />}
+      {tab === 'accounts' && (
+        <>
+          <Accounts />
+          <ModerationPanel />
+        </>
+      )}
       {tab === 'payments' && <Payments />}
       {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} />}
       {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}

@@ -948,8 +948,18 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
       const platform = String(body.filters?.platform ?? '').slice(0, 40);
       if (platform) visible = visible.filter((entry) => sourceKeyOf(entry) === platform);
-      visible = this.withoutSeen(visible, seen);
-      const results = this.bySource(this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry));
+      // Content published on VibeShare is never dropped by the seen filters: matching the
+      // query is enough, however well the reader already knows it.
+      const published = visible.filter((entry) => entry.id.startsWith('vs1'));
+      const others = this.withoutSeen(
+        visible.filter((entry) => !entry.id.startsWith('vs1')),
+        seen
+      );
+      const searched = this.registry.search([...published, ...others], body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry);
+      // A few of the matching VibeShare-published pieces come first, whatever the ranking.
+      const first = searched.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
+      const rest = searched.filter((entry) => !first.includes(entry));
+      const results = this.bySource([...first, ...rest]);
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
     });
@@ -1859,6 +1869,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (ref?.id === account.id) return { ref: peer.ref, url: ref.url, id: ref.id };
     }
     throw forbidden('Not a peer of this node');
+  }
+
+  /** Moderation entries travel with the same peers content metadata syncs with. */
+  protected moderationPeers(): string[] {
+    return this.config.peering.peers.map((peer) => peer.ref);
   }
 
   /** A client talking to one configured peer as this node. */

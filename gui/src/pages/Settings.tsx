@@ -21,6 +21,7 @@ import { PageEditor } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { useApp } from '../state';
+import { chooseConsent, loadConsent } from '../consent';
 import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
 import { HistorySection } from './History';
 import { splitList } from '../util';
@@ -854,6 +855,38 @@ function LogsCard() {
   );
 }
 
+/** Third-party embeds and their tracking cookies: the consent choice, as easy to
+ *  withdraw as it was to make. */
+function EmbedsCard() {
+  const { updateSettings } = useApp();
+  const [choice, setChoice] = useState(() => loadConsent()?.choice ?? null);
+  const record = loadConsent();
+  return (
+    <div className="card form-stack">
+      <h2>Third-party embeds and cookies</h2>
+      <p className="small muted">
+        Embedded players from other platforms (YouTube, Vimeo, the Internet Archive, …) load <strong>third-party tracking cookies</strong> that follow
+        you across sites. Nothing from another platform loads until you allow it here — and withdrawing this choice is exactly as easy as making it.
+        Your choice is stored on this device only.
+      </p>
+      <Switch
+        checked={choice === 'accepted'}
+        onChange={(allow) => {
+          chooseConsent(allow ? 'accepted' : 'rejected');
+          setChoice(loadConsent()?.choice ?? null);
+          void updateSettings({ blockExternalEmbeds: !allow });
+        }}
+        label="Allow third-party embeds (they carry third-party tracking cookies)"
+      />
+      <span className="hint">
+        {record
+          ? `Chosen ${new Date(record.at).toLocaleString()} — change it here at any time.`
+          : 'No choice made yet: embeds stay off until you choose.'}
+      </span>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { state, updateSettings } = useApp();
   const location = useLocation();
@@ -972,14 +1005,9 @@ export function SettingsPage() {
           <div className="card form-stack">
             <h2>Playback and storage</h2>
             <Switch checked={s.autoplay} onChange={(autoplay) => void updateSettings({ autoplay })} label="Start playing reviewed content automatically" />
-            <Switch
-              checked={s.blockExternalEmbeds}
-              onChange={(blockExternalEmbeds) => void updateSettings({ blockExternalEmbeds })}
-              label="Disable all external content embeds"
-            />
             <span className="hint">
-              When on, only content hosted on the network (its cid) plays and only its metadata shows. External platform players and previews
-              are replaced by a placeholder.
+              When third-party embeds are off (Settings → Privacy), only content hosted on the network (its cid) plays and only its metadata shows —
+              external platform players and previews are replaced by a placeholder.
             </span>
             <div className="form-grid">
               <label className="field">
@@ -1091,6 +1119,7 @@ export function SettingsPage() {
 
       {tab === 'privacy' && (
         <>
+          <EmbedsCard />
           <TorCard />
         </>
       )}

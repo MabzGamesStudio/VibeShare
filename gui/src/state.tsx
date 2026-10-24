@@ -3,6 +3,7 @@ import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientap
 import { useLocation } from 'react-router-dom';
 import { api, errorMessage, onNodesChanged } from './api';
 import { setBlockExternalEmbeds } from './media';
+import { embedsAllowed, loadConsent, onConsentChange } from './consent';
 
 interface Toast {
   id: number;
@@ -76,9 +77,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = theme === 'system' ? '' : theme;
   }, [state?.settings.theme]);
 
-  // Hide every external embed and preview when the user disabled them.
+  // External embeds are off until the person allows third-party cookies: both the
+  // consent choice and the setting have to say yes before anything from another
+  // platform loads, and a consent change applies at once.
   useEffect(() => {
-    setBlockExternalEmbeds(Boolean(state?.settings.blockExternalEmbeds));
+    const apply = () => setBlockExternalEmbeds(Boolean(state?.settings.blockExternalEmbeds) || !embedsAllowed(loadConsent()));
+    apply();
+    return onConsentChange(apply);
   }, [state?.settings.blockExternalEmbeds]);
 
   const value = useMemo<AppContext>(

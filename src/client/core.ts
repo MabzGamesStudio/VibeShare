@@ -179,11 +179,18 @@ export class ClientCore {
    * only goes to content actually opened before (the selected filter): a preview is not
    * a watch, so the first open of previewed content is never marked watched.
    */
-  private applySeenFilters(items: FeedItem[]): FeedItem[] {
+  private applySeenFilters(items: FeedItem[], keepPublished = false): FeedItem[] {
     const rank = this.settings.seenContentMode === 'rank';
     const shown: FeedItem[] = [];
     const demoted: FeedItem[] = [];
     for (const item of items) {
+      // Search results keep matching VibeShare-published content at the front even when
+      // the reader has seen it: that is what the query asked for.
+      if (keepPublished && item.id.startsWith('vs1')) {
+        const identity = { id: item.id, contentId: item.contentId, link: item.link };
+        shown.push(this.blooms.sees('selected', identity) ? { ...item, seen: true } : item);
+        continue;
+      }
       const identity = { id: item.id, contentId: item.contentId, link: item.link };
       const seen = this.blooms.sees('selected', identity) || this.blooms.sees('preview', identity);
       if (!seen) {
@@ -237,7 +244,7 @@ export class ClientCore {
           const page = await ask(node, 24);
           return {
             items: seenContent
-              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
+              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)), kind === 'search')
               : page.items.filter(wanted).map((item) => this.feedItem(node, item)),
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
@@ -277,7 +284,7 @@ export class ClientCore {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    return { items: seenContent ? this.applySeenFilters(items) : items, cursor: more ? encodeCursor(next) : undefined, errors };
+    return { items: seenContent ? this.applySeenFilters(items, kind === 'search') : items, cursor: more ? encodeCursor(next) : undefined, errors };
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */

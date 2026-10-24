@@ -2,6 +2,7 @@ import { isAbsolute } from 'node:path';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import type { Account } from '../commerce/ledger.js';
 import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { isDevBuild } from '../shared/devbuild.js';
 import { buildManifestFromFile } from '../shared/contentfile.js';
 import type { ContentLink, ContentUrlRecord, ContentUrlSubmission } from '../shared/protocol.js';
 import {
@@ -610,6 +611,11 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     throw forbidden('Not a peer of this node in that direction');
   }
 
+  /** Moderation entries travel with the same peers content syncs with. */
+  protected moderationPeers(): string[] {
+    return this.config.peering.peers.map((peer) => peer.ref);
+  }
+
   /** A client talking to one configured peer as this node. */
   private peerClient(peer: { ref: string }): NodeClient {
     const ref = parseNodeRef(peer.ref)!;
@@ -731,6 +737,34 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
       return { has: Object.fromEntries(ids.map((id) => [id, Boolean(this.store.getContent(String(id)))])) };
     });
+
+    // ---- developer builds only: a static data host for testing the URL flows locally.
+    // Packaged releases (NODE_ENV=production) never register these routes.
+    if (isDevBuild()) {
+      const devHost = new JsonFile<{ files: Record<string, string> }>(this.path('dev-host.json'), () => ({ files: {} }));
+      router.put('/v1/dev/host/:cid', async (ctx) => {
+        this.auth.require(ctx);
+        const data = await readBody(ctx.req, 64 * 1024 * 1024);
+        const cid = String(ctx.params.cid ?? '');
+        if (bytesCid(data) !== cid) throw badRequest('The bytes do not hash to this cid');
+        devHost.data.files[cid] = Buffer.from(data).toString('base64');
+        devHost.changed();
+        return { ok: true, cid, size: data.length };
+      });
+      router.get('/v1/dev/host', () => ({
+        files: Object.entries(devHost.data.files).map(([cid, data]) => ({ cid, size: Buffer.from(data, 'base64').length })),
+      }));
+      const serve = (ctx: Ctx) => {
+        const kept = devHost.data.files[String(ctx.params.cid ?? '')];
+        if (!kept) throw notFound('Nothing hosted under that cid');
+        const data = Buffer.from(kept, 'base64');
+        ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(data.length) }).end(data);
+        return undefined;
+      };
+      router.get('/v1/dev/host/:cid', serve);
+      // The base-URL shape: a client may offer `<base>`, and the provider queries `<base>/<cid>`.
+      router.get('/v1/dev/host/base/:cid', serve);
+    }
 
     // Downloadable content copies (feature): a client registers a download URL and its
     // cid, or a base URL. This node pulls content from it and pays the client per download
