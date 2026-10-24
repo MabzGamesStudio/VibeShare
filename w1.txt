@@ -1,0 +1,4 @@
+429:      const takeStart = Math.max(0, from - chunkStart);
+431:      if (takeEnd > takeStart) pieces.push(decoded.subarray(takeStart, takeEnd));
+1096:        previews: body.previews,
+1131:          previews: job.previews,

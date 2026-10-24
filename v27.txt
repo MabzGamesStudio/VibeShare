@@ -1,0 +1,21 @@
+            // The thumb follows the video only while the user is not holding it.
+            if (!scrubbingRef.current) setSeconds(v.currentTime);
+            if (native.current) return; // the browser's readahead handles what comes next
+            if (mseOk) {
+              // Segmented: keep only the window around what is playing filled — the
+              // chunks that hold it plus a configurable distance ahead, nothing else.
+              void mseWindow(v.currentTime, active.current);
+            }
+          }}
+        />
+        {/* Two rows over the picture: the scrub on top (its preview floats above it while
+            the knob is held), then play on the left and everything else on the right. */}
+        <div
+          ref={controlsBox}
+          onMouseMove={wake}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            padding: '30px 12px 10px',

@@ -1,0 +1,2 @@
+23:  type EncodeRow,
+188:  const updateRow = (index: number, patch: Partial<EncodeRow>) => {

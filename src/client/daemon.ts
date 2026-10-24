@@ -260,7 +260,12 @@ export class ClientNode {
         const total = spec.d;
         const match = /bytes=(\d*)-(\d*)/.exec(String(ctx.req.headers.range ?? ''));
         const start = match && match[1] ? Number(match[1]) : 0;
-        const end = match && match[2] ? Math.min(Number(match[2]) + 1, total) : total;
+        // A range answer is capped: an open-ended `bytes=0-` probe must never turn into
+        // one giant response. The browser asks for the next part when it wants it, so the
+        // video arrives in pieces and only the chunks those pieces fall in are fetched.
+        const HARD_CAP = 2 * 1024 * 1024;
+        const requestedEnd = match && match[2] ? Math.min(Number(match[2]) + 1, total) : total;
+        const end = Math.min(requestedEnd, start + HARD_CAP);
         const bytes = await this.core.vvshRange(
           this.nodes.require(spec.n),
           { root: spec.r, chunkCount: spec.c },

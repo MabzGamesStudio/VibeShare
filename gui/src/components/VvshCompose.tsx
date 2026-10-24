@@ -34,6 +34,16 @@ function formatClock(seconds: number): string {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
 }
 
+/** Browsers report the measured rate noisily (29.7 for a 30 fps video). Snapping to the
+ *  nearest standard rate keeps a matching encoding from warning about being "above". */
+function snapFps(measured: number): number {
+  if (!measured) return 0;
+  for (const rate of [24, 25, 30, 50, 60]) {
+    if (Math.abs(measured - rate) <= rate * 0.1) return rate;
+  }
+  return Math.round(measured);
+}
+
 /** Opens the picked video once to read its length, shape and preview thumbnails.
  *  Size and JPEG quality come from the settings below. */
 async function probeVideo(
@@ -153,8 +163,9 @@ export function VvshCompose() {
   // Rough JPEG weight at this width and quality, times how many previews there are.
   const previewEstimateMb =
     (Math.max(0, previewSplits) * previewWidthValue * Math.round((previewWidthValue * 9) / 16) * 0.3 * previewQualityValue) / 1_048_576;
-  // An encoding above what the video really carries only adds bytes, and two of the same
-  // add nothing at all — the form points both out.
+  // An encoding strictly above what the video really carries only adds bytes (an exact
+  // match — 480p on a 480p file, 30 fps on a 30 fps file — is right and never warns), and
+  // two of the same add nothing at all — the form points both out.
   const overSource = (row: { height: number; fps: number }) =>
     Boolean(source && (row.height > source.height || (source.fps > 0 && row.fps > source.fps)));
   const seenConfigs = new Map<string, number>();
@@ -193,12 +204,11 @@ export function VvshCompose() {
       // The length and the shape come from the video itself — no typing needed.
       const probe = await probeVideo(picked, 0, previewWidthValue, previewQualityValue);
       if (probe.seconds > 0) setSeconds(probe.seconds);
-      setSource({ width: probe.width, height: probe.height, fps: probe.fps });
-      // Sensible defaults, filled in for the user: 5-second chunks, and at least 100
-      // previews (or one every 10 seconds of video — whichever gives more), small and
-      // light images.
+      setSource({ width: probe.width, height: probe.height, fps: snapFps(probe.fps) });
+      // Sensible defaults, filled in for the user: 5-second chunks and one preview every
+      // ten seconds of video (never more than 100), small and light images.
       setChunkSeconds('5');
-      setPreviews(String(Math.max(100, Math.ceil(probe.seconds / 10))));
+      setPreviews(String(Math.min(100, Math.max(1, Math.ceil(probe.seconds / 10)))));
       setPreviewWidth('256');
       setPreviewQuality('0.5');
     } catch {
@@ -473,13 +483,33 @@ export function VvshCompose() {
                 </option>
               ))}
             </select>
-            <select value={row.fps} onChange={(e) => updateRow(index, { fps: Number(e.target.value) })} aria-label="Frame rate">
+            <select
+              value={FRAME_RATES.includes(row.fps) ? row.fps : 'custom'}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === 'custom') updateRow(index, { customFps: true });
+                else updateRow(index, { fps: Number(value), customFps: false });
+              }}
+              aria-label="Frame rate"
+            >
               {FRAME_RATES.map((fps) => (
                 <option key={fps} value={fps}>
                   {fps} fps
                 </option>
               ))}
+              <option value="custom">Other…</option>
             </select>
+            {(row.customFps || !FRAME_RATES.includes(row.fps)) && (
+              <input
+                type="number"
+                min={1}
+                max={240}
+                step={1}
+                aria-label="Custom frame rate"
+                value={String(row.fps)}
+                onChange={(e) => updateRow(index, { fps: Math.min(240, Math.max(1, Math.round(Number(e.target.value) || 30))), customFps: true })}
+              />
+            )}
             {overSource(row) && (
               <span className="small" title="This encoding is above what the video itself carries — the extra bytes add no detail" style={{ color: 'var(--warning, #b8860b)' }}>
                 ⚠

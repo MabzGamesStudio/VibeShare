@@ -3,7 +3,7 @@ import { CopyButton, Loading, Modal, StatusDot, Switch } from '../components/ui'
 import { formatBytes, timeAgo } from '../util';
 import { admin, adminBytes, message } from './api';
 import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
-import { decodeVvshChunk, decodeVvshFrames } from '../../../src/shared/vvsh-encode.js';
+import { base64url } from '../../../src/shared/encoding.js';
 import { useToast } from './AdminApp';
 
 interface ContentRow {
@@ -789,7 +789,7 @@ interface VvshChunkRow {
 /** One .vvsh stream in full: its metadata, every chunk, and the merkle tree over them. */
 function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
   const meta = vvsh.meta;
-  const [chunkPlay, setChunkPlay] = useState<{ url: string; label: string } | null>(null);
+  const [chunkPlay, setChunkPlay] = useState<{ url: string; label: string; start: number; end: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /** Plays one chunk's own bytes as a video — that block and nothing else. */
@@ -798,40 +798,37 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
       setError(null);
       const leaf = cursorNode?.kind === 'chunk' ? cursorNode.renditions.find((entry) => entry.id === renditionId) : undefined;
       if (!leaf) return;
-      const payload = await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`);
-      const parts: Uint8Array[] = [];
-      let type = meta.sourceMime ?? 'video/mp4';
+      const start = index * meta.chunkSeconds;
+      const end = Math.min(meta.totalSeconds, start + meta.chunkSeconds);
       if (meta.codec === 'vvsh-webm/1') {
-        type = 'video/webm';
+        // A segmented block stands alone: its init part and the block itself.
         const rendition = meta.bitrates.find((entry) => entry.id === renditionId);
+        const parts: Uint8Array[] = [];
         if (rendition?.initHash) parts.push(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(rendition.initHash)}`));
-        parts.push(payload);
-      } else {
-        // The built-in container: its I/P/B frames decode to that chunk's piece of the file.
-        parts.push(...decodeVvshFrames(decodeVvshChunk(payload)));
-      }
-      const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-      let at = 0;
-      for (const part of parts) {
-        out.set(part, at);
-        at += part.length;
-      }
-      // Only a block that starts a container can play on its own. A middle slice of the
-      // original file cannot: say so instead of showing a dead player.
-      const startsContainer =
-        out.length > 8 &&
-        ((out[4] === 0x66 && out[5] === 0x74 && out[6] === 0x79 && out[7] === 0x70) || // mp4 ftyp
-          (out[0] === 0x1a && out[1] === 0x45 && out[2] === 0xdf && out[3] === 0xa3)); // webm EBML
-      if (!startsContainer) {
-        setError(
-          'This block is a slice of the original file, and a browser cannot play a slice on its own — only a block that begins a container (like chunk 0) or a segmented (vvsh-webm/1) stream plays per block.'
-        );
+        parts.push(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`));
+        const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+        let at = 0;
+        for (const part of parts) {
+          out.set(part, at);
+          at += part.length;
+        }
+        const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type: 'video/webm' }));
+        setChunkPlay((old) => {
+          if (old && old.url.startsWith('blob:')) URL.revokeObjectURL(old.url);
+          return { url, label: `chunk ${index} · ${renditionId} (${out.length} bytes)`, start: 0, end: Number.POSITIVE_INFINITY };
+        });
         return;
       }
-      const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type }));
+      // The simplest way to turn any block's bytes into playing video: stream exactly this
+      // block's time span from this node's own range endpoint. The bytes that arrive are
+      // this block's bytes — the browser decodes them like any video, in any browser.
+      const rendition = meta.bitrates.find((entry) => entry.id === renditionId) ?? meta.bitrates[0];
+      const spec = base64url(
+        new TextEncoder().encode(JSON.stringify({ r: vvsh.root, c: meta.chunkCount, q: renditionId, d: rendition.decodedBytes ?? 0 }))
+      );
       setChunkPlay((old) => {
-        if (old) URL.revokeObjectURL(old.url);
-        return { url, label: `chunk ${index} · ${renditionId} (${out.length} bytes)` };
+        if (old && old.url.startsWith('blob:')) URL.revokeObjectURL(old.url);
+        return { url: `/v1/vvsh/stream/${spec}`, label: `chunk ${index} · ${renditionId}`, start, end };
       });
     } catch (e) {
       setError(message(e));
@@ -957,7 +954,20 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
                 Close
               </button>
             </div>
-            <video key={chunkPlay.url} src={chunkPlay.url} controls autoPlay playsInline style={{ width: '100%', borderRadius: 6 }} />
+            <video
+              key={chunkPlay.url}
+              src={chunkPlay.url}
+              controls
+              autoPlay
+              playsInline
+              style={{ width: '100%', borderRadius: 6 }}
+              onLoadedMetadata={(e) => {
+                if (chunkPlay.start > 0) e.currentTarget.currentTime = chunkPlay.start;
+              }}
+              onTimeUpdate={(e) => {
+                if (e.currentTarget.currentTime >= chunkPlay.end) e.currentTarget.pause();
+              }}
+            />
           </div>
         )}
       </details>

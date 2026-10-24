@@ -1,0 +1,26 @@
+      setError(
+        'This stream cannot play by chunks here (it predates chunk streaming, or this browser lacks WebM media segments). Re-publish or re-convert the video to make it streamable.'
+      );
+    },
+    [meta, mseOk, prefetchSeconds]
+  );
+    },
+    [meta, pickAuto, pull, swap, switchTo]
+  );
+
+  useEffect(() => {
+    void playFrom(0, false);
+    // (Once, on open: the first chunk comes in so the video is on screen, and the
+    //  prefetch window fills behind it before the user even presses play.)
+    if (mseOk) return; // segmented: MediaSource takes care of what is on screen
+    void pull(Math.min(meta.chunkCount - 1, chunkAt(meta, prefetchSeconds)), active.current)
+      .then(() => {
+        const now = video.current;
+        if (now && now.paused) swap(now.currentTime, false);
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Changing encoding keeps the video playing — every encoding's buffer is kept. */
+  const changeRendition = (value: string) => {

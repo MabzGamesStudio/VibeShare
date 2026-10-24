@@ -148,7 +148,12 @@ export async function createBackend(options: BackendOptions): Promise<Backend> {
       const total = spec.d;
       const range = /bytes=(\d*)-(\d*)/.exec(request.headers.get('range') ?? '');
       const start = range && range[1] ? Number(range[1]) : 0;
-      const end = range && range[2] ? Math.min(Number(range[2]) + 1, total) : total;
+      // A range answer is capped: an open-ended `bytes=0-` probe must never turn into one
+      // giant response — the browser asks for the next part when it wants it, so the
+      // video arrives in pieces and only the chunks those pieces fall in are fetched.
+      const HARD_CAP = 2 * 1024 * 1024;
+      const requestedEnd = range && range[2] ? Math.min(Number(range[2]) + 1, total) : total;
+      const end = Math.min(requestedEnd, start + HARD_CAP);
       const bytes = await core.vvshStreamRange(spec, start, end);
       const headers: Record<string, string> = {
         'content-type': 'video/mp4',

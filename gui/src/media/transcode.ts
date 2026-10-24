@@ -10,6 +10,8 @@ export interface EncodeRow {
   height: number;
   fps: number;
   kbps: number;
+  /** The fps came from the "Other…" box, not one of the presets. */
+  customFps?: boolean;
 }
 
 export function rowId(height: number, fps: number): string {

@@ -1585,13 +1585,17 @@ export class ClientCore {
     const count = ref.chunkCount;
     const first = Math.min(count - 1, Math.floor((from * count) / total));
     const last = Math.min(count - 1, Math.floor(((to - 1) * count) / total));
+    // The chunks that hold the range, fetched together — a range is never bigger than a
+    // couple of them, and repeated ranges hit the cache instead of paying again.
+    const indexes: number[] = [];
+    for (let index = first; index <= last; index++) indexes.push(index);
+    const decoded = await Promise.all(indexes.map((index) => this.vvshDecodedChunk(node, ref, index, rendition)));
     const pieces: Uint8Array[] = [];
-    for (let index = first; index <= last; index++) {
-      const chunkStart = Math.floor((index * total) / count);
-      const decoded = await this.vvshDecodedChunk(node, ref, index, rendition);
+    for (let i = 0; i < indexes.length; i++) {
+      const chunkStart = Math.floor((indexes[i] * total) / count);
       const takeStart = Math.max(0, from - chunkStart);
-      const takeEnd = Math.min(decoded.length, to - chunkStart);
-      if (takeEnd > takeStart) pieces.push(decoded.subarray(takeStart, takeEnd));
+      const takeEnd = Math.min(decoded[i].length, to - chunkStart);
+      if (takeEnd > takeStart) pieces.push(decoded[i].subarray(takeStart, takeEnd));
     }
     const out = new Uint8Array(pieces.reduce((size, piece) => size + piece.length, 0));
     let at = 0;

@@ -1,0 +1,4 @@
+172:    if (!alive.current || !st || st.appended.has(index)) return;
+188:      if (!alive.current) return; // the page was left: stop fetching
+257:  const alive = useRef(true);
+267:      alive.current = false;

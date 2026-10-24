@@ -50,7 +50,10 @@ import {
 import { basename } from 'node:path';
 import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
-import type { VvshConvertQuote } from '../shared/vvsh.js';
+import { decodeVvshChunk, decodeVvshFrames } from '../shared/vvsh-encode.js';
+import type { VvshConvertQuote, VvshHash } from '../shared/vvsh.js';
+import { parseVvshNode, pathToChunk } from '../shared/vvsh.js';
+import { fromBase64url } from '../shared/encoding.js';
 
 export interface ProviderConfig extends BaseConfig {
   pricing: ProviderPricing & {
@@ -388,6 +391,62 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
 
   // -------------------------------------------------------------------------
   // Routes
+
+  /** One byte range of one encoding's decoded stream, straight from this node's objects. */
+  private async vvshRange(spec: { r: string; c: number; q: string; d: number }, start: number, end: number): Promise<Uint8Array> {
+    const total = Math.max(0, spec.d);
+    const from = Math.max(0, Math.min(start, total));
+    const to = Math.max(from, Math.min(end, total));
+    if (to <= from || !total || spec.c < 1) return new Uint8Array(0);
+    const read = async (hash: VvshHash): Promise<Uint8Array> => {
+      const data = await this.store.getChunk(hash);
+      if (!data) throw notFound('This node does not have the object');
+      return data;
+    };
+    const first = Math.min(spec.c - 1, Math.floor((from * spec.c) / total));
+    const last = Math.min(spec.c - 1, Math.floor(((to - 1) * spec.c) / total));
+    // The chunks that hold the range are read together — one page of objects per chunk,
+    // with the built-in path, so bytes are verified and paid for in per-chunk batches.
+    const indexes: number[] = [];
+    for (let index = first; index <= last; index++) indexes.push(index);
+    const decodedAll = await Promise.all(
+      indexes.map(async (index) => {
+        const chunkStart = Math.floor((index * total) / spec.c);
+        // Down the tree to this one chunk, every record checked against the hash its parent
+        // named — the same walk a client does, just done here against local objects.
+        let hash: VvshHash = spec.r;
+        for (const side of pathToChunk(spec.c, index)) {
+          const record = parseVvshNode(await read(hash), hash);
+          if (!record || record.kind !== 'branch') throw notFound('This stream is not verifiable from its root here');
+          hash = record[side];
+        }
+        const node = parseVvshNode(await read(hash), hash);
+        const leaf = node && node.kind === 'chunk' ? node.renditions.find((entry) => entry.id === spec.q) : undefined;
+        if (!leaf) throw notFound('This stream has no such chunk');
+        const blocks = decodeVvshFrames(decodeVvshChunk(await read(leaf.hash)));
+        const decoded = new Uint8Array(blocks.reduce((size, block) => size + block.length, 0));
+        let at = 0;
+        for (const block of blocks) {
+          decoded.set(block, at);
+          at += block.length;
+        }
+        return { chunkStart, decoded };
+      }),
+    );
+    const pieces: Uint8Array[] = [];
+    for (const { chunkStart, decoded } of decodedAll) {
+      const takeStart = Math.max(0, from - chunkStart);
+      const takeEnd = Math.min(decoded.length, to - chunkStart);
+      if (takeEnd > takeStart) pieces.push(decoded.subarray(takeStart, takeEnd));
+    }
+    const out = new Uint8Array(pieces.reduce((size, piece) => size + piece.length, 0));
+    let at = 0;
+    for (const piece of pieces) {
+      out.set(piece, at);
+      at += piece.length;
+    }
+    return out;
+  }
 
   private uploaderFor(ctx: Ctx): string {
     if (ctx.req.headers['x-admin-token']) {
@@ -957,6 +1016,37 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (chunkIdOf(data) !== hash) throw badRequest('The bytes do not match the object hash');
       await this.store.putChunk(hash, data);
       return { ok: true, hash };
+    });
+
+    // One .vvsh stream as byte ranges — what a browser's seeking asks for. The bytes map
+    // to chunks by arithmetic, every record is checked against its hash here, and only
+    // the chunks that hold the asked-for bytes are read: a seek never pulls the video.
+    router.get('/v1/vvsh/stream/:spec', async (ctx) => {
+      const spec = JSON.parse(new TextDecoder().decode(fromBase64url(String(ctx.params.spec)))) as {
+        r: string;
+        c: number;
+        q: string;
+        d: number;
+      };
+      const total = Math.max(0, spec.d);
+      const range = /bytes=(\d*)-(\d*)/.exec(String(ctx.req.headers.range ?? ''));
+      const start = range && range[1] ? Number(range[1]) : 0;
+      // A range answer is capped: an open-ended `bytes=0-` probe must never turn into one
+      // giant response — the browser asks for the next part when it wants it, so playback
+      // arrives in pieces and only the chunks those pieces fall in are fetched/paid for.
+      const HARD_CAP = 2 * 1024 * 1024;
+      const requestedEnd = range && range[2] ? Math.min(Number(range[2]) + 1, total) : total;
+      const end = Math.min(requestedEnd, start + HARD_CAP);
+      const bytes = await this.vvshRange(spec, start, end);
+      const headers: Record<string, string> = {
+        'content-type': 'application/octet-stream',
+        'accept-ranges': 'bytes',
+        'content-length': String(bytes.length),
+        'cache-control': 'private, max-age=3600',
+      };
+      const status = range ? 206 : 200;
+      if (range) headers['content-range'] = `bytes ${start}-${start + Math.max(0, bytes.length - 1)}/${total}`;
+      ctx.res.writeHead(status, headers).end(Buffer.from(bytes));
     });
 
     router.get('/v1/vvsh/objects/:hash', async (ctx) => {
