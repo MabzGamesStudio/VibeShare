@@ -16,6 +16,7 @@ import {
   estimateBytes,
   FRAME_RATES,
   packSegments,
+  PREVIEW_WIDTHS,
   RESOLUTIONS,
   rowId,
   transcodeSegments,
@@ -154,6 +155,7 @@ export function VvshCompose() {
   // the .vvsh metadata so every player knows how the images were made. (Viewers only pick
   // how wide the scrub popup shows them.)
   const [previewWidth, setPreviewWidth] = useState('256');
+  const [previewWidthCustom, setPreviewWidthCustom] = useState(false);
   const [previewQuality, setPreviewQuality] = useState('0.5');
   // What the picked video really is: its size and frame rate — an encoding above them
   // only adds bytes, so the form says so.
@@ -439,22 +441,42 @@ export function VvshCompose() {
               onChange={(e) => setPreviews(e.target.value)}
             />
             <span className="hint">
-              0 or more · 0 = no previews · at least 100, or one every 10 seconds ·{' '}
+              0 or more · 0 = no previews · one every 10 seconds of video, never more than 100 ·{' '}
               {previewWidthValue}px at quality {previewQualityValue} ≈{' '}
               {previewEstimateMb > 0.01 ? `${previewEstimateMb.toFixed(2)} MB` : '0 MB'} total
             </span>
           </label>
           <label className="field">
             Preview width (px)
-            <input
-              type="number"
-              min={80}
-              max={1280}
-              step={20}
-              value={previewWidth}
-              placeholder="256"
-              onChange={(e) => setPreviewWidth(e.target.value)}
-            />
+            <select
+              value={previewWidthCustom || !PREVIEW_WIDTHS.includes(Number(previewWidth)) ? 'custom' : previewWidth}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === 'custom') setPreviewWidthCustom(true);
+                else {
+                  setPreviewWidthCustom(false);
+                  setPreviewWidth(value);
+                }
+              }}
+            >
+              {PREVIEW_WIDTHS.map((width) => (
+                <option key={width} value={width}>
+                  {width}
+                </option>
+              ))}
+              <option value="custom">Other…</option>
+            </select>
+            {(previewWidthCustom || !PREVIEW_WIDTHS.includes(Number(previewWidth))) && (
+              <input
+                type="number"
+                min={80}
+                max={1280}
+                step={20}
+                value={previewWidth}
+                placeholder="256"
+                onChange={(e) => setPreviewWidth(e.target.value)}
+              />
+            )}
             <span className="hint">80–1280 · 256 by default · recorded in the video's file</span>
           </label>
           <label className="field">
@@ -475,7 +497,10 @@ export function VvshCompose() {
       <div className="field">
         <span>Encodings — one row per quality: resolution and frame rate</span>
         {rows.map((row, index) => (
-          <div className="row" key={`${index}-${row.id}`} style={{ gap: 8, flexWrap: 'nowrap', alignItems: 'center' }}>
+          // Keyed by position only: editing a row re-derives its id (480p30 → 720p30),
+          // and a changing key would remount the row — that is what stole the focus from
+          // the field being typed and jolted the form.
+          <div className="row" key={index} style={{ gap: 8, flexWrap: 'nowrap', alignItems: 'center' }}>
             <select value={row.height} onChange={(e) => updateRow(index, { height: Number(e.target.value) })} aria-label="Resolution">
               {RESOLUTIONS.map((height) => (
                 <option key={height} value={height}>
@@ -510,11 +535,15 @@ export function VvshCompose() {
                 onChange={(e) => updateRow(index, { fps: Math.min(240, Math.max(1, Math.round(Number(e.target.value) || 30))), customFps: true })}
               />
             )}
-            {overSource(row) && (
-              <span className="small" title="This encoding is above what the video itself carries — the extra bytes add no detail" style={{ color: 'var(--warning, #b8860b)' }}>
-                ⚠
-              </span>
-            )}
+            {/* A fixed slot, hidden when there is nothing to warn about: the row's height
+                never changes with the warning, so nothing below it moves. */}
+            <span
+              className="small"
+              title="This encoding is above what the video itself carries — the extra bytes add no detail"
+              style={{ color: 'var(--warning, #b8860b)', width: 16, textAlign: 'center', visibility: overSource(row) ? 'visible' : 'hidden' }}
+            >
+              ⚠
+            </span>
             <span className="hint" style={{ minWidth: 96, whiteSpace: 'nowrap' }}>
               ≈ {(estimateBytes(row, seconds) / (1024 * 1024)).toFixed(1)} MB
             </span>
@@ -530,17 +559,18 @@ export function VvshCompose() {
           + Add encoding
         </button>
         <span className="hint">Each row is really encoded to its resolution and frame rate, so the sizes and sharpness differ.</span>
-        {source && (source.height > 0 || source.fps > 0) && rows.some(overSource) && (
-          <span className="banner warning small">
-            This video is {source.height}p{source.fps ? ` at ${source.fps} fps` : ''} — encoding it higher than that adds bytes without adding
-            detail. The marked rows are above the source.
-          </span>
-        )}
-        {duplicates.length > 0 && (
-          <span className="banner warning small">
-            Two encodings are configured the same ({duplicates.join(', ')}) — one of them is redundant and only adds bytes.
-          </span>
-        )}
+        {/* Both banners sit in slots that are always the same height, so a warning coming
+            or going never shifts the form or steals the focus from the field being typed. */}
+        <span
+          className="banner warning small"
+          style={{ minHeight: 38, visibility: source && (source.height > 0 || source.fps > 0) && rows.some(overSource) ? 'visible' : 'hidden' }}
+        >
+          This video is {source?.height ?? ''}p{source?.fps ? ` at ${source.fps} fps` : ''} — encoding it higher than that adds bytes without adding
+          detail. The marked rows are above the source.
+        </span>
+        <span className="banner warning small" style={{ minHeight: 38, visibility: duplicates.length > 0 ? 'visible' : 'hidden' }}>
+          Two encodings are configured the same ({duplicates.join(', ')}) — one of them is redundant and only adds bytes.
+        </span>
       </div>
       {plan && (
         <span className="hint">

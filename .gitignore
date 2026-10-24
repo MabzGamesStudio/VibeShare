@@ -26,3 +26,7 @@ npm-debug.log*
 .env
 .env.local
 .vscode/
+
+# Scratch files from debugging (never commit these)
+/*.txt
+/*.log

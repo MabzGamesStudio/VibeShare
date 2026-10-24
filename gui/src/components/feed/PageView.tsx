@@ -14,7 +14,7 @@ import { PageIconView } from './icons';
 import { PageEditor } from './PageEditor';
 import { ShortsLayout } from './Shorts';
 import { StreamLayout } from './Stream';
-import { usePaged, useSentinel } from './usePaged';
+import { usePaged, useFeedScroll, useSentinel } from './usePaged';
 
 const QUICK: Format[] = ['video', 'short-video', 'music', 'podcast', 'image', 'article', 'game'];
 
@@ -86,6 +86,9 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
     settings?.loadPauseMs ?? 1500
   );
   const sentinel = useSentinel(paged.loadMore, !paged.done && page.layout !== 'shorts', paged.items.length);
+  // Coming back to a page returns to where the reader left it: the items are kept and
+  // the scroll position with them.
+  useFeedScroll(page.id, paged.items.length > 0);
 
   if (!state || !settings) return null;
   if (!algorithms.length) return <Welcome />;

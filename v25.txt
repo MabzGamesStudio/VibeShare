@@ -1,9 +1,0 @@
-111:  const bufferOf = (id: string) => {
-245:  const bandwidth = useRef(0);
-567:            if (bufferOf(active.current).size < meta.chunkCount) {
-569:              void pull(meta.chunkCount - 1, active.current)
-570:                .then(() => swap(wantTime.current, wantPlay.current))
-586:            if (bufferOf(active.current).size < meta.chunkCount) void playFrom(seconds + 0.2, true);
-604:            if (!bufferOf(active.current).has(target)) {
-605:              void pull(target, active.current)
-617:                  swap(now.currentTime, !now.paused);

@@ -1,3 +1,0 @@
-168:  const overSource = (row: { height: number; fps: number }) =>
-492:            {overSource(row) && (
-512:        {source && (source.height > 0 || source.fps > 0) && rows.some(overSource) && (

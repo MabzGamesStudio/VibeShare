@@ -16,7 +16,6 @@ import { HistoryPage } from './pages/History';
 import { LibraryPage } from './pages/Library';
 import { NodesPage } from './pages/Nodes';
 import { PublishPage } from './pages/Publish';
-import { VvshViewerPage } from './pages/VvshViewer';
 import { SearchPage } from './pages/Search';
 import { SettingsPage } from './pages/Settings';
 import { SubscriptionsPage } from './pages/Subscriptions';
@@ -281,7 +280,6 @@ export function App() {
               <Route path="/watch/:id" element={<WatchPage />} />
               <Route path="/creator/:id" element={<CreatorPage />} />
               <Route path="/publish" element={<PublishPage />} />
-              <Route path="/vvsh" element={<VvshViewerPage />} />
               <Route path="/library" element={<LibraryPage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/nodes" element={<NodesPage />} />

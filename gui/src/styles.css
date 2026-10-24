@@ -2831,3 +2831,120 @@ button.layout-option.on {
   background: var(--bg-elev-2);
   border-radius: 10px;
 }
+
+/* --------------------------------------------------------------- the image feed */
+
+/* The images panel: full-resolution pictures. Every frame is the same height — a large
+   slice of the screen — and the picture keeps its own ratio inside it, so nothing is
+   cut, corners included. A landscape wider than the column is capped by width instead. */
+.stream.stream-images {
+  max-width: min(96vw, 1400px);
+}
+
+.post.post-plain {
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+.image-frame {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 72vh;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: var(--bg-elev-2);
+  cursor: zoom-in;
+}
+
+.image-frame .image-full {
+  display: block;
+  height: 72vh;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  border-radius: 0;
+  transition: opacity 0.25s;
+}
+
+.image-frame .image-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 18px;
+}
+
+/* The picture's place while its full resolution is still coming in. */
+.image-skeleton {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, var(--bg-elev-2) 35%, var(--bg-hover) 50%, var(--bg-elev-2) 65%);
+  background-size: 220% 100%;
+  animation: image-shimmer 1.3s linear infinite;
+}
+
+@keyframes image-shimmer {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -90% 0;
+  }
+}
+
+/* Clicking a picture opens it fullscreen in place: the feed keeps its place behind it. */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: rgba(5, 7, 11, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+
+.image-lightbox .image-lightbox-img {
+  position: relative;
+  z-index: 1;
+  max-width: 96vw;
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 0;
+  cursor: default;
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 18px;
+  z-index: 2;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.image-lightbox-close:hover {
+  background: var(--bg-hover);
+}
+
+/* Image cards keep the whole picture too: nothing is cropped off at the corners. */
+.thumb.thumb-image img {
+  object-fit: contain;
+}

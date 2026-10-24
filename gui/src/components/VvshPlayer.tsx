@@ -266,6 +266,18 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     }
     return () => {
       alive.current = false;
+      // Dropping the element is not enough: the browser keeps its media loader (and the
+      // range requests behind it) running after the node is gone. Taking the source off
+      // stops every byte of it at once — leaving the page fetches nothing further.
+      const v = video.current;
+      if (v) {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+      }
+      mse.current = null;
+      for (const url of staleUrls.current) URL.revokeObjectURL(url);
+      staleUrls.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

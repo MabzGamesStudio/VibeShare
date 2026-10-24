@@ -1,4 +1,0 @@
-/Users/mabz/Desktop/Projects/InProgress/VibeShare/gui/src/components/feed/Stream.tsx:11:import { MediaView, Poster } from './Player';
-/Users/mabz/Desktop/Projects/InProgress/VibeShare/gui/src/components/feed/Stream.tsx:27:            <Poster item={item} src={imageFor(item)} fit="contain" />
-/Users/mabz/Desktop/Projects/InProgress/VibeShare/gui/src/components/feed/Shorts.tsx:12:import { MediaView, Poster } from './Player';
-/Users/mabz/Desktop/Projects/InProgress/VibeShare/gui/src/components/feed/Shorts.tsx:75:          <Poster item={item} />

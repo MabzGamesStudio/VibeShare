@@ -10,6 +10,7 @@ import { PostDownload } from '../Download';
 import { SaveCidButton } from '../SaveCid';
 import { WatchedBadge } from '../ui';
 import { Fields } from './Fields';
+import { ImageLightbox } from './ImageFeed';
 import { MediaView, Poster } from './Player';
 
 /** A preview image that never costs credits: thumbnails, or a platform's own image. */
@@ -29,7 +30,9 @@ const VIDEO_FORMATS = new Set(['video', 'short-video', 'live']);
 export function ItemThumb({ item, share = true, inline = false }: { item: FeedItem; share?: boolean; inline?: boolean }) {
   const video = inline && VIDEO_FORMATS.has(item.format);
   const [playing, setPlaying] = useState(false);
+  const [full, setFull] = useState(false);
   const seen = usePreviewSeen(item);
+  const still = !video && item.format === 'image';
   if (video) {
     return (
       <div className="thumb" ref={seen}>
@@ -56,6 +59,30 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
             <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
           </span>
         )}
+      </div>
+    );
+  }
+  if (still) {
+    // The full-resolution picture from the start (no low-res step), no play badge over
+    // it, and a click opens it fullscreen in place.
+    return (
+      <div className="thumb thumb-image" ref={seen}>
+        <button type="button" className="thumb-link" aria-label={item.title} onClick={() => setFull(true)}>
+          <Poster item={item} src={imageFor(item)} fit="contain" />
+          {item.seen ? (
+            <span className="thumb-overlay">
+              <WatchedBadge className="thumb-label" />
+            </span>
+          ) : null}
+        </button>
+        {share && (
+          <span className="thumb-actions">
+            <SaveCidButton id={item.id} title={item.title} className="overlay-button" compact />
+            <PostDownload item={item} />
+            <ShareButton target={{ id: item.id, title: item.title }} className="overlay-button" />
+          </span>
+        )}
+        {full && <ImageLightbox item={item} onClose={() => setFull(false)} />}
       </div>
     );
   }

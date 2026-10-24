@@ -35,6 +35,18 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
   loader.current = load;
   const pause = useRef(pauseMs);
   pause.current = pauseMs;
+  const keyRef = useRef(key);
+  keyRef.current = key;
+
+  const save = useCallback(() => {
+    snapshots.set(keyRef.current, {
+      items: itemsRef.current,
+      cursor: cursor.current,
+      done: finished.current,
+      empty: empty.current,
+      finished: finished.current,
+    });
+  }, []);
 
   const fetchPage = useCallback(async (first: boolean) => {
     if (busy.current && !first) return;
@@ -61,6 +73,7 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
       setDone(finished.current);
       itemsRef.current = first ? fresh : [...itemsRef.current, ...fresh];
       setItems(itemsRef.current);
+      save();
     } catch (error) {
       if (mine === generation.current) {
         setFailure(errorMessage(error));
@@ -76,12 +89,21 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
   }, []);
 
   useEffect(() => {
-    itemsRef.current = [];
-    setItems([]);
-    setDone(false);
-    finished.current = false;
-    empty.current = 0;
-    cursor.current = undefined;
+    // A feed already seen this session is kept: coming back to it shows the same items
+    // at once (and the scroll position with them) instead of refetching from the start.
+    const saved = snapshots.get(key);
+    itemsRef.current = saved ? [...saved.items] : [];
+    setItems(itemsRef.current);
+    cursor.current = saved?.cursor;
+    empty.current = saved?.empty ?? 0;
+    finished.current = saved?.finished ?? false;
+    setDone(saved?.done ?? false);
+    setErrors([]);
+    setFailure(null);
+    if (saved) {
+      setLoading(false);
+      return;
+    }
     void fetchPage(true);
   }, [key, fetchPage]);
 
@@ -98,6 +120,7 @@ export function usePaged(load: (cursor?: string) => Promise<FeedResponse>, key: 
     }, pause.current);
   }, [fetchPage]);
   const reload = useCallback(() => {
+    snapshots.delete(keyRef.current);
     empty.current = 0;
     finished.current = false;
     void fetchPage(true);
@@ -140,4 +163,30 @@ export function useInView<T extends Element>(threshold = 0.6): [React.RefObject<
     return () => observer.disconnect();
   }, [threshold]);
   return [ref, visible];
+}
+
+/** One listed feed kept for the session: going back to it shows the same content at once. */
+type PagedSnapshot = { items: FeedItem[]; cursor?: string; done: boolean; empty: number; finished: boolean };
+const snapshots = new Map<string, PagedSnapshot>();
+const feedScroll = new Map<string, number>();
+
+/**
+ * Keeps the scroll position of a feed across visits: leaving stores where the reader
+ * was, and coming back (with the items already in memory) returns there at once, so
+ * opening something and going back never loses the place in the feed.
+ */
+export function useFeedScroll(key: string, ready: boolean): void {
+  useEffect(() => {
+    const at = key;
+    return () => {
+      feedScroll.set(at, window.scrollY);
+    };
+  }, [key]);
+  useEffect(() => {
+    if (!ready) return;
+    const saved = feedScroll.get(key);
+    if (saved === undefined) return;
+    feedScroll.delete(key);
+    window.scrollTo({ top: saved, behavior: 'auto' });
+  }, [key, ready]);
 }

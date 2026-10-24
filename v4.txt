@@ -1,2 +1,0 @@
-252:        const spec = JSON.parse(new TextDecoder().decode(fromBase64url(ctx.params.id.slice(5)))) as {
-D

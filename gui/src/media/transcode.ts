@@ -4,6 +4,8 @@
 // would just be a copy of the source and look identical.)
 export const RESOLUTIONS = [360, 480, 720, 1080, 1440, 2160, 4320];
 export const FRAME_RATES = [24, 25, 30, 50, 60];
+/** Common preview thumbnail widths — "Other…" takes any value in between. */
+export const PREVIEW_WIDTHS = [160, 220, 256, 320, 480, 640, 854, 1280];
 
 export interface EncodeRow {
   id: string;
@@ -62,6 +64,9 @@ export async function transcode(file: Blob, row: EncodeRow, onProgress?: (fracti
     let audioContext: AudioContext | null = null;
     try {
       audioContext = new AudioContext();
+      // A context made without a direct gesture starts suspended and records silence:
+      // waking it is what makes the recording really carry the sound.
+      if (audioContext.state === 'suspended') await audioContext.resume();
       const sourceNode = audioContext.createMediaElementSource(video);
       const silent = audioContext.createMediaStreamDestination();
       sourceNode.connect(silent);
@@ -158,6 +163,9 @@ export async function transcodeSegments(
     let audioContext: AudioContext | null = null;
     try {
       audioContext = new AudioContext();
+      // A context made without a direct gesture starts suspended and records silence:
+      // waking it is what makes every segment really carry the sound.
+      if (audioContext.state === 'suspended') await audioContext.resume();
       const sourceNode = audioContext.createMediaElementSource(video);
       const silent = audioContext.createMediaStreamDestination();
       sourceNode.connect(silent);

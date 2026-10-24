@@ -1,3 +1,0 @@
-201:      setPreviews(String(Math.max(100, Math.ceil(probe.seconds / 10))));
-270:          previews: probed.previews,
-322:          previews: probed.previews,
