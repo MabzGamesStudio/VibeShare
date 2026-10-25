@@ -73,10 +73,24 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
   return { ...embed, page: item.pageUrl ?? embed.page };
 }
 
+/**
+ * The preview image the algorithm node keeps of the content on its own disk, served
+ * through our own node. It is first-party, so it still shows when cookies are off and
+ * nothing may be fetched from the platform the content was discovered on.
+ */
+export function nodePreviewOf(item: Pick<FeedItem, 'format' | 'thumbnail' | 'thumbnailUrl'>): string | undefined {
+  // An image is its own content (the full picture loads from its platform): only a
+  // video's preview stands in from the node's copy.
+  if (item.format === 'image') return undefined;
+  return item.thumbnail?.startsWith('/v1/thumbnails/') ? item.thumbnailUrl : undefined;
+}
+
 /** The best still image of an item: the image itself for images, otherwise its thumbnail. */
-export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnailUrl'>): string | undefined {
+export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnail' | 'thumbnailUrl'>): string | undefined {
   const parsed = parseContentId(item.id);
-  if (placeholderFor(item)) return undefined;
+  // With cookies off, the platform's picture may not load — but the preview the
+  // algorithm node keeps of the content is ours, and stands in for a video's preview.
+  if (placeholderFor(item)) return nodePreviewOf(item);
   if (item.format === 'image') {
     if (parsed?.native) return streamUrl(parsed.base);
     if (item.media?.type === 'image') return item.media.url;

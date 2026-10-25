@@ -9,6 +9,7 @@ import {
   createHttpServer,
   forbidden,
   listen,
+  notFound,
   readJson,
   Router,
   type Ctx,
@@ -426,10 +427,10 @@ export abstract class BaseNode<C extends BaseConfig> {
           body: { entries: this.moderation.export() },
           timeoutMs: 15_000,
         });
-        accepted += this.moderation.merge(answer.entries ?? [], parsed.id);
+        accepted += this.moderation.merge(answer.entries ?? [], parsed.id ?? parsed.url);
         peers++;
       } catch (error) {
-        log.debug(`Moderation sync with ${parsed.id.slice(0, 12)}: ${(error as Error).message}`);
+        log.debug(`Moderation sync with ${(parsed.id ?? parsed.url).slice(0, 12)}: ${(error as Error).message}`);
       }
     }
     return { peers, accepted };

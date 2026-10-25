@@ -34,7 +34,7 @@ import {
 import { api, errorMessage, uploadFile } from '../api';
 import { FormatIcon } from '../components/ContentCard';
 import { Comments } from '../components/Comments';
-import { useMediaSrc } from '../media';
+import { nodePreviewOf, useMediaSrc } from '../media';
 import { Markdown } from '../markdown';
 import { DownloadButton } from '../components/Download';
 import { SaveCidButton } from '../components/SaveCid';
@@ -957,9 +957,15 @@ export function WatchPage() {
           ) : view.embedsDisabled && !view.native ? (
             <div className="player file">
               <div>
-                <div className="embed-placeholder-icon">
-                  <FormatIcon format={view.item?.format ?? 'video'} size={54} />
-                </div>
+                {/* Cookies off: the preview the algorithm node keeps of the content is
+                    ours, and stands in for the platform's picture of the video. */}
+                {view.item && nodePreviewOf(view.item) ? (
+                  <img className="watch-preview" src={nodePreviewOf(view.item)} alt="" />
+                ) : (
+                  <div className="embed-placeholder-icon">
+                    <FormatIcon format={view.item?.format ?? 'video'} size={54} />
+                  </div>
+                )}
                 <p style={{ marginTop: 14, fontWeight: 600 }}>{title}</p>
                 {creator && <p className="small muted">{creator.name}</p>}
                 <p className="small faint embed-placeholder-text" style={{ marginTop: 10, maxWidth: 340 }}>

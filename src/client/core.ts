@@ -1466,7 +1466,9 @@ export class ClientCore {
   async vvshObject(node: NodeEntry, hash: string): Promise<Uint8Array> {
     const response = await this.nodes.client(node).fetch(`/v1/vvsh/objects/${encodeURIComponent(hash)}`);
     const data = new Uint8Array(await response.arrayBuffer());
-    if (chunkIdOf(data) !== hash) throw new Error(CID_MISMATCH);
+    // Objects are named by their hash, not a content id: what does not hash to the name
+    // it came under is never parsed, played or passed on.
+    if (chunkIdOf(data) !== hash) throw new Error('The vvsh object sent does not match the hash naming it');
     return data;
   }
 

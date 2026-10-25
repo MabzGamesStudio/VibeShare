@@ -560,6 +560,98 @@ label.field > span.hint,
   border-color: var(--text);
 }
 
+/* ------------------------------------------------------- subscriptions carousel */
+
+.carousel {
+  position: relative;
+  margin: 0 0 26px;
+}
+
+.carousel-row {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  padding: 2px 2px 6px;
+}
+
+.carousel-row::-webkit-scrollbar {
+  display: none;
+}
+
+.carousel-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-width: 76px;
+  max-width: 96px;
+  padding: 10px 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.carousel-tile:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.carousel-tile .avatar {
+  width: 44px;
+  height: 44px;
+}
+
+.carousel-tile .carousel-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+}
+
+.carousel-name {
+  font-size: 12px;
+  font-weight: 550;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.carousel-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.carousel-arrow.left {
+  left: -6px;
+}
+
+.carousel-arrow.right {
+  right: -6px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1774,6 +1866,17 @@ img.poster-contain {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* The algorithm node's own preview of the content, standing in for the platform's
+   picture of the video on the video page when cookies are off. */
+.watch-preview {
+  display: block;
+  max-width: min(100%, 480px);
+  max-height: 46vh;
+  margin: 0 auto;
+  border-radius: 12px;
+  object-fit: contain;
 }
 
 @media (prefers-reduced-motion: reduce) {

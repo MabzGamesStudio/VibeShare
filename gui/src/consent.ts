@@ -30,7 +30,8 @@ const KEY = 'vs-embed-consent';
 export function doNotTrack(): boolean {
   if (typeof navigator === 'undefined') return false;
   const gpc = (globalThis as { globalPrivacyControl?: boolean }).globalPrivacyControl === true;
-  const dnt = navigator.doNotTrack === '1' || (navigator as { msDoNotTrack?: string }).msDoNotTrack === '1';
+  const dnt =
+    (navigator as Navigator & { doNotTrack?: string }).doNotTrack === '1' || (navigator as { msDoNotTrack?: string }).msDoNotTrack === '1';
   return gpc || dnt;
 }
 

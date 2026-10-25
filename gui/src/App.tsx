@@ -21,6 +21,7 @@ import { PublishPage } from './pages/Publish';
 import { SearchPage } from './pages/Search';
 import { SettingsPage } from './pages/Settings';
 import { SubscriptionsPage } from './pages/Subscriptions';
+import { AllSubscriptionsPage } from './pages/SubscriptionsAll';
 import { WalletPage } from './pages/Wallet';
 import { WatchPage } from './pages/Watch';
 import { useApp } from './state';
@@ -289,6 +290,7 @@ export function App() {
               <Route path="/dual" element={<DualPage />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/subscriptions" element={<SubscriptionsPage />} />
+              <Route path="/subscriptions/all" element={<AllSubscriptionsPage />} />
               <Route path="/watch/:id" element={<WatchPage />} />
               <Route path="/creator/:id" element={<CreatorPage />} />
               <Route path="/publish" element={<PublishPage />} />

@@ -25,7 +25,10 @@ describe('a search node filtering content the user has seen', async () => {
   const url = node.url();
   after(() => node.stop());
 
-  await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: `${vid}~yt:black1`, title: 'Black holes', format: 'video', rating: 'all', creatorId: 'stars' } });
+  // The content is keyed by its link, not its cid: content published on VibeShare (whose
+  // entry id is the cid) is suggested first even when seen, so the seen-filter machinery
+  // is demonstrated on discovered content, whose cid and links are known all the same.
+  await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:black1', contentId: vid, title: 'Black holes', format: 'video', rating: 'all', creatorId: 'stars' } });
   await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:lava2', title: 'Lava flow', format: 'video', rating: 'all' } });
 
   const seen = new BloomFilter(1_024);
@@ -58,7 +61,7 @@ describe('a search node filtering content the user has seen', async () => {
     for (const filter of [seen, cidOnly, linkOnly]) {
       const after = await client.json<Page<ContentItem>>('/v1/search', { body: { query: 'holes', bloom: filter.toJSON() }, auth: false });
       assert.ok(!after.items.some((item) => item.title === 'Black holes'), 'not suggested at all');
-      assert.ok(after.items.every((item) => item.id !== `${vid}~yt:black1`));
+      assert.ok(after.items.every((item) => item.id !== 'yt:black1'));
     }
     // Feeds filter the same way.
     const feed = await client.json<Page<ContentItem>>('/v1/feed', { body: { bloom: seen.toJSON() }, auth: false });

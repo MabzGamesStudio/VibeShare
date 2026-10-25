@@ -49,6 +49,11 @@ export async function startMaliciousProvider(port = 0): Promise<MaliciousProvide
   let delayMs = 60_000;
   let base = '';
   router.get('/v1/info', () => signedInfo(identity, 'provider', 'Malicious provider', base));
+  // A “session”, in name only — honest clients always negotiate one before paying for
+  // what they fetch, even here.
+  const session = () => ({ token: randomToken(16), accountId: 'evil', expiresAt: new Date(Date.now() + 3600_000).toISOString(), balance: 0 });
+  router.post('/v1/auth/session', session);
+  router.post('/v1/auth/anonymous', session);
   // Data that does not match the content id hash: the honest client must refuse it.
   router.get('/v1/content/:cid', (ctx) => ({
     v: 1,
@@ -111,6 +116,11 @@ export async function startMaliciousAlgorithm(port = 0): Promise<MaliciousAlgori
     return out;
   };
   router.get('/v1/info', () => signedInfo(identity, 'algorithm', 'Malicious algorithm', base));
+  // A “session”, in name only — honest clients always negotiate one before paying for
+  // what they fetch, even here.
+  const session = () => ({ token: randomToken(16), accountId: 'evil', expiresAt: new Date(Date.now() + 3600_000).toISOString(), balance: 0 });
+  router.post('/v1/auth/session', session);
+  router.post('/v1/auth/anonymous', session);
   router.get('/v1/comments/:content', () => ({ blocks: attacked(), votes: {} }));
   router.post('/v1/comments/:content', async (ctx: Ctx) => {
     const body = await readJson<{ text?: string }>(ctx.req);

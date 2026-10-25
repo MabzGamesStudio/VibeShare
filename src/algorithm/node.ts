@@ -924,14 +924,20 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       this.charge(ctx, this.config.pricing.feed, 'feed');
       const seen = this.seenFilters(ctx, body);
       const preferences = this.preferencesOf(body.preferences);
-      const visible = this.withoutSeen(this.registry.visible(preferences, this.config.policy.maxRating), seen);
-      const ranked = await rank(visible, {
+      const ranked = await rank(this.registry.visible(preferences, this.config.policy.maxRating), {
         preferences,
         seed: String(body.seed ?? new Date().toISOString().slice(0, 13)),
         now: Date.now(),
         config: this.config.ranking,
       });
-      const page = pageOf(this.bySource(ranked), body.cursor, this.limitOf(body.limit));
+      // An explore page is always led by a few VibeShare-published pieces, even ones the
+      // reader has seen before; everything after them respects the seen filters.
+      const first = ranked.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
+      const rest = this.withoutSeen(
+        ranked.filter((entry) => !first.includes(entry)),
+        seen
+      );
+      const page = pageOf(this.bySource([...first, ...rest]), body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
     });
 
@@ -948,17 +954,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
       const platform = String(body.filters?.platform ?? '').slice(0, 40);
       if (platform) visible = visible.filter((entry) => sourceKeyOf(entry) === platform);
-      // Content published on VibeShare is never dropped by the seen filters: matching the
-      // query is enough, however well the reader already knows it.
-      const published = visible.filter((entry) => entry.id.startsWith('vs1'));
-      const others = this.withoutSeen(
-        visible.filter((entry) => !entry.id.startsWith('vs1')),
+      const searched = this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry);
+      // A few VibeShare-published pieces come first, whatever the ranking — the ones
+      // matching the query, or simply whatever is published when the page just explores —
+      // and they are suggested even when the reader has seen them before. Everything
+      // after those few respects the seen filters.
+      const first = searched.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
+      const rest = this.withoutSeen(
+        searched.filter((entry) => !first.includes(entry)),
         seen
       );
-      const searched = this.registry.search([...published, ...others], body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry);
-      // A few of the matching VibeShare-published pieces come first, whatever the ranking.
-      const first = searched.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
-      const rest = searched.filter((entry) => !first.includes(entry));
       const results = this.bySource([...first, ...rest]);
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
       return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;

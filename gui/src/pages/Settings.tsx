@@ -874,7 +874,7 @@ function EmbedsCard() {
         onChange={(allow) => {
           chooseConsent(allow ? 'accepted' : 'rejected');
           setChoice(loadConsent()?.choice ?? null);
-          void updateSettings({ blockExternalEmbeds: !allow });
+          void updateSettings?.({ blockExternalEmbeds: !allow });
         }}
         label="Allow third-party embeds (they carry third-party tracking cookies)"
       />

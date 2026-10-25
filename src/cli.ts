@@ -228,9 +228,9 @@ async function runDemo(flags: Flags): Promise<void> {
   Data: ${dataDir} (delete it to start over)
 `);
   if (flags.open) openInBrowser(demo.client.url());
-  onShutdown(() => {
+  onShutdown(async () => {
     stopMalicious();
-    void demo.stop();
+    await demo.stop();
   });
 }
 
