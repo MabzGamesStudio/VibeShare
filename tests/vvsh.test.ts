@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../src/shared/content.js';
 import { defaultSettings, normalizeSettings } from '../src/shared/clientdefaults.js';
+import type { SavedState } from '../src/shared/clientapi.js';
 import { buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../src/shared/vvsh-encode.js';
 import { chunkAt, parseVvshFile, parseVvshNode, pathToChunk, previewAt, serializeVvshFile, treeLeaves, unpackVvshNode, vvshFileJson, walkToChunk, type VvshHash } from '../src/shared/vvsh.js';
-import { base64url } from '../src/shared/encoding.js';
+import { base64url, fromBase64url } from '../src/shared/encoding.js';
 import { clientFor, randomBytesOf, startClient, startProvider, tempDir } from './helpers.js';
 
 const RENDITIONS = [
@@ -246,7 +247,7 @@ describe('a provider storing a .vvsh stream', async () => {
     await assert.rejects(viewer.json('/v1/vvsh/objects/chk1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'), /does not have/);
   });
 
-  it('quotes a conversion from the metadata, the length and the encodings, and runs it', async () => {
+  it('quotes a conversion and refuses invalid media instead of copying it into every quality', async () => {
     const account = clientFor(url, 'identity');
     const config: VvshBuildConfig = { bitrates: RENDITIONS.slice(0, 2), chunkSeconds: 10, previewSplits: 3 };
     const quoted = await account.json<{ quote: { credits: number; breakdown: { chunks: number; renditions: number; previews: number } } }>('/v1/vvsh/quote', {
@@ -260,18 +261,13 @@ describe('a provider storing a .vvsh stream', async () => {
       body: { name: 'made-here.vvsh', bytes: source.length, totalSeconds: 30, config },
     });
     await account.json(`/v1/vvsh/convert/${started.jobId}/piece`, { method: 'PUT', raw: source });
-    const converted = await account.json<{ manifest: Manifest; quote: { credits: number } }>(`/v1/vvsh/convert/${started.jobId}/finish`, {
-      method: 'POST',
-      body: {},
-    });
-    assert.equal(converted.manifest.vvsh?.meta.chunkCount, 3);
-    assert.equal(converted.manifest.vvsh?.meta.chunkSeconds, 10);
+    await assert.rejects(
+      account.json(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {} }),
+      /Could not encode 8K/,
+      'invalid media cannot become several identical quality leaves'
+    );
     const after = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
-    assert.equal(after, before - converted.quote.credits, 'the quote was charged before the work ran');
-    const root = await account.fetch(`/v1/vvsh/objects/${encodeURIComponent(converted.manifest.vvsh!.root)}`);
-    assert.equal(root.status, 200, 'the converted stream is queryable from its root');
-    const committed = await account.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: converted.manifest } });
-    assert.match(committed.cid, /^vs1/);
+    assert.equal(after, before - started.quote.credits, 'the quote was charged before the work ran');
   });
 });
 
@@ -306,6 +302,13 @@ describe('a client streaming and exporting a .vvsh', async () => {
   const published = await api<{ cid: string; manifest: Manifest }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
   const file = published.manifest.vvsh!;
 
+  it('automatically saves the VVSH id in Published Content', async () => {
+    const saved = await api<SavedState>('/api/saved');
+    const collection = saved.collections.find((entry) => entry.name === 'Published Content');
+    assert.ok(collection);
+    assert.ok(saved.items.find((item) => item.id === published.cid)?.collections.includes(collection.id));
+  });
+
   it('skips to a timestamp and retrieves only that chunk, verified', async () => {
     const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
     // The request is just where to look: the root, the index and the encoding.
@@ -323,6 +326,19 @@ describe('a client streaming and exporting a .vvsh', async () => {
     });
     assert.equal(again.data, chunk.data, 'the same verified chunk comes back from a starting branch');
     assert.equal(again.path.length, chunk.path.length - 1, 'only the rest of the path is walked');
+  });
+
+  it('downloads every chunk through the player request contract without a chunk-count error', async () => {
+    const pieces: Uint8Array[] = [];
+    for (let index = 0; index < file.meta.chunkCount; index++) {
+      // This is the request the download button used to send: { file } rather than
+      // { root, chunkCount }. It used to become pathToChunk(0, 0) → "No such chunk".
+      const answer = await api<{ data: string }>('/api/vvsh/chunk', {
+        body: { nodeId, file, index, rendition: '1080p' },
+      });
+      pieces.push(fromBase64url(answer.data));
+    }
+    assert.deepEqual(Buffer.from(exportVvshStream(pieces)), source, 'all downloaded chunks rebuild the selected video');
   });
 
   it('hands out byte ranges of the decoded stream, fetching only the chunks they fall in', async () => {

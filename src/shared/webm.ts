@@ -48,8 +48,11 @@ export function readWebmElement(bytes: Uint8Array, offset: number): WebmElement 
   let allOnes = true;
   for (let i = 0; i < sizeLength; i++) {
     const byte = bytes[offset + idLength + i];
-    const value = i === 0 ? byte & (0xff >> sizeLength) : byte;
-    if (value !== (i === 0 ? 0xff >> sizeLength : 0xff)) allOnes = false;
+    // Eight-byte VINTs have no value bits in their marker byte (0x01). Shifting
+    // 0xff by 8 is a no-op in JavaScript, so handle that width explicitly.
+    const firstMask = sizeLength === 8 ? 0 : 0xff >> sizeLength;
+    const value = i === 0 ? byte & firstMask : byte;
+    if (value !== (i === 0 ? firstMask : 0xff)) allOnes = false;
     size = size * 256 + value;
   }
   // All-ones means "until the parent ends" — the caller walks to the end of the bytes.
@@ -118,6 +121,47 @@ export function splitWebm(bytes: Uint8Array): WebmSplit {
   return { init, clusters, timecodeScale: scale ?? 1_000_000 };
 }
 
+/** Raw VVSH payloads back into their WebM Cluster elements, in their stored order. */
+export function webmClusters(bytes: Uint8Array): Uint8Array[] {
+  const clusters: Uint8Array[] = [];
+  const walk = (from: number, to: number, insideSegment: boolean) => {
+    let at = from;
+    while (at < to) {
+      const element = readWebmElement(bytes, at);
+      if (!element || element.total <= 0) throw new Error('Invalid WebM media segment');
+      if (element.id === ID_CLUSTER) clusters.push(bytes.slice(element.start, element.at + element.size));
+      else if (element.id === ID_SEGMENT && !insideSegment) walk(element.at, Math.min(to, element.at + element.size), true);
+      at += element.total;
+    }
+  };
+  walk(0, bytes.length, false);
+  if (!clusters.length) throw new Error('WebM media segment without Clusters');
+  return clusters;
+}
+
+/**
+ * Turns a split init part into a standalone WebM header. Its Segment becomes open-ended,
+ * so following Clusters belong to the file instead of sitting outside a closed Segment.
+ */
+export function webmStandaloneInit(init: Uint8Array, durationSeconds?: number): Uint8Array {
+  const out = Uint8Array.from(init);
+  let at = 0;
+  while (at < out.length) {
+    const element = readWebmElement(out, at);
+    if (!element) break;
+    if (element.id === ID_SEGMENT) {
+      const sizeLength = element.at - element.start - 4;
+      if (sizeLength !== 8) throw new Error('Unexpected WebM Segment size field');
+      out[element.at - 8] = 0x01; // eight-byte unknown size: marker + seven all-ones bytes
+      out.fill(0xff, element.at - 7, element.at);
+      break;
+    }
+    at += element.total;
+  }
+  if (durationSeconds !== undefined) patchDuration(out, Math.max(0, durationSeconds * 1000));
+  return out;
+}
+
 function readUint(bytes: Uint8Array, from: number, to: number, id: number): number | null {
   for (const child of children(bytes, from, to)) {
     if (child.id !== id) continue;
@@ -149,6 +193,43 @@ export function patchClusterTimecode(cluster: Uint8Array, timecode: number): num
     return timecode;
   }
   throw new Error('WebM Cluster without a timecode');
+}
+
+/** Width of a Cluster's timecode field, needed to recover older wrapped VVSH timestamps. */
+export function clusterTimecodeWidth(cluster: Uint8Array): number {
+  const element = readWebmElement(cluster, 0);
+  if (!element || element.id !== ID_CLUSTER) throw new Error('Not a WebM Cluster');
+  const field = children(cluster, element.at, element.at + element.size).find((child) => child.id === ID_TIMECODE);
+  if (!field) throw new Error('WebM Cluster without a timecode');
+  return field.size;
+}
+
+/**
+ * Returns a Cluster with its timecode changed, resizing both the timecode and the Cluster
+ * header as needed. The in-place patcher below is useful for small test fixtures, but a
+ * global VVSH timestamp may need more bytes than the original per-chunk recording used.
+ */
+export function withClusterTimecode(cluster: Uint8Array, timecode: number): Uint8Array {
+  if (!Number.isSafeInteger(timecode) || timecode < 0) throw new Error('Bad WebM Cluster timecode');
+  const element = readWebmElement(cluster, 0);
+  if (!element || element.id !== ID_CLUSTER) throw new Error('Not a WebM Cluster');
+  const field = children(cluster, element.at, element.at + element.size).find((child) => child.id === ID_TIMECODE);
+  if (!field) throw new Error('WebM Cluster without a timecode');
+  const prefix = cluster.subarray(element.at, field.start);
+  const suffix = cluster.subarray(field.at + field.size, element.at + element.size);
+  const payloadSize = prefix.length + 10 + suffix.length; // timecode tag + one-byte size + u64
+  const out = new Uint8Array(4 + 8 + payloadSize); // Cluster id + eight-byte size + payload
+  out.set([0x1f, 0x43, 0xb6, 0x75], 0);
+  out[4] = 0x01; // eight-byte size field
+  for (let shift = 6; shift >= 0; shift--) out[5 + (6 - shift)] = Math.floor(payloadSize / 256 ** shift) % 256;
+  let at = 12;
+  out.set(prefix, at);
+  at += prefix.length;
+  out[at++] = 0xe7;
+  out[at++] = 0x88; // Timecode, eight bytes
+  for (let shift = 7; shift >= 0; shift--) out[at++] = Math.floor(timecode / 256 ** shift) % 256;
+  out.set(suffix, at);
+  return out;
 }
 
 /** How many keyframes and delta frames a Cluster holds (SimpleBlock flag, bit 7). */

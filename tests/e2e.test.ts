@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { after, describe, it } from 'node:test';
-import type { ContentView, FeedResponse, Job, NodeEntry, ServiceStatus } from '../src/shared/clientapi.js';
+import type { ContentView, FeedResponse, Job, NodeEntry, SavedState, ServiceStatus } from '../src/shared/clientapi.js';
 import { MiB } from '../src/shared/content.js';
 import { admin, randomBytesOf, startAlgorithm, startClient, startProvider, tempDir, waitFor } from './helpers.js';
 
@@ -65,6 +65,15 @@ describe('a client using a provider and an algorithm node', async () => {
     id = done.result!.id;
     assert.match(id, /^vs1[a-z2-7]{52}~yt:dQw4w9WgXcQ$/);
     assert.equal(done.steps.at(-1)!.detail, 'Waiting for review');
+  });
+
+  it('automatically saves the published id in Published Content', async () => {
+    const saved = await api<SavedState>('/api/saved');
+    const collection = saved.collections.find((entry) => entry.name === 'Published Content');
+    assert.ok(collection, 'the collection is created on the first publish');
+    const item = saved.items.find((entry) => entry.id === id);
+    assert.equal(item?.title, 'Mountain trip');
+    assert.ok(item?.collections.includes(collection.id));
   });
 
   it('shows the content once the algorithm node lists it', async () => {

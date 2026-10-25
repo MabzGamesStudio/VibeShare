@@ -7,6 +7,7 @@ import { formatSource, sourceFromUrl, withSources, parseSource } from '../shared
 import { FORMATS, RATINGS, type Format, type Rating } from '../shared/taxonomy.js';
 import type { ClientStoreLike, UploadedFile, UploadStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
+import { rememberPublished } from './published.js';
 
 /** Reads a file a chunk at a time. */
 async function* readChunks(file: UploadedFile, chunkSize: number): AsyncGenerator<Uint8Array> {
@@ -212,6 +213,7 @@ export class Publisher {
       await this.submitAll(job, 1 + providers.length, algorithms, submission, cid, request.sign, library, tick);
       this.store.data.data.library.unshift(library);
       this.store.changed();
+      rememberPublished(this.store, id, library.title);
       job.result = { id };
       job.status = 'done';
       job.progress = 1;
@@ -305,6 +307,7 @@ export class Publisher {
       this.store.changed();
       job.result = { id };
       job.status = library.algorithms.some((entry) => entry.submissionId) ? 'done' : 'error';
+      if (job.status === 'done') rememberPublished(this.store, id, library.title);
       if (job.status === 'error') job.error = 'No algorithm node accepted the submission';
     });
     this.track(job, task);

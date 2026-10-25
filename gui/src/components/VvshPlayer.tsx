@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Download, FileDown, Gauge, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { chunkAt, pathToChunk, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
-import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream } from '../../../src/shared/vvsh-encode.js';
+import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
 import { fromBase64url, base64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage, streamUrl } from '../api';
 import { debugLog, setDebugLogs } from '../log';
@@ -79,7 +79,7 @@ async function fetchChunkOnce(nodeId: string, file: VvshFile, index: number, ren
       answer.path.length
     } steps · ${Math.round(performance.now() - started)}ms`
   );
-  if (file.meta.codec === 'vvsh-webm/1') return raw;
+  if (file.meta.codec === 'vvsh-webm/1') return normalizeVvshWebmChunk(raw, index, file.meta.chunkSeconds);
   const blocks = decodeVvshFrames(decodeVvshChunk(raw));
   const out = new Uint8Array(blocks.reduce((total, block) => total + block.length, 0));
   let at = 0;
@@ -132,6 +132,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     source: MediaSource;
     buffer: SourceBuffer | null;
     initHash: string;
+    requested: Set<number>;
     appended: Set<number>;
     queue: Uint8Array[];
     working: boolean;
@@ -171,11 +172,18 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   /** One chunk a moment needs: fetched (verified against the tree) and appended alone. */
   const mseWant = async (index: number, id: string) => {
     const st = mse.current;
-    if (!alive.current || !st || st.appended.has(index)) return;
-    st.appended.add(index); // before the fetch: nobody fetches the same chunk twice
-    const block = await fetchChunk(nodeId, file, index, id);
-    if (mse.current !== st) return;
-    mseAppend(block);
+    if (!alive.current || !st || st.requested.has(index)) return;
+    st.requested.add(index); // before the fetch: nobody fetches the same chunk twice
+    try {
+      const block = await fetchChunk(nodeId, file, index, id);
+      if (mse.current !== st) return;
+      st.appended.add(index);
+      mseAppend(block);
+    } catch (error) {
+      // A failed request is not an appended chunk: the next window may retry it.
+      st.requested.delete(index);
+      throw error;
+    }
   };
 
   /** Only the window from what is playing to a minute ahead — never the chunks behind. */
@@ -184,11 +192,13 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     const from = chunkAt(meta, at);
     const to = Math.min(meta.chunkCount - 1, chunkAt(meta, at + ahead));
     const missing: number[] = [];
-    for (let index = from; index <= to; index++) if (!mse.current?.appended.has(index)) missing.push(index);
+    for (let index = from; index <= to; index++) if (!mse.current?.requested.has(index)) missing.push(index);
     debugLog('fetch', `window chunks ${from}–${to} for ${id} (${missing.length} missing)`);
-    for (let start = 0; start < missing.length; start += 6) {
+    // Fetch and append in timeline order. Parallel responses used to reach SourceBuffer
+    // in completion order, which could put later WebM chunks ahead of their dependencies.
+    for (const index of missing) {
       if (!alive.current) return; // the page was left: stop fetching
-      await Promise.all(missing.slice(start, start + 6).map((index) => mseWant(index, id)));
+      await mseWant(index, id);
     }
   };
 
@@ -196,7 +206,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const mseOpen = async (id: string, at: number, play: boolean) => {
     const rendition = meta.bitrates.find((entry) => entry.id === id) ?? meta.bitrates[0];
     const source = new MediaSource();
-    mse.current = { source, buffer: null, initHash: rendition.initHash ?? '', appended: new Set(), queue: [], working: false };
+    mse.current = { source, buffer: null, initHash: rendition.initHash ?? '', requested: new Set(), appended: new Set(), queue: [], working: false };
     wantTime.current = at;
     wantPlay.current = play;
     const url = URL.createObjectURL(source);
@@ -215,7 +225,9 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     });
     const st = mse.current;
     if (!st || mse.current !== st) return;
+    source.duration = meta.totalSeconds;
     st.buffer = source.addSourceBuffer(mseMime);
+    st.buffer.onerror = () => setError('The browser rejected a video chunk while buffering it');
     mseAppend(Uint8Array.from(await ensureInit(id)));
     await mseWant(chunkAt(meta, at), id); // the chunk being played goes first, always
     const v = video.current;
@@ -223,7 +235,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
       v.currentTime = at;
       if (play) void v.play().catch(() => undefined);
     }
-    void mseWindow(at, id); // and then only what runs ahead of it
+    void mseWindow(at, id).catch((error) => setError(errorMessage(error))); // and then only what runs ahead of it
   };
   // 'auto' (the default) keeps the best encoding the measured download speed can carry.
   const [rendition, setRendition] = useState<string>(() => {
@@ -423,13 +435,15 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
               v.currentTime = at;
               if (play) void v.play().catch(() => undefined);
             }
-            void mseWindow(at, active.current);
+            void mseWindow(at, active.current).catch((error) => setError(errorMessage(error)));
           }
           setFetched(mse.current?.appended.size ?? 0);
           return;
-        } catch {
-          // MediaSource would not run here.
+        } catch (error) {
+          debugLog('error', `MediaSource: ${errorMessage(error)}`);
           mse.current = null;
+          setError(`The video chunks could not play: ${errorMessage(error)}`);
+          return;
         }
       }
       // Streamed chunks only: if neither range streaming nor media segments can serve
@@ -498,12 +512,14 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
       // together here, with progress, instead of trusting one assembled response.
       const pieces: Uint8Array[] = [];
       for (let index = 0; index < meta.chunkCount; index++) {
-        const answer = await api<{ data: string }>('/api/vvsh/chunk', { body: { nodeId, file, index, rendition: chosen } });
+        const answer = await api<{ data: string }>('/api/vvsh/chunk', {
+          body: { nodeId, root: file.root, chunkCount: meta.chunkCount, index, rendition: chosenRendition.id },
+        });
         pieces.push(fromBase64url(answer.data));
         setDownloadPct(Math.round(((index + 1) / meta.chunkCount) * 100));
       }
       const whole = file.meta.codec === 'vvsh-webm/1'
-        ? assembleVvshWebm(await fetchObject(nodeId, chosenRendition.initHash ?? ''), pieces)
+        ? assembleVvshWebm(await fetchObject(nodeId, chosenRendition.initHash ?? ''), pieces, { chunkSeconds: meta.chunkSeconds })
         : exportVvshStream(pieces);
       const url = URL.createObjectURL(new Blob([Uint8Array.from(whole)], { type: meta.sourceMime ?? 'video/mp4' }));
       const link = document.createElement('a');
@@ -587,7 +603,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             if (mseOk) {
               // Segmented: keep only the window around what is playing filled — the
               // chunks that hold it plus a configurable distance ahead, nothing else.
-              void mseWindow(v.currentTime, active.current);
+              void mseWindow(v.currentTime, active.current).catch((error) => setError(errorMessage(error)));
             }
           }}
         />

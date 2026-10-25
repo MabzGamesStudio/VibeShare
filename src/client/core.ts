@@ -41,7 +41,7 @@ import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
 import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
-import { DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
+import { assembleVvshWebm, DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
@@ -51,6 +51,7 @@ import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, Upload
 import { emptySavedState, prepareClientSave } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
+import { rememberPublished } from './published.js';
 
 export type FeedKind = 'feed' | 'search' | 'latest';
 
@@ -1407,6 +1408,7 @@ export class ClientCore {
     await client.json('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const cid = contentIdOf(signed);
     const listed = await this.submitVvshToAlgorithms(cid, signed, node);
+    rememberPublished(this.store, cid, signed.meta?.title ?? signed.name);
     return { cid, manifest: signed, objects, listed };
   }
 
@@ -1455,10 +1457,13 @@ export class ClientCore {
     const converted = await client.json<{ manifest: Manifest; quote: VvshConvertQuote }>(`/v1/vvsh/convert/${started.jobId}/finish`, {
       method: 'POST',
       body: {},
+      // Real per-quality encoding can take a while for a long, high-resolution video.
+      timeoutMs: 24 * 60 * 60 * 1000,
     });
     const signed = signManifest(converted.manifest, this.store.identity, this.settings.profile);
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
     return { cid: committed.cid, quote: converted.quote, manifest: signed, listed };
   }
 
@@ -1482,6 +1487,7 @@ export class ClientCore {
     const signed = signManifest(manifest, this.store.identity, this.settings.profile);
     const committed = await this.nodes.client(node).json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
     return { cid: committed.cid, listed };
   }
 
@@ -1543,6 +1549,12 @@ export class ClientCore {
     const chunks: Uint8Array[] = [];
     for (let index = 0; index < file.meta.chunkCount; index++) {
       chunks.push((await this.vvshChunk(node, { root: file.root, chunkCount: file.meta.chunkCount }, index, rendition)).data);
+    }
+    if (file.meta.codec === 'vvsh-webm/1') {
+      const selected = file.meta.bitrates.find((entry) => entry.id === rendition);
+      if (!selected?.initHash) throw new Error('This stream has no such bitrate encoding');
+      const init = await this.vvshObject(node, selected.initHash);
+      return assembleVvshWebm(init, chunks, { chunkSeconds: file.meta.chunkSeconds });
     }
     return exportVvshStream(chunks);
   }

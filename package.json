@@ -29,5 +29,9 @@
     "@types/node": "^22.18.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@mediabunny/server": "1.62.1",
+    "mediabunny": "1.62.1"
   }
 }

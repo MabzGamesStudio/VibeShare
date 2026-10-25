@@ -387,13 +387,19 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       nodeId?: string;
       root?: string;
       chunkCount?: number;
+      /** Older players sent the whole file; keep accepting that request shape. */
+      file?: VvshFile;
       index?: number;
       rendition?: string;
       from?: { hash: string; depth: number };
     }>();
     const chunk = await core.vvshChunk(
       nodes.require(String(body.nodeId ?? '')),
-      { root: String(body.root ?? ''), chunkCount: Number(body.chunkCount ?? 0), from: body.from },
+      {
+        root: String(body.root ?? body.file?.root ?? ''),
+        chunkCount: Number(body.chunkCount ?? body.file?.meta.chunkCount ?? 0),
+        from: body.from,
+      },
       Number(body.index ?? 0),
       String(body.rendition ?? '')
     );

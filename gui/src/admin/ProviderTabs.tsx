@@ -4,6 +4,7 @@ import { formatBytes, timeAgo } from '../util';
 import { admin, adminBytes, message } from './api';
 import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
 import { base64url } from '../../../src/shared/encoding.js';
+import { assembleVvshWebm, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
 import { useToast } from './AdminApp';
 
 interface ContentRow {
@@ -803,15 +804,14 @@ function VvshModal({ vvsh, onClose }: { vvsh: VvshFile; onClose: () => void }) {
       if (meta.codec === 'vvsh-webm/1') {
         // A segmented block stands alone: its init part and the block itself.
         const rendition = meta.bitrates.find((entry) => entry.id === renditionId);
-        const parts: Uint8Array[] = [];
-        if (rendition?.initHash) parts.push(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(rendition.initHash)}`));
-        parts.push(await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`));
-        const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-        let at = 0;
-        for (const part of parts) {
-          out.set(part, at);
-          at += part.length;
-        }
+        const init = rendition?.initHash
+          ? await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(rendition.initHash)}`)
+          : new Uint8Array(0);
+        const storedPayload = await adminBytes(`/v1/vvsh/objects/${encodeURIComponent(leaf.hash)}`);
+        const payload = normalizeVvshWebmChunk(storedPayload, index, meta.chunkSeconds);
+        // A preview is a new one-chunk file: timestamps restart at zero and its Duration
+        // is this block's few seconds, not the full source video's timeline.
+        const out = assembleVvshWebm(init, [payload], { resetTimestamps: true, durationSeconds: end - start });
         const url = URL.createObjectURL(new Blob([Uint8Array.from(out)], { type: 'video/webm' }));
         setChunkPlay((old) => {
           if (old && old.url.startsWith('blob:')) URL.revokeObjectURL(old.url);

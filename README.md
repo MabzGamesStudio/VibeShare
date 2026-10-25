@@ -127,6 +127,8 @@ The **iOS app** ([`mobile/`](mobile)) is this web client in a native shell (Capa
 vibeshare provider --data /var/lib/vibeshare/provider --public-url https://cdn.example.org
 ```
 
+Browser and provider VVSH conversion use the same pinned **Mediabunny** pipeline: direct VP9/Opus encoding, resizing and frame-rate conversion for each chunk, followed by the same WebM/VVSH assembly. Providers register Mediabunny's bundled NodeAV server codecs, so no `ffmpeg` executable or other host media installation is required.
+
 It prints its reference, the dashboard address (`/admin`) and the admin token. Everything is in `<data>/config.json` and editable from the dashboard:
 
 - **Pricing** — credits per MiB and per manifest, a free daily allowance, per-content prices, upload pricing (open, paid or closed), and a share of download credits paid to uploaders.

@@ -5,6 +5,7 @@
 import { DEFAULT_CHUNK_SIZE, type Manifest } from '../shared/content.js';
 import { DEFAULT_VVSH_BUILD, buildVvsh, vvshPlan, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 import type { VvshConvertQuote, VvshFile, VvshHash, VvshRendition } from '../shared/vvsh.js';
+import { transcodeVvshWebm } from './transcode.js';
 
 /** What a .vvsh conversion costs on this node. */
 export interface VvshConvertPricing {
@@ -54,9 +55,10 @@ export async function convertVvsh(
   },
   onObject: (hash: VvshHash, data: Uint8Array) => void | Promise<void>
 ): Promise<{ manifest: Manifest; vvsh: VvshFile }> {
+  const webm = await transcodeVvshWebm(source, options.config, options.totalSeconds);
   const { file } = await buildVvsh(
-    source,
-    { totalSeconds: options.totalSeconds, config: options.config, sourceMime: options.sourceMime, previews: options.previews },
+    new Uint8Array(0),
+    { totalSeconds: options.totalSeconds, config: options.config, sourceMime: 'video/webm', previews: options.previews, webm },
     (hash, data) => onObject(hash, data)
   );
   const manifest: Manifest = {

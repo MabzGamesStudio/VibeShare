@@ -9,7 +9,7 @@
 // Browser-safe: no Node imports.
 import type { VvshFrameStats, VvshMeta, VvshNode, VvshRendition } from './vvsh.js';
 import { vvshPayloadHash, vvshRecordBytes, type VvshFile, type VvshHash } from './vvsh.js';
-import { countClusterFrames, patchClusterTimecode, patchDuration, readClusterTimecode, splitWebm, webmCodecString } from './webm.js';
+import { clusterTimecodeWidth, countClusterFrames, patchDuration, readClusterTimecode, splitWebm, webmClusters, webmCodecString, webmStandaloneInit, withClusterTimecode } from './webm.js';
 
 /** Joins byte pieces into one block. */
 function concatBytes(pieces: Uint8Array[]): Uint8Array {
@@ -326,8 +326,9 @@ export async function buildVvsh(
         const pieces: Uint8Array[] = [];
         const frames: VvshFrameStats = { i: 0, p: 0, b: 0 };
         for (const cluster of clusters) {
-          const piece = Uint8Array.from(cluster); // a copy: the timecode below is patched in place
-          patchClusterTimecode(piece, Math.round(index * chunkUnits + readClusterTimecode(piece)));
+          // Rebuild the Cluster if its global timestamp needs a wider EBML field. An
+          // in-place write can wrap (3000 into one byte becomes 184), reordering playback.
+          const piece = withClusterTimecode(Uint8Array.from(cluster), Math.round(index * chunkUnits + readClusterTimecode(cluster)));
           const counted = countClusterFrames(piece);
           frames.i += counted.key;
           frames.p += counted.delta;
@@ -457,9 +458,46 @@ export async function buildVvsh(
   return { file: { meta, root: level[0] }, objects };
 }
 
-/** A segmented stream back into one playable WebM file: its init part and every chunk. */
-export function assembleVvshWebm(init: Uint8Array, chunks: Uint8Array[]): Uint8Array {
-  return concatBytes([init, ...chunks]);
+/**
+ * Normalizes one payload to its chunk's global timeline. Older VVSH builds patched large
+ * timestamps into narrow EBML fields, wrapping them modulo 256^width. The chunk index and
+ * that width recover the original relative value without guessing or reordering frames.
+ */
+export function normalizeVvshWebmChunk(chunk: Uint8Array, index: number, chunkSeconds: number): Uint8Array {
+  const start = Math.round(index * chunkSeconds * 1000);
+  const pieces = webmClusters(chunk).map((cluster) => {
+    const observed = readClusterTimecode(cluster);
+    const width = clusterTimecodeWidth(cluster);
+    if (width >= 8) return Uint8Array.from(cluster);
+    const modulus = 256 ** width;
+    const relative = ((observed - start) % modulus + modulus) % modulus;
+    const corrected = start + relative;
+    return corrected === observed ? Uint8Array.from(cluster) : withClusterTimecode(cluster, corrected);
+  });
+  return concatBytes(pieces);
+}
+
+/**
+ * A segmented stream back into one valid, standalone WebM file. Chunk payloads contain
+ * only Clusters, so the init Segment must be opened again around them. Timestamps are
+ * ordered for playback; a single-chunk preview can instead start at zero and advertise
+ * only that chunk's duration rather than the full source video.
+ */
+export function assembleVvshWebm(
+  init: Uint8Array,
+  chunks: Uint8Array[],
+  options: { resetTimestamps?: boolean; durationSeconds?: number; chunkSeconds?: number } = {}
+): Uint8Array {
+  const clusters: { data: Uint8Array; order: number; time: number }[] = chunks
+    .flatMap((chunk, index) => webmClusters(options.chunkSeconds ? normalizeVvshWebmChunk(chunk, index, options.chunkSeconds) : chunk))
+    .map((data, order) => ({ data: Uint8Array.from(data), order, time: 0 }));
+  for (const cluster of clusters) cluster.time = readClusterTimecode(cluster.data);
+  clusters.sort((a, b) => a.time - b.time || a.order - b.order);
+  if (options.resetTimestamps && clusters.length) {
+    const first = clusters[0].time;
+    for (const cluster of clusters) cluster.data = withClusterTimecode(cluster.data, Math.max(0, cluster.time - first));
+  }
+  return concatBytes([webmStandaloneInit(init, options.durationSeconds), ...clusters.map((cluster) => cluster.data)]);
 }
 
 /** Pieces one bitrate's chunks back into the full stream (the file a user exports). */

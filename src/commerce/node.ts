@@ -493,6 +493,9 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
         return false;
       },
     });
+    // Provider-side video conversion is one potentially long request. Header/body
+    // timeouts still apply; do not cut off the response merely because FFmpeg is working.
+    if (this.type === 'provider') this.server.requestTimeout = 0;
     this.port = await listen(this.server, this.config.port, this.config.host);
     log.info(`${this.type} node "${this.config.name}" listening on ${this.config.host}:${this.port}`);
     await this.applyTor();

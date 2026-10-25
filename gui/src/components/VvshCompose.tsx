@@ -258,14 +258,15 @@ export function VvshCompose() {
       // One WebM recording per chunk, so every chunk plays on its own (sparse playback).
       const webm: Record<string, Uint8Array[]> = {};
       for (const row of rows) {
-        const key = `${id}:enc:${row.id}`;
+        // Do not resume recorder-produced chunks from the old pipeline.
+        const key = `${id}:enc2:${row.id}`;
         const done = await getBlob(key);
         if (done) {
           webm[row.id] = unpackSegments(done);
           continue;
         }
         await persist({ stage: `Encoding ${row.height}p ${row.fps}fps`, pct: 0 });
-        const chunks = await transcodeSegments(source, row, config.chunkSeconds, (fraction) => void persist({ pct: Math.round(fraction * 99) }));
+        const chunks = await transcodeSegments(source, row, config.chunkSeconds, (fraction) => void persist({ pct: Math.round(fraction * 99) }), totalSeconds);
         await putBlob(key, packSegments(chunks));
         webm[row.id] = chunks;
         await persist({ encoded: [...(jobRef.current?.encoded ?? []), row.id] });
@@ -583,7 +584,7 @@ export function VvshCompose() {
           {job && job.status !== 'done' ? 'Resume publishing' : 'Process & publish'}
         </button>
         <button className="small" disabled={!file || !provider || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
-          Convert on the provider (source quality)
+          Convert on the provider
         </button>
         {job && job.status !== 'done' && (
           <button

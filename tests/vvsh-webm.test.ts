@@ -4,8 +4,8 @@
 // checked against bytes with known contents.
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { countClusterFrames, patchClusterTimecode, readClusterTimecode, splitWebm, webmCodecString } from '../src/shared/webm.js';
-import { buildVvsh } from '../src/shared/vvsh-encode.js';
+import { countClusterFrames, patchClusterTimecode, readClusterTimecode, splitWebm, webmClusters, webmCodecString } from '../src/shared/webm.js';
+import { buildVvsh, normalizeVvshWebmChunk } from '../src/shared/vvsh-encode.js';
 import { parseVvshFile, serializeVvshFile, walkToChunk } from '../src/shared/vvsh.js';
 
 /** EBML size field: as many bytes as the size needs, marker bit kept. */
@@ -160,6 +160,18 @@ describe('segmented .vvsh streams (WebM media segments)', () => {
       assert.equal(node.index, index);
       assert.equal(node.renditions.length, 2, 'each chunk carries both encodings');
     }
+  });
+
+  it('recovers global timestamps wrapped by the old narrow-field patcher', () => {
+    const legacyCluster = (timecode: number, width: number) =>
+      element(
+        [0x1f, 0x43, 0xb6, 0x75],
+        join(element([0xe7], uintBytes(timecode, width)), simpleBlock(0, true, [1, 2, 3]))
+      );
+    // 3000 used to fit into one byte as 184; the following two-byte Cluster was intact.
+    const legacy = join(legacyCluster(184, 1), legacyCluster(5920, 2));
+    const repaired = normalizeVvshWebmChunk(legacy, 1, 3);
+    assert.deepEqual(webmClusters(repaired).map(readClusterTimecode), [3000, 5920]);
   });
 
   it('refuses a chunk count that does not match the stream', async () => {

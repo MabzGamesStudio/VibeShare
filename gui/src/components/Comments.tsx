@@ -1,10 +1,7 @@
-// The comments section of a content page: a hash-chained history kept by a search
-// algorithm node. Nothing is shown until every block header and signature verifies;
-// comments the node keeps back appear as removals. The user comments, replies, votes,
-// edits their own comments and asks for them to go — anonymously if they choose — and
-// decides how much of the posting time is written down.
-import { Pencil, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+// A verified comment chain presented as a foldable reply tree. Verification and the wire
+// format stay in shared/comments; this component only changes composition and presentation.
+import { ChevronDown, ChevronRight, MessageCircle, MoreHorizontal, Pencil, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   checkCommentChain,
   COMMENT_TIME_PRECISIONS,
@@ -13,6 +10,7 @@ import {
   type CommentTimePrecision,
 } from '../../../src/shared/comments';
 import type { CommentPostRequest, CommentsResponse } from '../../../src/shared/clientapi';
+import { commentThreads, formatCommentDate, type CommentDateDisplay, type CommentThread } from '../../../src/shared/comment-view';
 import { api, errorMessage } from '../api';
 import { Loading } from './ui';
 
@@ -23,26 +21,15 @@ const PRECISION_LABELS: Record<CommentTimePrecision, string> = {
   none: 'Hide the date',
 };
 
-const PRECISION_HINTS: Record<CommentTimePrecision, string> = {
-  datetime: 'the exact date and time',
-  date: 'the date only',
-  year: 'the year only',
-  none: 'nothing at all',
+type DateDisplay = CommentDateDisplay;
+const DATE_DISPLAY_LABELS: Record<DateDisplay, string> = {
+  relative: 'Relative (2 hours ago)',
+  local: 'Local date and time',
+  iso: 'ISO 8601',
+  hidden: 'Hide dates',
 };
 
-/** How deep a comment sits in the reply chain (following replyFrom links). */
-function depthOf(entry: CommentEntry, byId: Map<string, CommentEntry>, root: string): number {
-  let depth = 0;
-  let current: CommentEntry | undefined = entry;
-  const seen = new Set<string>();
-  while (current && current.replyFrom !== root && !seen.has(current.id)) {
-    seen.add(current.id);
-    current = byId.get(current.replyFrom);
-    if (current) depth++;
-    if (depth > 20) break;
-  }
-  return depth;
-}
+type Thread = CommentThread;
 
 export function Comments({ contentId }: { contentId: string }) {
   const [data, setData] = useState<CommentsResponse | null>(null);
@@ -50,10 +37,18 @@ export function Comments({ contentId }: { contentId: string }) {
   const [text, setText] = useState('');
   const [anonymous, setAnonymous] = useState(false);
   const [precision, setPrecision] = useState<CommentTimePrecision>('datetime');
+  const [dateDisplay, setDateDisplay] = useState<DateDisplay>(() => {
+    try {
+      return (localStorage.getItem('vibeshare-comment-dates') as DateDisplay | null) ?? 'local';
+    } catch {
+      return 'local';
+    }
+  });
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
   const [editing, setEditing] = useState<CommentEntry | null>(null);
   const [editText, setEditText] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -69,8 +64,18 @@ export function Comments({ contentId }: { contentId: string }) {
     setError(null);
     setReplyTo(null);
     setEditing(null);
+    setCollapsed(new Set());
     void load();
   }, [load]);
+
+  const chooseDateDisplay = (value: DateDisplay) => {
+    setDateDisplay(value);
+    try {
+      localStorage.setItem('vibeshare-comment-dates', value);
+    } catch {
+      // The choice still works for this page when storage is unavailable.
+    }
+  };
 
   const send = async (body: CommentPostRequest): Promise<boolean> => {
     setBusy(true);
@@ -105,174 +110,217 @@ export function Comments({ contentId }: { contentId: string }) {
   };
 
   const chain = data ? checkCommentChain(data.blocks, data.votes) : null;
-  const broken = chain !== null && chain.errors.length > 0;
-  const entries: ChainEntry[] = chain && !broken ? chain.entries : [];
-  const byId = new Map(entries.filter((entry): entry is CommentEntry => !('removed' in entry)).map((entry) => [entry.id, entry]));
+  const entries = chain?.entries ?? [];
+  const broken = Boolean(chain?.errors.length);
+  const threads = commentThreads(entries, contentId);
+  const removed = entries.filter((entry): entry is Extract<ChainEntry, { removed: true }> => 'removed' in entry);
 
-  return (
-    <div className="card form-stack" style={{ marginTop: 24 }}>
-      <h3>Comments</h3>
-      {error && <div className="banner danger small">{error}</div>}
-      {broken && (
-        <div className="banner danger">
-          The comment chain of this page does not verify — {chain!.errors[0]} — so no comments are shown. The data the node sent has been
-          changed or cut.
+  const toggleFold = (id: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const renderComment = (thread: Thread): ReactNode => {
+    const entry = thread.entry;
+    const mine = Boolean(entry.key && entry.key === data?.you);
+    const date = formatCommentDate(entry.time, dateDisplay);
+    const folded = collapsed.has(entry.id);
+    return (
+      <article className="comment-item" key={entry.id}>
+        <div className="comment-head">
+          <span className={`comment-avatar${entry.anonymous ? ' anonymous' : ''}`} aria-hidden="true">
+            {entry.anonymous ? 'A' : (entry.key ?? '?').slice(0, 1).toUpperCase()}
+          </span>
+          <div className="comment-byline">
+            <strong>{entry.anonymous ? 'Anonymous' : `Member ${entry.key?.slice(0, 10) ?? ''}…`}</strong>
+            <span>
+              {dateDisplay === 'hidden' ? '' : date || 'Date hidden'}
+              {entry.edited ? ' · edited' : ''}
+            </span>
+          </div>
+          {thread.replies.length > 0 && (
+            <button
+              className="comment-fold"
+              onClick={() => toggleFold(entry.id)}
+              aria-expanded={!folded}
+              aria-label={folded ? `Expand ${thread.replies.length} replies` : `Collapse ${thread.replies.length} replies`}
+            >
+              {folded ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+              {thread.replies.length} {thread.replies.length === 1 ? 'reply' : 'replies'}
+            </button>
+          )}
         </div>
-      )}
-      {!data && !error && <Loading />}
-
-      <div className="form-stack">
-        <textarea rows={3} value={text} placeholder="Add a comment" onChange={(e) => setText(e.target.value)} disabled={busy} />
-        <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
-          <label className="row small" style={{ gap: 6 }}>
-            <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} /> Post anonymously
-          </label>
-          <label className="row small" style={{ gap: 6 }}>
-            Write down
-            <select value={precision} onChange={(e) => setPrecision(e.target.value as CommentTimePrecision)} style={{ width: 'auto' }}>
-              {COMMENT_TIME_PRECISIONS.map((option) => (
-                <option key={option} value={option}>
-                  {PRECISION_LABELS[option]}
-                </option>
-              ))}
-            </select>
-          </label>
+        <p className="comment-text">{entry.text}</p>
+        <div className="comment-actions">
+          <button className={entry.mine === 1 ? 'active' : ''} onClick={() => void vote(entry.id, entry.mine === 1 ? 0 : 1)} aria-label="Like comment">
+            <ThumbsUp size={14} /> {entry.likes}
+          </button>
+          <button className={entry.mine === -1 ? 'active' : ''} onClick={() => void vote(entry.id, entry.mine === -1 ? 0 : -1)} aria-label="Dislike comment">
+            <ThumbsDown size={14} /> {entry.dislikes}
+          </button>
           <button
-            className="primary"
-            disabled={busy || !text.trim()}
-            onClick={async () => {
-              if (await send({ text, anonymous, timePrecision: precision })) {
-                setText('');
-                setAnonymous(false);
-              }
+            onClick={() => {
+              setEditing(null);
+              setReplyTo(replyTo === entry.id ? null : entry.id);
+              setReplyText('');
             }}
           >
-            Comment
+            Reply
           </button>
+          {mine && (
+            <button
+              onClick={() => {
+                setReplyTo(null);
+                setEditing(editing?.id === entry.id ? null : entry);
+                setEditText(editing?.id === entry.id ? '' : entry.text);
+              }}
+            >
+              <Pencil size={13} /> Edit
+            </button>
+          )}
+          {mine && (
+            <button className="danger" title="Ask for this comment to be removed" onClick={() => void remove(entry.id)}>
+              <Trash2 size={13} /> Delete
+            </button>
+          )}
         </div>
-        <p className="hint">
-          Your comment is signed with your key; only you can edit or remove it later. Anonymous comments show as “Anonymous” and can never be
-          edited or removed. The node writes down {PRECISION_HINTS[precision]} of when you posted.
-        </p>
-      </div>
-
-      <div className="form-stack">
-        {entries.map((entry) => {
-          if ('removed' in entry) {
-            return (
-              <div key={`removed-${entry.id}`} className="small muted" style={{ fontStyle: 'italic' }}>
-                A comment was removed by the node operator.
-              </div>
-            );
-          }
-          const mine = !entry.anonymous && entry.key === data?.you;
-          const depth = depthOf(entry, byId, data?.root ?? '');
-          return (
-            <div key={entry.id} style={{ marginLeft: depth * 24, borderTop: '1px solid var(--border, #eee)', paddingTop: 10 }}>
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-                <strong className="small">{entry.anonymous ? 'Anonymous' : `${entry.key!.slice(0, 14)}…`}</strong>
-                {entry.time && <span className="tiny faint">{entry.time}</span>}
-                {entry.edited && <span className="tiny faint">(edited)</span>}
-              </div>
-              <div style={{ margin: '6px 0' }}>{entry.text}</div>
-              <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-                <button
-                  className="small ghost"
-                  title={entry.mine === 1 ? 'Take your like back' : 'Like'}
-                  onClick={() => void vote(entry.id, entry.mine === 1 ? 0 : 1)}
-                >
-                  <ThumbsUp size={13} /> {entry.likes}
-                </button>
-                <button
-                  className="small ghost"
-                  title={entry.mine === -1 ? 'Take your dislike back' : 'Dislike'}
-                  onClick={() => void vote(entry.id, entry.mine === -1 ? 0 : -1)}
-                >
-                  <ThumbsDown size={13} /> {entry.dislikes}
-                </button>
-                <button
-                  className="small ghost"
-                  onClick={() => {
-                    setEditing(null);
-                    setReplyTo(replyTo === entry.id ? null : entry.id);
+        {replyTo === entry.id && (
+          <div className="comment-inline-form">
+            <textarea
+              rows={2}
+              value={replyText}
+              placeholder={`Reply to ${entry.anonymous ? 'Anonymous' : 'this comment'}…`}
+              onChange={(e) => setReplyText(e.target.value)}
+            />
+            <div className="row">
+              <button
+                className="primary small"
+                disabled={busy || !replyText.trim()}
+                onClick={async () => {
+                  if (await send({ text: replyText, replyFrom: entry.id, anonymous, timePrecision: precision })) {
+                    setReplyTo(null);
                     setReplyText('');
-                  }}
-                >
-                  Reply
-                </button>
-                {mine && (
-                  <button
-                    className="small ghost"
-                    onClick={() => {
-                      setReplyTo(null);
-                      setEditing(editing?.id === entry.id ? null : entry);
-                      setEditText(editing?.id === entry.id ? '' : entry.text);
-                    }}
-                  >
-                    <Pencil size={13} /> Edit
-                  </button>
-                )}
-                {mine && (
-                  <button className="small ghost" title="Ask for this comment to be removed" onClick={() => void remove(entry.id)}>
-                    <Trash2 size={13} /> Delete
-                  </button>
-                )}
-              </div>
-              {replyTo === entry.id && (
-                <div className="form-stack" style={{ margin: '8px 0 8px 24px' }}>
-                  <textarea
-                    rows={2}
-                    value={replyText}
-                    placeholder={`Reply to ${entry.anonymous ? 'Anonymous' : 'this comment'}`}
-                    onChange={(e) => setReplyText(e.target.value)}
-                  />
-                  <div className="row">
-                    <button
-                      className="primary small"
-                      disabled={busy || !replyText.trim()}
-                      onClick={async () => {
-                        if (await send({ text: replyText, replyFrom: entry.id, anonymous, timePrecision: precision })) {
-                          setReplyTo(null);
-                          setReplyText('');
-                        }
-                      }}
-                    >
-                      Reply
-                    </button>
-                    <button className="small" onClick={() => setReplyTo(null)}>
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-              {editing?.id === entry.id && (
-                <div className="form-stack" style={{ margin: '8px 0 8px 24px' }}>
-                  <textarea rows={2} value={editText} onChange={(e) => setEditText(e.target.value)} />
-                  <div className="row">
-                    <button
-                      className="primary small"
-                      disabled={busy || !editText.trim()}
-                      onClick={async () => {
-                        if (await send({ text: editText, editOf: entry.id, replyFrom: entry.replyFrom })) {
-                          setEditing(null);
-                          setEditText('');
-                        }
-                      }}
-                    >
-                      Save
-                    </button>
-                    <button className="small" onClick={() => setEditing(null)}>
-                      Cancel
-                    </button>
-                  </div>
-                  <p className="hint">An edit is a new block in the chain; the earlier text stays in the history.</p>
-                </div>
-              )}
+                  }
+                }}
+              >
+                Post reply
+              </button>
+              <button className="small ghost" onClick={() => setReplyTo(null)}>Cancel</button>
             </div>
-          );
-        })}
+          </div>
+        )}
+        {editing?.id === entry.id && (
+          <div className="comment-inline-form">
+            <textarea rows={2} value={editText} onChange={(e) => setEditText(e.target.value)} />
+            <div className="row">
+              <button
+                className="primary small"
+                disabled={busy || !editText.trim()}
+                onClick={async () => {
+                  if (await send({ text: editText, editOf: entry.id, replyFrom: entry.replyFrom })) {
+                    setEditing(null);
+                    setEditText('');
+                  }
+                }}
+              >
+                Save edit
+              </button>
+              <button className="small ghost" onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+            <p className="hint">An edit adds a block to the verified chain; its earlier text stays in history.</p>
+          </div>
+        )}
+        {thread.replies.length > 0 && !folded && <div className="comment-replies">{thread.replies.map(renderComment)}</div>}
+      </article>
+    );
+  };
+
+
+  return (
+    <section className="comments-section">
+      <div className="comments-title">
+        <div>
+          <h3>Comments</h3>
+          <p>{entries.filter((entry) => !('removed' in entry)).length} verified comments and replies</p>
+        </div>
+        <MessageCircle size={21} aria-hidden="true" />
       </div>
-      {data && entries.length === 0 && !broken && <p className="small muted">No comments yet.</p>}
-    </div>
+      {error && <div className="banner danger small">{error}</div>}
+      {broken && (
+        <div className="banner danger small">
+          This comment chain does not verify — {chain?.errors[0]} — so no comments are shown. Untrusted data never reaches the thread view.
+        </div>
+      )}
+      {!broken && (
+        <div className="comment-composer">
+          <textarea
+            rows={3}
+            value={text}
+            placeholder="Add to the conversation…"
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div className="comment-composer-footer">
+            <div className="comment-compose-options">
+              <label className="comment-anonymous">
+                <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+                <span>Post anonymously</span>
+              </label>
+              <details className="comment-options">
+                <summary className="comment-dots" aria-label="Comment settings" title="Comment settings">
+                  <MoreHorizontal size={20} />
+                </summary>
+                <div className="comment-options-popover">
+                  <fieldset>
+                    <legend>Date format</legend>
+                    {(Object.keys(DATE_DISPLAY_LABELS) as DateDisplay[]).map((value) => (
+                      <label key={value}>
+                        <input type="radio" name="comment-date-display" checked={dateDisplay === value} onChange={() => chooseDateDisplay(value)} />
+                        <span>{DATE_DISPLAY_LABELS[value]}</span>
+                      </label>
+                    ))}
+                  </fieldset>
+                  <fieldset>
+                    <legend>Timestamp stored on your posts</legend>
+                    {COMMENT_TIME_PRECISIONS.map((value) => (
+                      <label key={value}>
+                        <input type="radio" name="comment-time-precision" checked={precision === value} onChange={() => setPrecision(value)} />
+                        <span>{PRECISION_LABELS[value]}</span>
+                      </label>
+                    ))}
+                  </fieldset>
+                  <p className="hint">
+                    {anonymous
+                      ? 'Anonymous posts cannot be edited or removed later.'
+                      : 'Signed posts can be edited or removed by your key later.'}
+                  </p>
+                </div>
+              </details>
+            </div>
+            <button
+              className="primary comment-post"
+              disabled={busy || !text.trim()}
+              onClick={async () => {
+                if (await send({ text, replyFrom: contentId, anonymous, timePrecision: precision })) setText('');
+              }}
+            >
+              <MessageCircle size={15} /> Comment
+            </button>
+          </div>
+        </div>
+      )}
+      {!data ? (
+        <Loading />
+      ) : (
+        <div className="comment-list">
+          {!broken && threads.map(renderComment)}
+          {!broken && removed.map((entry) => <div className="comment-removed" key={entry.id}>A comment was removed</div>)}
+          {!broken && entries.length === 0 && <p className="comment-empty">No comments yet. Start the conversation.</p>}
+        </div>
+      )}
+    </section>
   );
 }

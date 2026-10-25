@@ -23,6 +23,8 @@ On first start a node creates in its data directory:
 
 **Network.** Put the node behind a reverse proxy with TLS (Caddy, nginx, Traefik) and set `publicUrl` to the address clients use; set `trustProxy: true` so per-IP limits see real addresses. Docker: `docker compose up -d` ([docker-compose.yml](../docker-compose.yml)). systemd: [examples/systemd](../examples/systemd).
 
+**Video conversion.** Provider-side VVSH conversion uses the same pinned Mediabunny code as browser publishing, with NodeAV supplying VP9/Opus codecs on the server. Each chunk is encoded directly from the source at its configured resolution, frame rate and bitrate; no `ffmpeg` executable or host codec installation is used. Long conversions need a correspondingly generous reverse-proxy response timeout.
+
 ## Settings both node types share
 
 ```jsonc
