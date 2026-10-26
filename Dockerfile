@@ -1,10 +1,16 @@
 # VibeShare node image: runs any node type.
 #   docker run -p 7701:7701 -v vibeshare:/data ghcr.io/mabzgamesstudio/vibeshare provider --public-url https://cdn.example.org
-# Debian/glibc supports native FFmpeg (installed below) and the NodeAV fallback codecs.
+# Debian/glibc supports native FFmpeg and the NodeAV fallback codecs.
 ARG NODE_IMAGE=node:22
+
 FROM ${NODE_IMAGE} AS build
 WORKDIR /src
+
 COPY package.json package-lock.json ./
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN npm ci
 COPY gui/package.json gui/package-lock.json ./gui/
 RUN npm --prefix gui ci
