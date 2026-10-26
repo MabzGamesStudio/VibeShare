@@ -230,7 +230,9 @@ describe('a client keeping track of what the user has seen', async () => {
     const status = await api<BloomStatus>('/api/bloom');
     assert.ok(status.selected.added >= 2, 'the cid and the link were added independently');
     const after = await browse();
-    assert.ok(!after.items.some((item) => item.id.startsWith(vid)), 'what was opened is not suggested again');
+    const remembered = after.items.find((item) => item.id.startsWith(vid));
+    assert.ok(remembered, 'the small native suggestion group is still offered');
+    assert.equal(remembered.seen, true, 'and marked as seen rather than hidden');
     assert.ok(after.items.length >= 2, 'the rest is untouched');
   });
 
@@ -238,7 +240,8 @@ describe('a client keeping track of what the user has seen', async () => {
     await api('/api/bloom/reset', { body: { scope: 'selected' } });
     await api('/api/bloom/reset', { body: { scope: 'preview' } });
     const all = await browse();
-    const target = all.items[0];
+    const target = all.items.find((item) => item.id === 'yt:lava2')!;
+    assert.ok(target, 'there is ordinary external content to demonstrate the seen filter on');
     assert.ok(!target.seen, 'nothing is guessed watched before it was seen');
     await api('/api/bloom/mark', { body: { scope: 'preview', id: target.id, contentId: target.contentId, link: target.link } });
 
@@ -352,10 +355,10 @@ describe('a client keeping track of what the user has seen', async () => {
     const before = await api<BloomStatus>('/api/bloom');
 
     // Viewing content now records nothing — neither history nor any of the filters.
-    await api('/api/history', { body: { id: 'yt:goat3', title: 'Mountain goat jumps' } });
-    await api('/api/bloom/mark', { body: { scope: 'preview', id: 'yt:goat3' } });
+    await api('/api/history', { body: { id: 'yt:paused', title: 'Paused view' } });
+    await api('/api/bloom/mark', { body: { scope: 'preview', id: 'yt:paused' } });
     const library = await api<{ history: { id: string }[] }>('/api/library');
-    assert.ok(!library.history.some((h) => h.id === 'yt:goat3'), 'the history stands still');
+    assert.ok(!library.history.some((h) => h.id === 'yt:paused'), 'the history stands still');
     const paused = await api<BloomStatus>('/api/bloom');
     assert.equal(paused.selected.added, before.selected.added, 'no filter recorded anything');
     assert.equal(paused.preview.added, before.preview.added);
@@ -364,9 +367,9 @@ describe('a client keeping track of what the user has seen', async () => {
 
     // Back on, the same views count again.
     await api('/api/settings', { method: 'PATCH', body: { pauseHistory: false } });
-    await api('/api/history', { body: { id: 'yt:goat3', title: 'Mountain goat jumps' } });
+    await api('/api/history', { body: { id: 'yt:paused', title: 'Paused view' } });
     const library2 = await api<{ history: { id: string }[] }>('/api/library');
-    assert.equal(library2.history[0]?.id, 'yt:goat3');
+    assert.equal(library2.history[0]?.id, 'yt:paused');
     const done = await api<BloomStatus>('/api/bloom');
     assert.ok(done.selected.added > before.selected.added, 'and recording works again');
   });

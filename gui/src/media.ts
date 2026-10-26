@@ -29,9 +29,19 @@ const AUDIO_FORMATS = new Set(['music', 'audio', 'podcast']);
  * place of the platform's picture or player.
  */
 let blockExternal = false;
+let contentPreviews = true;
 
 export function setBlockExternalEmbeds(blocked: boolean): void {
   blockExternal = blocked;
+}
+
+/** Applies immediately, including to feed pages loaded before the setting changed. */
+export function setContentPreviews(show: boolean): void {
+  contentPreviews = show;
+}
+
+export function previewsEnabled(): boolean {
+  return contentPreviews;
 }
 
 /** True when external content is turned off (settings or the cookie choice). */
@@ -79,6 +89,7 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
  * nothing may be fetched from the platform the content was discovered on.
  */
 export function nodePreviewOf(item: Pick<FeedItem, 'format' | 'thumbnail' | 'thumbnailUrl'>): string | undefined {
+  if (!contentPreviews) return undefined;
   // An image is its own content (the full picture loads from its platform): only a
   // video's preview stands in from the node's copy.
   if (item.format === 'image') return undefined;
@@ -87,6 +98,7 @@ export function nodePreviewOf(item: Pick<FeedItem, 'format' | 'thumbnail' | 'thu
 
 /** The best still image of an item: the image itself for images, otherwise its thumbnail. */
 export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnail' | 'thumbnailUrl'>): string | undefined {
+  if (!contentPreviews) return undefined;
   const parsed = parseContentId(item.id);
   // With cookies off, the platform's picture may not load — but the preview the
   // algorithm node keeps of the content is ours, and stands in for a video's preview.

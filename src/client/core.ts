@@ -93,6 +93,15 @@ export interface ClientCoreOptions {
   version?: string;
   /** How requests to a node are sent (the daemon routes them through Tor); plain fetch when undefined. */
   transport?: (target: { url: string; onion?: string }) => Transport | undefined;
+  /** Native encoder supplied by the daemon; the static browser uses its local fallback. */
+  transcodeVvsh?: (
+    source: Uint8Array,
+    config: VvshBuildConfig,
+    totalSeconds: number,
+    onProgress?: (rendition: number, chunk: number, fraction: number) => void
+  ) => Promise<Record<string, Uint8Array[]>>;
+  /** Whether local publishing has a usable native FFmpeg backend. */
+  encoderInfo?: () => Promise<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }>;
 }
 
 export class ClientCore {
@@ -180,14 +189,14 @@ export class ClientCore {
    * only goes to content actually opened before (the selected filter): a preview is not
    * a watch, so the first open of previewed content is never marked watched.
    */
-  private applySeenFilters(items: FeedItem[], keepPublished = false): FeedItem[] {
+  private applySeenFilters(items: FeedItem[]): FeedItem[] {
     const rank = this.settings.seenContentMode === 'rank';
     const shown: FeedItem[] = [];
     const demoted: FeedItem[] = [];
     for (const item of items) {
-      // Search results keep matching VibeShare-published content at the front even when
-      // the reader has seen it: that is what the query asked for.
-      if (keepPublished && item.id.startsWith('vs1')) {
+      // Only the algorithm node's small leading native group is seen-exempt. Other
+      // native items still follow the user's ordinary seen-content preference.
+      if (item.nativeSuggestion) {
         const identity = { id: item.id, contentId: item.contentId, link: item.link };
         shown.push(this.blooms.sees('selected', identity) ? { ...item, seen: true } : item);
         continue;
@@ -204,6 +213,11 @@ export class ClientCore {
     return [...shown, ...demoted];
   }
 
+  /** Native content stays ahead of external results after blending or local ranking. */
+  private nativeFirst(items: FeedItem[]): FeedItem[] {
+    return [...items.filter((item) => item.id.startsWith('vs1')), ...items.filter((item) => !item.id.startsWith('vs1'))];
+  }
+
   /**
    * Asks the algorithm nodes for a page. "blend" mixes every enabled node by priority
    * (round robin, without duplicates); "primary" uses the first node that answers.
@@ -216,8 +230,8 @@ export class ClientCore {
     const cursors = decodeCursor(cursor) ?? {};
     const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
     const priceKind = kind === 'search' ? 'search' : 'feed';
-    // The subscriptions feed ("latest") is just the newest content of the creators the
-    // user follows: the seen-content filters do not touch it. No filter travels along,
+    // The subscriptions feed ("latest") leads with native suggestions and otherwise lists
+    // the newest followed content: seen-content filters do not touch it. No filter travels along,
     // and nothing is hidden, demoted or marked locally — it lists what is recent, seen
     // or not. Every other feed and search results are filtered as the user chose.
     const seenContent = kind !== 'latest';
@@ -232,7 +246,13 @@ export class ClientCore {
       return this.askJson<Page<ContentItem>>(
         node,
         path,
-        { ...body, ...(seenContent ? this.bloomPayload(node) : {}), limit, cursor: cursors[node.id] ?? undefined },
+        {
+          ...body,
+          previews: this.settings.showContentPreviews,
+          ...(seenContent ? this.bloomPayload(node) : {}),
+          limit,
+          cursor: cursors[node.id] ?? undefined,
+        },
         identify
       );
     };
@@ -244,9 +264,11 @@ export class ClientCore {
         try {
           const page = await ask(node, 24);
           return {
-            items: seenContent
-              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)), kind === 'search')
-              : page.items.filter(wanted).map((item) => this.feedItem(node, item)),
+            items: this.nativeFirst(
+              seenContent
+                ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
+                : page.items.filter(wanted).map((item) => this.feedItem(node, item))
+            ),
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
           };
@@ -285,7 +307,11 @@ export class ClientCore {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    return { items: seenContent ? this.applySeenFilters(items, kind === 'search') : items, cursor: more ? encodeCursor(next) : undefined, errors };
+    return {
+      items: this.nativeFirst(seenContent ? this.applySeenFilters(items) : items),
+      cursor: more ? encodeCursor(next) : undefined,
+      errors,
+    };
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */
@@ -1382,13 +1408,18 @@ export class ClientCore {
       meta?: ManifestMeta;
       sourceMime?: string;
       previews?: string[];
+      /** Opt in to the daemon's configured native encoder (legacy API calls stay lossless). */
+      encoder?: 'ffmpeg';
     }
   ): Promise<{ cid: string; manifest: Manifest; objects: number; listed: number }> {
     const client = this.nodes.client(node);
     const config = options.config ?? DEFAULT_VVSH_BUILD;
+    const webm = options.encoder === 'ffmpeg' && this.options.transcodeVvsh
+      ? await this.options.transcodeVvsh(source, config, options.totalSeconds)
+      : undefined;
     const { file, objects } = await encodeVvsh(
-      source,
-      { totalSeconds: options.totalSeconds, config, sourceMime: options.sourceMime, previews: options.previews },
+      webm ? new Uint8Array(0) : source,
+      { totalSeconds: options.totalSeconds, config, sourceMime: webm ? 'video/webm' : options.sourceMime, previews: options.previews, webm },
       async (hash, data) => {
         await client.json(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
       }
@@ -1410,6 +1441,14 @@ export class ClientCore {
     const listed = await this.submitVvshToAlgorithms(cid, signed, node);
     rememberPublished(this.store, cid, signed.meta?.title ?? signed.name);
     return { cid, manifest: signed, objects, listed };
+  }
+
+  /** The backend local publishing will use, including the warning the GUI must show. */
+  encoderInfo(): Promise<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }> {
+    return this.options.encoderInfo?.() ?? Promise.resolve({
+      backend: 'mediarecorder',
+      warning: 'FFmpeg is not available in this browser. Using the slower, realtime MediaRecorder fallback.',
+    });
   }
 
   /** What one provider asks to calculate a .vvsh from just the video. */
@@ -1436,8 +1475,22 @@ export class ClientCore {
       sourceMime?: string;
       previews?: string[];
     }
-  ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number }> {
+  ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number; warnings: string[] }> {
     const client = this.nodes.client(node);
+    const warnings: string[] = [];
+    const retryOnce = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
+      try {
+        return await run();
+      } catch (error) {
+        const transient = !(error instanceof RemoteError) || error.status === 429 || error.status >= 500;
+        if (!transient) throw error;
+        const warning = `${label} failed (${errorText(error)}). Retrying once.`;
+        warnings.push(warning);
+        log.warn(warning);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return run();
+      }
+    };
     const started = await client.json<{ jobId: string; quote: VvshConvertQuote }>('/v1/vvsh/convert', {
       method: 'POST',
       body: {
@@ -1452,19 +1505,39 @@ export class ClientCore {
     });
     const pieceSize = 2 * 1024 * 1024;
     for (let at = 0; at < options.data.length; at += pieceSize) {
-      await client.json(`/v1/vvsh/convert/${started.jobId}/piece`, { method: 'PUT', raw: options.data.subarray(at, at + pieceSize) });
+      const index = Math.floor(at / pieceSize);
+      await retryOnce(`Uploading video piece ${index + 1}`, () =>
+        client.json(`/v1/vvsh/convert/${started.jobId}/piece?index=${index}`, {
+          method: 'PUT',
+          raw: options.data.subarray(at, at + pieceSize),
+        })
+      );
     }
-    const converted = await client.json<{ manifest: Manifest; quote: VvshConvertQuote }>(`/v1/vvsh/convert/${started.jobId}/finish`, {
-      method: 'POST',
-      body: {},
-      // Real per-quality encoding can take a while for a long, high-resolution video.
-      timeoutMs: 24 * 60 * 60 * 1000,
-    });
+    type ConversionState = {
+      status: 'uploading' | 'running' | 'done' | 'error';
+      manifest?: Manifest;
+      quote: VvshConvertQuote;
+      error?: string;
+      warnings?: string[];
+    };
+    let converted = await retryOnce('Starting provider conversion', () =>
+      client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {}, timeoutMs: 10_000 })
+    );
+    const deadline = Date.now() + 24 * 60 * 60 * 1000;
+    while (converted.status !== 'done' && converted.status !== 'error') {
+      if (Date.now() >= deadline) throw new Error('Provider conversion did not finish within 24 hours');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      converted = await retryOnce('Polling provider conversion', () =>
+        client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}`, { timeoutMs: 10_000 })
+      );
+    }
+    warnings.push(...(converted.warnings ?? []));
+    if (converted.status === 'error' || !converted.manifest) throw new Error(converted.error || 'Provider conversion failed');
     const signed = signManifest(converted.manifest, this.store.identity, this.settings.profile);
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
-    return { cid: committed.cid, quote: converted.quote, manifest: signed, listed };
+    return { cid: committed.cid, quote: converted.quote, manifest: signed, listed, warnings };
   }
 
   /** One object (a tree record or a payload) given its hash, checked against that hash. */

@@ -78,6 +78,7 @@ export function defaultSettings(): Settings {
     feedMode: 'blend',
     unknownContent: 'warn',
     blockExternalEmbeds: false,
+    showContentPreviews: true,
     defaultAuth: 'pseudonym',
     autoplay: true,
     loadPauseMs: 1500,
@@ -205,6 +206,7 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   merged.vvshScrubWidth = Math.min(640, Math.max(80, Number(merged.vvshScrubWidth) || Number(old.vvshPreviewWidth) || 220));
   merged.historyMode = merged.historyMode === 'lazy' ? 'lazy' : 'pages';
   merged.debugLogs = merged.debugLogs === true;
+  merged.showContentPreviews = merged.showContentPreviews !== false;
   merged.revision = SETTINGS_REVISION;
   return merged;
 }
@@ -328,6 +330,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   // says otherwise. 0 switches the job off — the settings button still submits at any time.
   next.accountBloom.resubmitHours = Math.min(8_760, Math.max(0, Number(next.accountBloom.resubmitHours) || 0));
   next.blockExternalEmbeds = Boolean(next.blockExternalEmbeds);
+  next.showContentPreviews = next.showContentPreviews !== false;
   next.cacheMiB = Math.max(16, Number(next.cacheMiB) || 1024);
   next.vvshPrefetchSeconds = Math.min(3_600, Math.max(0, Number(next.vvshPrefetchSeconds) || 0));
   next.vvshSkipSeconds = Math.min(120, Math.max(1, Number(next.vvshSkipSeconds) || 10));

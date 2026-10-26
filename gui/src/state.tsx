@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
 import { useLocation } from 'react-router-dom';
 import { api, errorMessage, onNodesChanged } from './api';
-import { setBlockExternalEmbeds } from './media';
+import { setBlockExternalEmbeds, setContentPreviews } from './media';
 import { embedsAllowed, loadConsent, onConsentChange } from './consent';
 
 interface Toast {
@@ -85,6 +85,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     apply();
     return onConsentChange(apply);
   }, [state?.settings.blockExternalEmbeds]);
+
+  useEffect(() => {
+    setContentPreviews(state?.settings.showContentPreviews !== false);
+  }, [state?.settings.showContentPreviews]);
 
   const value = useMemo<AppContext>(
     () => ({

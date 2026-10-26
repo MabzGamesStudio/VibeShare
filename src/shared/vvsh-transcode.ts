@@ -1,9 +1,7 @@
-// The one VVSH media encoder used by both browsers and provider nodes. Mediabunny owns
-// decoding, scaling, frame-rate conversion, VP9/Opus encoding and WebM muxing in both
-// environments; a provider only registers its server codecs before calling this module.
-// Every chunk is converted directly from the source with an explicit time range. Nothing
-// depends on realtime playback or on stopping and restarting a MediaRecorder, so chunk
-// transitions cannot drop frames or audio.
+// Shared non-realtime VVSH fallback encoder. Native FFmpeg is preferred where configured;
+// provider nodes use this Mediabunny/NodeAV path when FFmpeg or its codecs are unavailable.
+// Every chunk is converted directly from the source with an explicit time range, so chunk
+// transitions do not depend on realtime playback or stopping/restarting a MediaRecorder.
 import { ALL_FORMATS, BufferSource, BufferTarget, Conversion, Input, Output, WebMOutputFormat } from 'mediabunny';
 import { vvshPlan, type VvshBuildConfig } from './vvsh-encode.js';
 

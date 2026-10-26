@@ -136,6 +136,7 @@ export function VvshCompose() {
       if (saved && saved.status !== 'done') {
         jobRef.current = saved;
         setJob(saved);
+        if (saved.rows?.length) setRows(saved.rows.map((row) => ({ ...row, customFps: false, customHeight: false })));
       }
     });
   }, []);
@@ -218,6 +219,48 @@ export function VvshCompose() {
     }
   };
 
+  /** Piece uploads get one explicit retry. Provider conversion itself is polled by the
+   *  client core, which returns any transient retry warnings with the completed result. */
+  const uploadVideo = async (
+    mode: 'publish' | 'convert',
+    source: Blob,
+    name: string,
+    totalSeconds: number,
+    previewImages: string[],
+    onProgress: (percent: number) => void
+  ): Promise<{ cid: string; warnings?: string[] }> => {
+    if (!provider) throw new Error('Add a provider first');
+    const session = await api<{ jobId: string }>('/api/vvsh/session', {
+      body: {
+        mode,
+        nodeId: provider.id,
+        name,
+        totalSeconds,
+        config,
+        sourceMime: source.type || 'video/mp4',
+        previews: previewImages,
+        encoder: mode === 'publish' ? 'ffmpeg' : undefined,
+        meta: { title: title.trim() || name.replace(/\.vvsh$/i, ''), durationSeconds: totalSeconds, format: 'video' },
+      },
+    });
+    const pieceSize = 2 * 1024 * 1024;
+    for (let at = 0; at < source.size; at += pieceSize) {
+      const slice = new Uint8Array(await source.slice(at, at + pieceSize).arrayBuffer());
+      const path = `/api/vvsh/session/${session.jobId}/piece`;
+      try {
+        await api(path, { body: { data: base64url(slice), index: Math.floor(at / pieceSize) } });
+      } catch (error) {
+        toast(`Warning: uploading piece ${Math.floor(at / pieceSize) + 1} failed (${errorMessage(error)}). Retrying once.`, 'info');
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await api(path, { body: { data: base64url(slice), index: Math.floor(at / pieceSize) } });
+      }
+      onProgress(Math.min(99, Math.round(((at + slice.length) / source.size) * 100)));
+    }
+    const answer = await api<{ cid: string; warnings?: string[] }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+    for (const warning of answer.warnings ?? []) toast(`Warning: ${warning}`, 'info');
+    return answer;
+  };
+
   /** Publishes in stages — encode each quality, upload object by object, commit — and
    *  every finished step is recorded, so it can be picked back up after any interruption. */
   const run = async (existing?: VvshJob | null) => {
@@ -254,6 +297,16 @@ export function VvshCompose() {
       setJob(fresh);
       await saveJob(fresh);
       await putBlob(`${id}:source`, source);
+      const encoder = await api<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }>('/api/vvsh/encoder');
+      if (encoder.backend === 'ffmpeg') {
+        await persist({ stage: 'Uploading to the local FFmpeg encoder', pct: 0 });
+        const published = await uploadVideo('publish', source, fresh.name, totalSeconds, probed.previews, (pct) => void persist({ pct }));
+        await persist({ status: 'done', stage: 'Done (FFmpeg)', pct: 100, cid: published.cid });
+        setResult(published.cid);
+        toast('Published with FFmpeg', 'success');
+        return;
+      }
+      if (encoder.warning) toast(`Warning: ${encoder.warning}`, 'info');
       // 1) Each quality is encoded once and kept — a resumed job does not redo them.
       // One WebM recording per chunk, so every chunk plays on its own (sparse playback).
       const webm: Record<string, Uint8Array[]> = {};
@@ -316,7 +369,7 @@ export function VvshCompose() {
     }
   };
 
-  /** Quick passthrough: let the provider store the source as-is at every level. */
+  /** Upload the source for provider-side conversion and polled completion. */
   const runPassthrough = async () => {
     if (!provider || !file) return;
     try {
@@ -324,24 +377,7 @@ export function VvshCompose() {
       const probed = await probeVideo(file, previewSplits, previewWidthValue, previewQualityValue);
       const totalSeconds = probed.seconds || seconds;
       const name = (title.trim() || file.name.replace(/\.[^.]+$/, '') || 'video') + '.vvsh';
-      const session = await api<{ jobId: string }>('/api/vvsh/session', {
-        body: {
-          mode: 'convert',
-          nodeId: provider.id,
-          name,
-          totalSeconds,
-          config,
-          sourceMime: file.type || 'video/mp4',
-          previews: probed.previews,
-        },
-      });
-      const pieceSize = 2 * 1024 * 1024;
-      for (let at = 0; at < file.size; at += pieceSize) {
-        const slice = new Uint8Array(await file.slice(at, at + pieceSize).arrayBuffer());
-        await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(slice) } });
-        setPassPct(Math.min(99, Math.round(((at + pieceSize) / file.size) * 100)));
-      }
-      const answer = await api<{ cid: string }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+      const answer = await uploadVideo('convert', file, name, totalSeconds, probed.previews, setPassPct);
       setPassPct(100);
       setResult(answer.cid);
       toast('Stored on the provider', 'success');
@@ -502,13 +538,33 @@ export function VvshCompose() {
           // and a changing key would remount the row — that is what stole the focus from
           // the field being typed and jolted the form.
           <div className="row" key={index} style={{ gap: 8, flexWrap: 'nowrap', alignItems: 'center' }}>
-            <select value={row.height} onChange={(e) => updateRow(index, { height: Number(e.target.value) })} aria-label="Resolution">
+            <select
+              value={row.customHeight || !RESOLUTIONS.includes(row.height) ? 'custom' : row.height}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === 'custom') updateRow(index, { customHeight: true });
+                else updateRow(index, { height: Number(value), customHeight: false });
+              }}
+              aria-label="Resolution"
+            >
               {RESOLUTIONS.map((height) => (
                 <option key={height} value={height}>
                   {height}p
                 </option>
               ))}
+              <option value="custom">Other…</option>
             </select>
+            {(row.customHeight || !RESOLUTIONS.includes(row.height)) && (
+              <input
+                type="number"
+                min={16}
+                max={4320}
+                step={2}
+                aria-label="Custom height"
+                value={String(row.height)}
+                onChange={(e) => updateRow(index, { height: Math.min(4320, Math.max(16, Math.round(Number(e.target.value) || 720))), customHeight: true })}
+              />
+            )}
             <select
               value={FRAME_RATES.includes(row.fps) ? row.fps : 'custom'}
               onChange={(e) => {

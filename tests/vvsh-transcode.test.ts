@@ -6,6 +6,7 @@ import { convertVvsh } from '../src/provider/vvsh.js';
 import { assembleVvshWebm, type VvshBuildConfig } from '../src/shared/vvsh-encode.js';
 import { parseVvshNode, type VvshHash } from '../src/shared/vvsh.js';
 import { readClusterTimecode, webmClusters } from '../src/shared/webm.js';
+import { startClient, startProvider, tempDir } from './helpers.js';
 
 const CONFIG: VvshBuildConfig = {
   chunkSeconds: 3,
@@ -73,13 +74,37 @@ describe('the shared browser/provider variable-quality transcoder', () => {
     }
   });
 
+  it('polls a provider conversion to completion and publishes the signed result', async () => {
+    const provider = await startProvider();
+    const { dir, cleanup } = tempDir();
+    const { client } = await startClient(dir);
+    try {
+      await client.nodes.add(provider.reference());
+      const node = client.nodes.list('provider')[0];
+      const result = await client.core.convertVvshOn(node, {
+        data: clip('neon'),
+        name: 'polled.vvsh',
+        totalSeconds: 6,
+        config: { ...CONFIG, bitrates: CONFIG.bitrates.slice(0, 1) },
+      });
+      assert.equal(result.manifest.name, 'polled.vvsh');
+      assert.equal(result.manifest.vvsh?.meta.chunkCount, 2);
+      assert.ok(Array.isArray(result.warnings), 'retry and encoder fallback warnings travel with the result');
+      assert.ok(result.manifest.creator, 'the client signs the completed provider manifest');
+    } finally {
+      await client.stop();
+      await provider.stop();
+      cleanup();
+    }
+  });
+
   it('fails instead of silently copying the source when media cannot be decoded', async () => {
     const objects = new Map<VvshHash, Uint8Array>();
     await assert.rejects(
       convertVvsh(Uint8Array.from([1, 2, 3, 4]), { name: 'broken.vvsh', totalSeconds: 6, config: CONFIG }, (hash, data) => {
         objects.set(hash, data);
       }),
-      /Could not encode 180p12, chunk 1/
+      /Could not encode 180p12/
     );
     assert.equal(objects.size, 0, 'no falsely labelled tree is published');
   });

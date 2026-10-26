@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { generateIdentity, signData } from '../src/shared/crypto.js';
+import { BloomFilter } from '../src/shared/bloom.js';
 import { claimSigningPayload, type ContentItem, type LookupResult, type Page } from '../src/shared/protocol.js';
 import { ADMIN, admin, clientFor, startAlgorithm, tempDir, waitFor } from './helpers.js';
 
@@ -197,6 +198,64 @@ describe('algorithm node', async () => {
     assert.ok(all.items.length > youtube.items.length);
     const taxonomy = await client.json<{ platforms: { key: string }[] }>('/v1/taxonomy');
     assert.ok(taxonomy.platforms.some((platform) => platform.key === 'youtube'));
+  });
+});
+
+describe('native suggestions and preview delivery', async () => {
+  const node = await startAlgorithm();
+  const client = clientFor(node.url());
+  const nativeIds: string[] = [];
+  after(() => node.stop());
+
+  it('leads filtered feeds and searches with a few seen-exempt items of each format', async () => {
+    for (let i = 0; i < 4; i++) {
+      const id = `vs1${'a'.repeat(51)}${String.fromCharCode(98 + i)}`;
+      nativeIds.push(id);
+      await admin(node.url(), '/v1/admin/content', {
+        method: 'PUT',
+        body: { id, title: `Native video ${i}`, format: 'video', creatorId: 'name:native', publishedAt: ago(i + 1) },
+      });
+    }
+    for (let i = 0; i < 2; i++) {
+      await admin(node.url(), '/v1/admin/content', {
+        method: 'PUT',
+        body: { id: `vs1${'c'.repeat(51)}${String.fromCharCode(100 + i)}`, title: `Native image ${i}`, format: 'image', creatorId: 'name:native' },
+      });
+    }
+    await admin(node.url(), '/v1/admin/content', {
+      method: 'PUT',
+      body: { id: 'yt:newer', title: 'External video', format: 'video', creatorId: 'name:native', publishedAt: new Date().toISOString(), thumbnailUrl: 'https://img.example/preview.jpg' },
+    });
+
+    const videos = await client.json<Page<ContentItem>>('/v1/feed', { body: { preferences: { formats: ['video'] } }, auth: false });
+    assert.deepEqual(videos.items.slice(0, 3).map((item) => item.nativeSuggestion), [true, true, true]);
+    const images = await client.json<Page<ContentItem>>('/v1/search', {
+      body: { query: 'native', filters: { formats: ['image'] } },
+      auth: false,
+    });
+    assert.equal(images.items.length, 2);
+    assert.ok(images.items.every((item) => item.format === 'image' && item.nativeSuggestion));
+
+    const seen = new BloomFilter(1_024);
+    for (const id of nativeIds) seen.add(id);
+    const seenVideos = await client.json<Page<ContentItem>>('/v1/feed', {
+      body: { preferences: { formats: ['video'] }, bloom: seen.toJSON() },
+      auth: false,
+    });
+    const suggestedNative = seenVideos.items.filter((item) => item.id.startsWith('vs1'));
+    assert.equal(suggestedNative.length, 3, 'only the small native suggestion group ignores the seen filter');
+    assert.ok(suggestedNative.every((item) => item.nativeSuggestion));
+  });
+
+  it('orders subscriptions native-first and omits previews only when requested', async () => {
+    const latest = await client.json<Page<ContentItem>>('/v1/creators/latest', { body: { creators: ['name:native'] }, auth: false });
+    assert.ok(latest.items[0].id.startsWith('vs1'), 'native content leads even though the external item is newer');
+    assert.ok(latest.items[0].nativeSuggestion);
+
+    const withPreviews = await client.json<Page<ContentItem>>('/v1/search', { body: { query: 'external' }, auth: false });
+    assert.equal(withPreviews.items[0].thumbnail, 'https://img.example/preview.jpg');
+    const withoutPreviews = await client.json<Page<ContentItem>>('/v1/search', { body: { query: 'external', previews: false }, auth: false });
+    assert.equal(withoutPreviews.items[0].thumbnail, undefined);
   });
 });
 

@@ -3,7 +3,7 @@ import { Play } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
 import { usePreviewSeen } from '../../bloom';
-import { aspectOf, imageFor } from '../../media';
+import { aspectOf, imageFor, previewsEnabled } from '../../media';
 import { formatDuration, watchPath } from '../../util';
 import { ShareButton } from '../Share';
 import { PostDownload } from '../Download';
@@ -15,6 +15,7 @@ import { MediaView, Poster } from './Player';
 
 /** A preview image that never costs credits: thumbnails, or a platform's own image. */
 function previewOf(item: FeedItem): string | undefined {
+  if (!previewsEnabled()) return undefined;
   if (item.thumbnailUrl) return item.thumbnailUrl;
   if (item.media?.type === 'image') return item.media.url;
   return undefined;

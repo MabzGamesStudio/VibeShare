@@ -293,6 +293,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // .vvsh verifiable video streams. The video goes up in pieces — never one huge body —
   // then either this client calculates and publishes the stream, or the provider does.
+  on('GET', '/api/vvsh/encoder', () => core.encoderInfo());
   const vvshSessions = new Map<
     string,
     {
@@ -305,15 +306,17 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
         meta?: ManifestMeta;
         sourceMime?: string;
         previews?: string[];
+        encoder?: 'ffmpeg';
       };
-      pieces: Uint8Array[];
+      pieces: (Uint8Array | undefined)[];
       bytes: number;
     }
   >();
-  const concatBytes = (pieces: Uint8Array[]): Uint8Array => {
-    const out = new Uint8Array(pieces.reduce((total, piece) => total + piece.length, 0));
+  const concatBytes = (pieces: (Uint8Array | undefined)[]): Uint8Array => {
+    const parts = pieces.filter((piece): piece is Uint8Array => Boolean(piece));
+    const out = new Uint8Array(parts.reduce((total, piece) => total + piece.length, 0));
     let at = 0;
-    for (const piece of pieces) {
+    for (const piece of parts) {
       out.set(piece, at);
       at += piece.length;
     }
@@ -330,6 +333,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       meta?: ManifestMeta;
       sourceMime?: string;
       previews?: string[];
+      encoder?: 'ffmpeg';
     }>();
     const mode = body.mode === 'convert' ? 'convert' : 'publish';
     const jobId = `${mode}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -343,6 +347,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
         meta: body.meta,
         sourceMime: body.sourceMime,
         previews: body.previews,
+        encoder: body.encoder,
       },
       pieces: [],
       bytes: 0,
@@ -353,11 +358,24 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('POST', '/api/vvsh/session/:id/piece', async (request) => {
     const session = vvshSessions.get(String(request.params.id));
     if (!session) throw notFound('No such vvsh upload');
-    const body = await request.json<{ data?: string }>(5 * MiB);
+    const body = await request.json<{ data?: string; index?: number }>(5 * MiB);
     const piece = fromBase64url(String(body.data ?? ''));
     if (!piece.length) throw badRequest('The piece carries no bytes');
-    session.pieces.push(piece);
-    session.bytes += piece.length;
+    const index = Number(body.index ?? -1);
+    if (Number.isInteger(index) && index >= 0) {
+      if (index > 100_000) throw badRequest('Piece index is outside the upload');
+      const previous = session.pieces[index];
+      if (previous) {
+        if (previous.length !== piece.length || previous.some((byte, at) => byte !== piece[at])) {
+          throw badRequest('A different piece was already uploaded at this index');
+        }
+        return { bytes: session.bytes, duplicate: true };
+      }
+      session.pieces[index] = piece;
+    } else {
+      session.pieces.push(piece);
+    }
+    session.bytes = session.pieces.reduce((total, part) => total + (part?.length ?? 0), 0);
     return { bytes: session.bytes };
   });
 
@@ -366,6 +384,9 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     const session = vvshSessions.get(id);
     if (!session) throw notFound('No such vvsh upload');
     vvshSessions.delete(id);
+    if (Array.from({ length: session.pieces.length }, (_, at) => session.pieces[at]).some((piece) => !piece)) {
+      throw badRequest('The video is not fully uploaded');
+    }
     const source = concatBytes(session.pieces);
     session.pieces.length = 0;
     return session.mode === 'publish'

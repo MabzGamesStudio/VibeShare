@@ -91,6 +91,19 @@ describe('a client using a provider and an algorithm node', async () => {
     const node = (await api<{ nodes: NodeEntry[] }>('/api/state')).nodes.find((n) => n.id === algorithm.identity.id)!;
     assert.equal(node.balance, algorithm.ledger.get(node.accountId!)!.balance);
     assert.equal(node.status?.online, true);
+
+    await admin(algorithm.url(), '/v1/admin/content', {
+      method: 'PUT',
+      body: { id: 'yt:external-first', title: 'External result', format: 'video', publishedAt: new Date().toISOString(), thumbnailUrl: 'https://img.example/external.jpg' },
+    });
+    const mixed = await api<FeedResponse>('/api/feed', { body: {} });
+    assert.equal(mixed.items[0].contentId, id.split('~')[0], 'the client keeps native content ahead after ranking');
+    assert.ok(mixed.items.some((item) => item.id === 'yt:external-first'));
+
+    await api('/api/settings', { method: 'PATCH', body: { showContentPreviews: false } });
+    const noPreviews = await api<FeedResponse>('/api/feed', { body: {} });
+    assert.ok(noPreviews.items.every((item) => !item.thumbnail && !item.thumbnailUrl), 'the client request suppresses previews at the algorithm node');
+    await api('/api/settings', { method: 'PATCH', body: { showContentPreviews: true } });
   });
 
   it('streams with Range requests, verifies chunks and pays the provider once', async () => {

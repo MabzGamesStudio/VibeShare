@@ -8,7 +8,7 @@ export interface VvshJob {
   id: string;
   name: string;
   totalSeconds: number;
-  rows: { id: string; height: number; fps: number; kbps: number }[];
+  rows: { id: string; height: number; fps: number; kbps: number; customFps?: boolean; customHeight?: boolean }[];
   chunkSeconds: number;
   previewSplits: number;
   sourceMime: string;

@@ -4,14 +4,16 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
+import { buildServerDistribution } from './build-server-dist.js';
 
 const root = resolve(import.meta.dirname, '..');
 const guiDist = join(root, 'gui', 'dist');
 const embedded = join(root, 'src', 'shared', 'gui-embedded.ts');
 const out = join(root, 'release');
 
-const ALL = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'windows-x64'];
+const ALL = ['linux-x64', 'linux-arm64', 'linux-ia32', 'linux-armv7l', 'darwin-x64', 'darwin-arm64', 'windows-x64'];
+const SERVER_ARCHIVES = new Set(['linux-ia32', 'linux-armv7l']);
 const flag = process.argv.indexOf('--targets');
 const targets = flag > 0 ? process.argv[flag + 1].split(',') : ALL;
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version as string;
@@ -42,6 +44,17 @@ try {
   for (const target of targets) {
     if (!ALL.includes(target)) throw new Error(`Unknown target ${target} (${ALL.join(', ')})`);
     const name = `vibeshare-${version}-${target.replace('darwin', 'macos')}${target.startsWith('windows') ? '.exe' : ''}`;
+    if (SERVER_ARCHIVES.has(target)) {
+      console.log(`Building ${name}.tar.gz (32-bit server distribution)…`);
+      const archive = await buildServerDistribution({
+        root,
+        out,
+        target: target === 'linux-ia32' ? 'linux-ia32' : 'linux-armv7l',
+        version,
+      });
+      sums.push(`${createHash('sha256').update(readFileSync(archive)).digest('hex')}  ${basename(archive)}`);
+      continue;
+    }
     console.log(`Compiling ${name}…`);
     execFileSync(
       'bun',

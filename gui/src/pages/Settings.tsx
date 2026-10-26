@@ -927,6 +927,12 @@ export function SettingsPage() {
 
       <div className="card form-stack">
         <h2>Content preferences</h2>
+        <Switch
+          checked={s.showContentPreviews}
+          onChange={(showContentPreviews) => void updateSettings({ showContentPreviews })}
+          label="Show content previews"
+        />
+        <span className="hint">Off asks algorithm nodes not to send preview images and hides previews already on the page. Opening and playing content still works.</span>
         <div className="form-grid">
           <label className="field">
             Highest age rating

@@ -372,6 +372,8 @@ export interface ContentItem {
   contentId?: string;
   /** Where the content lives outside VibeShare (a link or a platform source like `yt:…`), when it has no content id. */
   link?: string;
+  /** One of the few native suggestions that leads a page even when already seen. */
+  nativeSuggestion?: boolean;
 }
 
 export type ContentOrigin = 'operator' | 'submission' | 'crawler' | 'report' | 'peer';
@@ -420,6 +422,8 @@ export interface FeedRequest {
    * whose cid or links collide with it (see also the filters it stores for the account).
    */
   bloom?: BloomFilterData;
+  /** Include preview image URLs in results (true unless explicitly false). */
+  previews?: boolean;
 }
 
 export type SearchSort = 'relevance' | 'new' | 'top';
@@ -432,6 +436,8 @@ export interface SearchRequest {
   limit?: number;
   /** A small seen-content bloom filter; anything that collides with it is not suggested. */
   bloom?: BloomFilterData;
+  /** Include preview image URLs in results (true unless explicitly false). */
+  previews?: boolean;
 }
 
 export interface Page<T> {

@@ -261,6 +261,8 @@ export interface Settings {
    * placeholder standing in for the picture or player.
    */
   blockExternalEmbeds: boolean;
+  /** Request and display content preview images. Off keeps selected media playback available. */
+  showContentPreviews: boolean;
   /** Account mode for newly added nodes. */
   defaultAuth: AuthMode;
   autoplay: boolean;

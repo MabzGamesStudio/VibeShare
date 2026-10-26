@@ -50,6 +50,7 @@ import {
 } from './storage/backends.js';
 import { basename } from 'node:path';
 import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
+import { vvshEncoderBackend } from './transcode.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { decodeVvshChunk, decodeVvshFrames } from '../shared/vvsh-encode.js';
 import type { VvshConvertQuote, VvshHash } from '../shared/vvsh.js';
@@ -343,9 +344,22 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       pieces: Buffer[];
       bytes: number;
       quote: VvshConvertQuote;
+      status: 'uploading' | 'running' | 'done' | 'error';
+      manifest?: Manifest;
+      error?: string;
+      warnings: string[];
       at: number;
     }
   >();
+
+  /** Drops stale conversion states after retries/polled reads have had plenty of time. */
+  private sweepVvshConverts(): void {
+    const now = Date.now();
+    for (const [id, job] of this.vvshConverts) {
+      const lifetime = job.status === 'done' || job.status === 'error' ? 3_600_000 : 24 * 3_600_000;
+      if (now - job.at > lifetime) this.vvshConverts.delete(id);
+    }
+  }
 
   /** One conversion job's shape: the client's configuration over this node's defaults. */
   private vvshInput(body: { bytes?: number; totalSeconds?: number; config?: VvshBuildConfig }): {
@@ -1133,6 +1147,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const declared = Math.max(1, Number(body.bytes ?? 0));
       const quote = quoteVvsh(this.config.vvsh.convert, { ...input, bytes: declared });
       if (quote.credits > 0) this.ledger.debit(account.id, quote.credits, 'vvsh convert', String(body.name ?? 'video.vvsh'));
+      this.sweepVvshConverts();
       const jobId = randomId();
       this.vvshConverts.set(jobId, {
         account: account.id,
@@ -1145,6 +1160,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         pieces: [],
         bytes: 0,
         quote,
+        status: 'uploading',
+        warnings: [],
         at: Date.now(),
       });
       return { jobId, quote };
@@ -1154,36 +1171,96 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const account = this.auth.require(ctx);
       const job = this.vvshConverts.get(String(ctx.params.jobId));
       if (!job || job.account !== account.id) throw notFound('No such conversion job');
+      if (job.status !== 'uploading') throw badRequest('This conversion has already finished uploading');
       const piece = await readBody(ctx.req, 16 * MiB);
-      if (job.bytes + piece.length > job.declared) throw badRequest('More video bytes than the job declared');
-      job.pieces.push(piece);
-      job.bytes += piece.length;
+      const index = Number(ctx.query.get('index') ?? -1);
+      if (Number.isInteger(index) && index >= 0) {
+        if (index >= Math.max(1, Math.ceil(job.declared / (2 * MiB)))) throw badRequest('Piece index is outside the declared upload');
+        const previous = job.pieces[index];
+        if (previous) {
+          if (!previous.equals(piece)) throw badRequest('A different piece was already uploaded at this index');
+          return { ok: true, bytes: job.bytes, duplicate: true };
+        }
+        if (job.bytes + piece.length > job.declared) throw badRequest('More video bytes than the job declared');
+        job.pieces[index] = piece;
+      } else {
+        if (job.bytes + piece.length > job.declared) throw badRequest('More video bytes than the job declared');
+        job.pieces.push(piece);
+      }
+      job.bytes = job.pieces.reduce((total, part) => total + (part?.length ?? 0), 0);
+      if (job.bytes > job.declared) throw badRequest('More video bytes than the job declared');
       return { ok: true, bytes: job.bytes };
     });
 
+    const conversionState = (job: {
+      status: string;
+      manifest?: Manifest;
+      quote: VvshConvertQuote;
+      error?: string;
+      warnings: string[];
+    }) => ({
+      status: job.status,
+      manifest: job.manifest,
+      quote: job.quote,
+      error: job.error,
+      warnings: job.warnings,
+    });
+
+    // Starting and finishing are separate: large conversions never hold one HTTP request
+    // open. Both routes are idempotent so one retry cannot charge or encode twice.
     router.post('/v1/vvsh/convert/:jobId/finish', async (ctx) => {
       const account = this.auth.require(ctx);
+      const jobId = String(ctx.params.jobId);
+      this.sweepVvshConverts();
+      const job = this.vvshConverts.get(jobId);
+      if (!job || job.account !== account.id) throw notFound('No such conversion job');
+      if (job.status === 'uploading') {
+        if (job.bytes !== job.declared || Array.from({ length: job.pieces.length }, (_, index) => job.pieces[index]).some((piece) => !piece)) {
+          throw badRequest('The video is not fully uploaded');
+        }
+        job.status = 'running';
+        job.at = Date.now();
+        void (async () => {
+          try {
+            if ((await vvshEncoderBackend()) !== 'ffmpeg') {
+              job.warnings.push('FFmpeg with VP9/Opus is unavailable on this provider; conversion used the slower Mediabunny fallback');
+            }
+            const source = Buffer.concat(job.pieces);
+            job.pieces.length = 0;
+            const { manifest } = await convertVvsh(
+              source,
+              {
+                name: job.name,
+                totalSeconds: job.input.totalSeconds,
+                config: job.input.config,
+                meta: job.meta,
+                sourceMime: job.sourceMime,
+                previews: job.previews,
+              },
+              async (hash, data) => {
+                await this.store.putChunk(hash, Buffer.from(data));
+              }
+            );
+            job.manifest = manifest;
+            job.status = 'done';
+            log.info(`Converted ${manifest.name} for ${account.id} into a .vvsh stream (${job.quote.credits} credits)`);
+          } catch (error) {
+            job.error = error instanceof Error ? error.message : String(error);
+            job.status = 'error';
+          } finally {
+            job.at = Date.now();
+          }
+        })();
+      }
+      return conversionState(job);
+    });
+
+    router.get('/v1/vvsh/convert/:jobId', (ctx) => {
+      const account = this.auth.require(ctx);
+      this.sweepVvshConverts();
       const job = this.vvshConverts.get(String(ctx.params.jobId));
       if (!job || job.account !== account.id) throw notFound('No such conversion job');
-      this.vvshConverts.delete(String(ctx.params.jobId));
-      const source = Buffer.concat(job.pieces);
-      job.pieces.length = 0;
-      const { manifest } = await convertVvsh(
-        source,
-        {
-          name: job.name,
-          totalSeconds: job.input.totalSeconds,
-          config: job.input.config,
-          meta: job.meta,
-          sourceMime: job.sourceMime,
-          previews: job.previews,
-        },
-        async (hash, data) => {
-          await this.store.putChunk(hash, Buffer.from(data));
-        }
-      );
-      log.info(`Converted ${manifest.name} for ${account.id} into a .vvsh stream (${job.quote.credits} credits)`);
-      return { manifest, quote: job.quote };
+      return conversionState(job);
     });
 
     router.put('/v1/vvsh/manifest', async (ctx) => {

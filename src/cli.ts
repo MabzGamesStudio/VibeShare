@@ -37,6 +37,7 @@ Options
   --tor <mode>         client: send requests to nodes through Tor — onion (only .onion
                        nodes, the default), all, or off
   --open               Open the GUI in your browser (client, demo)
+  --malicious          demo: add interactive malicious client, provider and algorithm servers
   --log <level>        debug, info, warn, error or silent
   -h, --help           Show this help
   -v, --version        Show the version
@@ -186,7 +187,9 @@ async function runDemo(flags: Flags): Promise<void> {
   // Developer testing only; none of this reaches production builds.
   let stopMalicious = () => {};
   if (flags.malicious) {
-    const network = await startMaliciousNetwork();
+    const network = await startMaliciousNetwork({ providerPort: basePort + 4, algorithmPort: basePort + 5 });
+    network.provider.setHonestNode(demo.provider.url());
+    network.algorithm.setHonestNode(demo.algorithm.url());
     network.algorithm.setComments(sampleCommentChain(), 'tamper');
     const admin = async (url: string, token: string, path: string, body: unknown) => {
       await fetch(url + path, {
@@ -202,13 +205,26 @@ async function runDemo(flags: Flags): Promise<void> {
       peers: [{ ref: network.algorithm.reference(), fetch: true }],
     });
     await demo.client.nodes.add(`${network.provider.reference()}\n${network.algorithm.reference()}`);
+    const maliciousClient = new ClientNode({
+      dataDir: join(dataDir, 'malicious-client'),
+      port: basePort + 3,
+      host: '127.0.0.1',
+      guiDir: findGuiDir(),
+    });
+    await maliciousClient.start();
+    // Malicious node identities are deliberately fresh each run; do not keep stale refs.
+    for (const entry of maliciousClient.nodes.list()) await maliciousClient.nodes.remove(entry.id);
+    await maliciousClient.nodes.add(`${network.provider.reference()}\n${network.algorithm.reference()}`);
     const stopLoops = startMaliciousLoops(network, { providerUrl: demo.provider.url(), algorithmUrl: demo.algorithm.url() });
     stopMalicious = () => {
       stopLoops();
+      void maliciousClient.stop();
       void network.stop();
     };
-    console.log(`  Malicious network:   provider ${network.provider.reference()}
-                         algorithm ${network.algorithm.reference()}   (its comment chain is tampered)
+    console.log(`  Malicious client:    ${maliciousClient.url()}  (connected only to malicious nodes)
+  Malicious provider:  ${network.provider.url()}/admin  ${network.provider.reference()}
+  Malicious algorithm: ${network.algorithm.url()}/admin  ${network.algorithm.reference()}
+                       (comment chain attack: tamper; dashboards are loopback-only)
 `);
   }
   console.log(`

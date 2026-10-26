@@ -31,6 +31,7 @@ import type { Publisher } from './publisher.js';
 import { StorageWorker } from './service.js';
 import { ClientStore } from './state.js';
 import { FileUploads } from './uploads.js';
+import { ffmpegAvailable, transcodeVvshWebm } from '../provider/transcode.js';
 
 export interface ClientOptions {
   /** Where identity, settings, cache and service data live; null keeps everything in memory (tests). */
@@ -95,6 +96,14 @@ export class ClientNode {
         if (release) await this.worker.releaseAll(id);
       },
       transport: (target) => this.transportFor(target),
+      transcodeVvsh: transcodeVvshWebm,
+      encoderInfo: async () =>
+        (await ffmpegAvailable())
+          ? { backend: 'ffmpeg' }
+          : {
+              backend: 'mediarecorder',
+              warning: 'FFmpeg with VP9 and Opus encoders is not available. Using the slower, realtime MediaRecorder fallback in the browser.',
+            },
     });
     this.nodes = this.core.nodes;
     this.fetcher = this.core.fetcher;

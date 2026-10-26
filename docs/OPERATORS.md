@@ -23,7 +23,9 @@ On first start a node creates in its data directory:
 
 **Network.** Put the node behind a reverse proxy with TLS (Caddy, nginx, Traefik) and set `publicUrl` to the address clients use; set `trustProxy: true` so per-IP limits see real addresses. Docker: `docker compose up -d` ([docker-compose.yml](../docker-compose.yml)). systemd: [examples/systemd](../examples/systemd).
 
-**Video conversion.** Provider-side VVSH conversion uses the same pinned Mediabunny code as browser publishing, with NodeAV supplying VP9/Opus codecs on the server. Each chunk is encoded directly from the source at its configured resolution, frame rate and bitrate; no `ffmpeg` executable or host codec installation is used. Long conversions need a correspondingly generous reverse-proxy response timeout.
+**Video conversion.** Provider-side VVSH conversion prefers the `ffmpeg` executable with `libvpx-vp9` and `libopus`; set `VIBESHARE_FFMPEG=/path/to/ffmpeg` when it is not on `PATH`. The Docker image installs it. Without a usable executable/codecs the provider logs a warning and uses its pinned Mediabunny/NodeAV fallback where that native codec is available. Every rendition is encoded at its configured resolution, frame rate and bitrate into standalone WebM chunks. Uploads are indexed pieces with one client retry; conversion then runs as a polled job, so no long conversion response depends on a reverse-proxy timeout.
+
+**32-bit Linux.** The `linux-ia32` and `linux-armv7l` release archives are server-only distributions for the provider and algorithm nodes. They include their own Node runtime and launchers. NodeAV's native codecs do not ship for 32-bit Linux, so install FFmpeg (VP9 + Opus) before using provider conversion on those systems.
 
 ## Settings both node types share
 

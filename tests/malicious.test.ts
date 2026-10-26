@@ -129,6 +129,36 @@ describe('malicious nodes (developer testing)', () => {
     }
   });
 
+  it('serves interactive behavior dashboards and browsable honest-demo metadata', async () => {
+    const honest = await startAlgorithm();
+    const evil = await startMaliciousAlgorithm();
+    try {
+      await admin(honest.url(), '/v1/admin/content', {
+        method: 'PUT',
+        body: { id: 'yt:dashboard-demo', title: 'Visible through the malicious node', format: 'video' },
+      });
+      evil.setHonestNode(honest.url());
+      const page = await fetch(`${evil.url()}/admin`);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /Malicious algorithm/);
+      const feed = await (await fetch(`${evil.url()}/v1/feed`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })).json() as { items: { title: string }[] };
+      assert.equal(feed.items[0].title, 'Visible through the malicious node');
+      const behavior = await fetch(`${evil.url()}/admin/behavior`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ attack: 'badsig' }),
+      });
+      assert.deepEqual(await behavior.json(), { attack: 'badsig' });
+    } finally {
+      await evil.stop();
+      await honest.stop();
+    }
+  });
+
   it('overloads are survived and held to the rate limit on both node kinds', async () => {
     const provider = await startProvider();
     const algorithm = await startAlgorithm();

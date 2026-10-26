@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedItem } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
-import { controlEmbed, embedsBlocked, nodePreviewOf, placeholderFor, playableFor, useMediaSrc, type Playable } from '../../media';
+import { controlEmbed, embedsBlocked, nodePreviewOf, placeholderFor, playableFor, previewsEnabled, useMediaSrc, type Playable } from '../../media';
 import { gradientFor } from '../../util';
 import { FormatIcon } from '../ContentCard';
 
@@ -13,7 +13,7 @@ export function Poster({ item, src, fit = 'cover' }: { item: FeedItem; src?: str
   const blocked = placeholderFor(item);
   // Cookies off: nothing loads from the platform, but the preview the algorithm node
   // keeps of the content is ours and still stands in for the video's preview.
-  const image = useMediaSrc(blocked ? nodePreviewOf(item) : (src ?? item.thumbnailUrl));
+  const image = useMediaSrc(previewsEnabled() ? (blocked ? nodePreviewOf(item) : (src ?? item.thumbnailUrl)) : undefined);
   if (!image || failed) {
     return (
       <div className="poster poster-empty" style={{ background: gradientFor(item.id) }}>
@@ -150,7 +150,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
         key={playable.src}
         className={`media-${fit} ${playable.kind === 'audio' ? 'media-audio' : ''}`}
         src={mediaSrc}
-        poster={playable.kind === 'video' ? (posterSrc ?? item.thumbnailUrl) : undefined}
+        poster={playable.kind === 'video' && previewsEnabled() ? (posterSrc ?? item.thumbnailUrl) : undefined}
         muted={muted}
         loop={loop}
         playsInline

@@ -295,6 +295,16 @@ function pageOf<T>(items: T[], cursor: string | undefined, limit: number): Page<
   return { items: slice, cursor: offset + limit < items.length ? String(offset + limit) : undefined, total: items.length };
 }
 
+/** A few matching native items lead every surface. Explicitly filtered pages get a few
+ *  of each requested format; an unfiltered page gets three native items overall. */
+export function nativeSuggestions<T extends { id: string; format: Format }>(entries: T[], formats: Format[] = []): T[] {
+  const native = entries.filter((entry) => entry.id.startsWith('vs1'));
+  if (!formats.length) return native.slice(0, 3);
+  const first: T[] = [];
+  for (const format of formats) first.push(...native.filter((entry) => entry.format === format && !first.includes(entry)).slice(0, 3));
+  return first;
+}
+
 function slug(text: string): string {
   return normalizeTag(text).slice(0, 40) || 'creator';
 }
@@ -537,6 +547,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const preferences = { ...(input ?? {}) };
     if (!preferences.maxRating || !RATINGS.includes(preferences.maxRating)) preferences.maxRating = this.config.policy.defaultMaxRating;
     return preferences;
+  }
+
+  /** One public result, with preview URLs unless this request explicitly declined them. */
+  private clientView(entry: Entry, previews: boolean, nativeSuggestion = false): ContentItem {
+    const item = this.registry.view(entry);
+    if (!previews) delete item.thumbnail;
+    return { ...item, nativeSuggestion: nativeSuggestion || undefined };
   }
 
   private limitOf(value: unknown): number {
@@ -932,13 +949,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       });
       // An explore page is always led by a few VibeShare-published pieces, even ones the
       // reader has seen before; everything after them respects the seen filters.
-      const first = ranked.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
+      const first = nativeSuggestions(ranked, preferences.formats);
       const rest = this.withoutSeen(
         ranked.filter((entry) => !first.includes(entry)),
         seen
       );
       const page = pageOf(this.bySource([...first, ...rest]), body.cursor, this.limitOf(body.limit));
-      return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
+      return { ...page, items: page.items.map((entry) => this.clientView(entry, body.previews !== false, first.includes(entry))) } satisfies Page<ContentItem>;
     });
 
     router.post('/v1/search', async (ctx) => {
@@ -959,14 +976,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       // matching the query, or simply whatever is published when the page just explores —
       // and they are suggested even when the reader has seen them before. Everything
       // after those few respects the seen filters.
-      const first = searched.filter((entry) => entry.id.startsWith('vs1')).slice(0, 3);
+      const first = nativeSuggestions(searched, filters.formats);
       const rest = this.withoutSeen(
         searched.filter((entry) => !first.includes(entry)),
         seen
       );
       const results = this.bySource([...first, ...rest]);
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
-      return { ...page, items: page.items.map((entry) => this.registry.view(entry)) } satisfies Page<ContentItem>;
+      return { ...page, items: page.items.map((entry) => this.clientView(entry, body.previews !== false, first.includes(entry))) } satisfies Page<ContentItem>;
     });
 
     router.post('/v1/lookup', async (ctx) => {
@@ -1091,7 +1108,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     router.post('/v1/creators/latest', async (ctx) => {
-      const body = await readJson<{ creators?: string[]; preferences?: Preferences; cursor?: string; limit?: number; bloom?: unknown }>(ctx.req);
+      const body = await readJson<{ creators?: string[]; preferences?: Preferences; cursor?: string; limit?: number; bloom?: unknown; previews?: boolean }>(ctx.req);
       const creators = new Set((body.creators ?? []).slice(0, 500).map(String));
       this.charge(ctx, this.config.pricing.feed, 'subscriptions');
       // The subscriptions feed is simply the newest content of the creators you follow:
@@ -1101,8 +1118,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         .visible(preferences, this.config.policy.maxRating)
         .filter((entry) => entry.creatorId && creators.has(entry.creatorId))
         .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
-      const page = pageOf(items, body.cursor, this.limitOf(body.limit));
-      return { ...page, items: page.items.map((entry) => this.registry.view(entry)) };
+      const first = nativeSuggestions(items, preferences.formats);
+      const page = pageOf([...first, ...items.filter((entry) => !first.includes(entry))], body.cursor, this.limitOf(body.limit));
+      return { ...page, items: page.items.map((entry) => this.clientView(entry, body.previews !== false, first.includes(entry))) };
     });
 
     // Creator search (Explore): no exact name needed — the words may come in any order

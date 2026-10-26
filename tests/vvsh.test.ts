@@ -6,7 +6,7 @@ import type { SavedState } from '../src/shared/clientapi.js';
 import { buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../src/shared/vvsh-encode.js';
 import { chunkAt, parseVvshFile, parseVvshNode, pathToChunk, previewAt, serializeVvshFile, treeLeaves, unpackVvshNode, vvshFileJson, walkToChunk, type VvshHash } from '../src/shared/vvsh.js';
 import { base64url, fromBase64url } from '../src/shared/encoding.js';
-import { clientFor, randomBytesOf, startClient, startProvider, tempDir } from './helpers.js';
+import { clientFor, randomBytesOf, startClient, startProvider, tempDir, waitFor } from './helpers.js';
 
 const RENDITIONS = [
   { id: '8k', label: '8K', height: 4320, kbps: 40_000 },
@@ -260,12 +260,17 @@ describe('a provider storing a .vvsh stream', async () => {
     const started = await account.json<{ jobId: string; quote: { credits: number } }>('/v1/vvsh/convert', {
       body: { name: 'made-here.vvsh', bytes: source.length, totalSeconds: 30, config },
     });
-    await account.json(`/v1/vvsh/convert/${started.jobId}/piece`, { method: 'PUT', raw: source });
-    await assert.rejects(
-      account.json(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {} }),
-      /Could not encode 8K/,
-      'invalid media cannot become several identical quality leaves'
-    );
+    await account.json(`/v1/vvsh/convert/${started.jobId}/piece?index=0`, { method: 'PUT', raw: source });
+    const repeated = await account.json<{ bytes: number; duplicate?: boolean }>(`/v1/vvsh/convert/${started.jobId}/piece?index=0`, { method: 'PUT', raw: source });
+    assert.equal(repeated.bytes, source.length, 'a retried piece is not appended twice');
+    assert.equal(repeated.duplicate, true);
+    const finishing = await account.json<{ status: string }>(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {} });
+    assert.equal(finishing.status, 'running');
+    const failed = await waitFor(async () => {
+      const state = await account.json<{ status: string; error?: string }>(`/v1/vvsh/convert/${started.jobId}`);
+      return state.status === 'error' ? state : undefined;
+    });
+    assert.match(failed.error!, /Could not encode 8K/, 'invalid media cannot become several identical quality leaves');
     const after = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
     assert.equal(after, before - started.quote.credits, 'the quote was charged before the work ran');
   });
@@ -298,7 +303,12 @@ describe('a client streaming and exporting a .vvsh', async () => {
   const session = await api<{ jobId: string }>('/api/vvsh/session', {
     body: { mode: 'publish', nodeId, name: 'stream.vvsh', totalSeconds: 30, config, sourceMime: 'video/mp4' },
   });
-  await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(source) } });
+  await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(source), index: 0 } });
+  const retried = await api<{ bytes: number; duplicate?: boolean }>(`/api/vvsh/session/${session.jobId}/piece`, {
+    body: { data: base64url(source), index: 0 },
+  });
+  assert.equal(retried.bytes, source.length, 'a local piece retry is idempotent');
+  assert.equal(retried.duplicate, true);
   const published = await api<{ cid: string; manifest: Manifest }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
   const file = published.manifest.vvsh!;
 

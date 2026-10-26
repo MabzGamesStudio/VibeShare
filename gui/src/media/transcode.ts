@@ -1,6 +1,6 @@
-// VVSH encoding configuration and persistence helpers. Actual media conversion lives in
-// src/shared/vvsh-transcode and is exactly the same code used by provider nodes.
-import { transcodeVvshChunks } from '../../../src/shared/vvsh-transcode';
+// VVSH encoding configuration and persistence helpers. Local FFmpeg runs in the client
+// daemon; this module is the warned MediaRecorder fallback for browser-only publishing.
+import { transcodeSegmentsMediaRecorder } from './recorder';
 
 export const RESOLUTIONS = [360, 480, 720, 1080, 1440, 2160, 4320];
 export const FRAME_RATES = [24, 25, 30, 50, 60];
@@ -12,6 +12,7 @@ export interface EncodeRow {
   fps: number;
   kbps: number;
   customFps?: boolean;
+  customHeight?: boolean;
 }
 
 export function rowId(height: number, fps: number): string {
@@ -55,24 +56,13 @@ export function unpackSegments(packed: Uint8Array): Uint8Array[] {
   });
 }
 
-/** The exact same direct per-chunk conversion the provider runs. */
-export async function transcodeSegments(
+/** The browser's explicitly selected fallback when local FFmpeg is not configured. */
+export function transcodeSegments(
   file: Blob,
   row: EncodeRow,
   chunkSeconds: number,
   onProgress: ((fraction: number) => void) | undefined,
   totalSeconds: number
 ): Promise<Uint8Array[]> {
-  const source = new Uint8Array(await file.arrayBuffer());
-  const encoded = await transcodeVvshChunks(
-    source,
-    {
-      chunkSeconds,
-      previewSplits: 0,
-      bitrates: [{ id: row.id, label: rowId(row.height, row.fps), height: row.height, fps: row.fps, kbps: row.kbps }],
-    },
-    totalSeconds,
-    (_rendition, chunk, fraction) => onProgress?.((chunk + fraction) / Math.max(1, Math.ceil(totalSeconds / chunkSeconds)))
-  );
-  return encoded[row.id];
+  return transcodeSegmentsMediaRecorder(file, row, chunkSeconds, onProgress, totalSeconds);
 }

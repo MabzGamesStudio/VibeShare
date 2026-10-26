@@ -1,6 +1,6 @@
 # VibeShare node image: runs any node type.
 #   docker run -p 7701:7701 -v vibeshare:/data ghcr.io/mabzgamesstudio/vibeshare provider --public-url https://cdn.example.org
-# Debian/glibc is required by the prebuilt NodeAV codecs used for VVSH conversion.
+# Debian/glibc supports native FFmpeg (installed below) and the NodeAV fallback codecs.
 ARG NODE_IMAGE=node:22
 FROM ${NODE_IMAGE} AS build
 WORKDIR /src
@@ -20,7 +20,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY --from=build /src/dist ./dist
 COPY --from=build /src/gui/dist ./gui/dist
-RUN npm ci --omit=dev && mkdir -p /data && chown node:node /data
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm ci --omit=dev \
+    && mkdir -p /data \
+    && chown node:node /data
 USER node
 VOLUME /data
 EXPOSE 7700 7701 7702
