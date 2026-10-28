@@ -6,7 +6,10 @@ import { resolve } from 'node:path';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export const WEB_OUT = resolve(__dirname, '../distribution/web');
+// `VIBESHARE_WEB_OUT` lets scripts/build-web.ts (or a shell) choose another destination.
+// The repository default stays distribution/web for CI and the checked-in publishable site.
+const configuredOut = process.env.VIBESHARE_WEB_OUT?.trim();
+export const WEB_OUT = configuredOut ? resolve(configuredOut) : resolve(__dirname, '../distribution/web');
 
 /** Swaps the Node implementation of the shared crypto module for the browser one. */
 export function webModules(): Plugin {

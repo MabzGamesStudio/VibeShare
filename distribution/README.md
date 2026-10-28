@@ -42,6 +42,13 @@ npm install && npm --prefix gui install
 npm run build:web          # writes distribution/web
 ```
 
+The output folder can be overridden without editing the project. A folder on the command line wins over the `VIBESHARE_WEB_OUT` environment variable:
+
+```bash
+npm run build:web -- ../../../folder1/folder2/folder3
+VIBESHARE_WEB_OUT=/some/default/path npm run build:web
+```
+
 To try it locally, serve the folder over http on localhost (service workers need https or localhost), for example `npx http-server distribution/web -p 8090`, and open http://localhost:8090. With `vibeshare demo` running, put the demo's two references (printed at start) in `config.json` first.
 
 ## Publish on GitHub Pages

@@ -1,7 +1,7 @@
 {
   "shareBaseUrl": "https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web",
   "defaultNodes": [
-    "vs:provider:REPLACE-WITH-YOUR-PROVIDER-KEY@https://provider.example.org",
-    "vs:algorithm:REPLACE-WITH-YOUR-ALGORITHM-KEY@https://algorithm.example.org"
+    "vs:provider:vk14oy6fhoebwfdxhsdysnkiivpvd2ys3n32ymen35u3rkvoqxixzla@https://cdn.mabz.site",
+    "vs:algorithm:vk1qmktro2j6avsyql4eltuqxrpmuqiwfid6ew5yute6nsuubqg7waq@https://feed.mabz.site"
   ]
 }

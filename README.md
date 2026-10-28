@@ -126,6 +126,15 @@ Your identity backup (*Settings → Identity*) is a single `vibeshare-seed-…` 
 
 The **iOS app** ([`mobile/`](mobile)) is this web client in a native shell (Capacitor). The *iOS app* workflow builds it on macOS: an unsigned `.ipa` for sideloading, a simulator build, and — with App Store Connect secrets — signed builds for TestFlight. Details: [mobile/README.md](mobile/README.md).
 
+To build only the static client somewhere else, pass the destination folder to `npm run build:web` (the command-line folder wins over `VIBESHARE_WEB_OUT`):
+
+```bash
+npm run build:web -- ../../../folder1/folder2/folder3
+VIBESHARE_WEB_OUT=/some/default/path npm run build:web
+```
+
+Generated build outputs live in `dist/` and `gui/dist/`; `distribution/` is the web-client publishing folder (`config.json` plus its checked-in `web/` site). `npm run clean` removes the generated outputs without touching `distribution/`.
+
 ## Running a content provider
 
 ```bash
@@ -201,7 +210,8 @@ tests/          unit, integration and end-to-end tests
 | `npm run client` / `provider` / `algorithm` | One node from source |
 | `npm --prefix gui run dev` | Vite dev server on :5173, proxying `/api` and `/stream` to a client on :7700 (open it with `?t=<token>`; the token is in the client page's `vs-token` meta tag) |
 | `npm run build` | Compiles to `dist/` and `gui/dist/` |
-| `npm run build:web` | Builds the static web client into `distribution/web/` |
+| `npm run build:web [folder]` | Builds only the static web client; optional folder overrides `VIBESHARE_WEB_OUT`, default `distribution/web/` |
+| `npm run clean` | Removes generated outputs (`dist/`, `gui/dist/`, desktop build folders); keeps `distribution/` |
 | `npm run binaries` | Standalone executables for every OS in `release/` (needs [Bun](https://bun.sh)) |
 | `docker compose up -d` | A provider and an algorithm node in containers |
 
