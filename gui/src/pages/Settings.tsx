@@ -887,6 +887,39 @@ function EmbedsCard() {
   );
 }
 
+/** How often the GUI may re-read the client state on its own (navigation, refocus). */
+function StateRefreshCard() {
+  const { state, updateSettings } = useApp();
+  const [value, setValue] = useState(String(state?.settings.stateRefreshSeconds ?? 0));
+  useEffect(() => setValue(String(state?.settings.stateRefreshSeconds ?? 0)), [state?.settings.stateRefreshSeconds]);
+  return (
+    <div className="card form-stack">
+      <h2>Automatic state refresh</h2>
+      <p className="small muted">
+        The GUI reads the client state (<code>/api/state</code>) once when it opens, and can re-read it when you navigate or come back to
+        the window. Choose how often that may happen, in seconds — <strong>0 turns it off</strong>. Credits and node status stay live
+        either way: they arrive over the events stream, and the app re-reads after its own changes (saving a setting, adding a node). What
+        an automatic re-read adds is settings, pages and nodes changed elsewhere — another window or the daemon itself.
+      </p>
+      <label className="field">
+        Seconds between automatic re-reads (0 = never)
+        <input
+          type="number"
+          min={0}
+          max={86400}
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            const seconds = Number(e.target.value);
+            if (Number.isFinite(seconds) && seconds >= 0) void updateSettings({ stateRefreshSeconds: Math.round(seconds) });
+          }}
+        />
+        <span className="hint">Navigating and refocusing the window count as one; each actual re-read starts the wait again.</span>
+      </label>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { state, updateSettings } = useApp();
   const location = useLocation();
@@ -1126,6 +1159,7 @@ export function SettingsPage() {
       {tab === 'privacy' && (
         <>
           <EmbedsCard />
+          <StateRefreshCard />
           <TorCard />
         </>
       )}

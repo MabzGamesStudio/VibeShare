@@ -26,19 +26,34 @@ interface ContentRow {
 
 function Content() {
   const [rows, setRows] = useState<ContentRow[] | null>(null);
-  const [offset, setOffset] = useState(0);
+  const [pageStart, setPageStart] = useState(0);
+  const [pageSize, setPageSize] = useState(100);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [search, setSearch] = useState('');
   const [job, setJob] = useState<ContentRow | null>(null);
   const [details, setDetails] = useState<string | null>(null);
   const [form, setForm] = useState({ replicas: '2', durationDays: '30', upfront: '5', perRetrieval: '1', perChallenge: '1', completion: '20' });
   const [importPath, setImportPath] = useState('');
   const [toast, show] = useToast();
 
-  const load = useCallback(() => {
-    admin<{ items: ContentRow[] }>(`/v1/admin/content?offset=${offset}&limit=100`)
-      .then((r) => setRows(r.items))
-      .catch((e) => show(message(e)));
-  }, [offset, show]);
-  useEffect(load, [load]);
+  // One page at a time (Newer/Older), or lazy: Load more appends the next page below.
+  const load = useCallback(
+    (offset: number, append: boolean) => {
+      admin<{ items: ContentRow[] }>(`/v1/admin/content?offset=${offset}&limit=${pageSize}${search ? `&q=${encodeURIComponent(search)}` : ''}`)
+        .then((r) => {
+          setRows((current) => (append && current ? [...current, ...r.items] : r.items));
+          setNextOffset(offset + r.items.length);
+          setHasMore(r.items.length >= pageSize);
+        })
+        .catch((e) => show(message(e)));
+    },
+    [pageSize, search, show]
+  );
+  useEffect(() => {
+    setPageStart(0);
+    load(0, false);
+  }, [load]);
 
   return (
     <div className="form-stack">
@@ -56,7 +71,7 @@ function Content() {
                 const result = await admin<{ cid: string }>('/v1/admin/content/import', { body: { path: importPath.trim() } });
                 show(`Added ${result.cid}`);
                 setImportPath('');
-                load();
+                load(pageStart, false);
               } catch (e) {
                 show(message(e));
               }
@@ -65,6 +80,18 @@ function Content() {
             Import
           </button>
         </div>
+      </div>
+      <div className="row">
+        <input
+          type="search"
+          value={search}
+          placeholder="Search content by name, content id or uploader"
+          style={{ flex: 1 }}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPageStart(0);
+          }}
+        />
       </div>
       {!rows ? (
         <Loading />
@@ -82,6 +109,13 @@ function Content() {
               </tr>
             </thead>
             <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="small muted">
+                    No content matches.
+                  </td>
+                </tr>
+              )}
               {rows.map((row) => (
                 <tr key={row.cid}>
                   <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(row.cid)}>
@@ -129,7 +163,7 @@ function Content() {
                         onClick={async () => {
                           if (!window.confirm(`Delete ${row.title ?? row.name} and its chunks from every backend?`)) return;
                           await admin(`/v1/admin/content/${row.cid}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                          load();
+                          load(pageStart, false);
                         }}
                       >
                         Delete
@@ -143,11 +177,38 @@ function Content() {
         </div>
       )}
       <div className="row">
-        <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>
+        <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+          Per page
+          <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+            {[25, 50, 100, 200, 500].map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          disabled={pageStart === 0}
+          onClick={() => {
+            const start = Math.max(0, pageStart - pageSize);
+            setPageStart(start);
+            load(start, false);
+          }}
+        >
           Newer
         </button>
-        <button disabled={(rows?.length ?? 0) < 100} onClick={() => setOffset(offset + 100)}>
+        <button
+          disabled={!hasMore}
+          onClick={() => {
+            const start = pageStart + pageSize;
+            setPageStart(start);
+            load(start, false);
+          }}
+        >
           Older
+        </button>
+        <button disabled={!hasMore} onClick={() => load(nextOffset, true)}>
+          Load more
         </button>
       </div>
       {job && (

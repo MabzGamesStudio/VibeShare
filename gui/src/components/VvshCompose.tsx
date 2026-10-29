@@ -14,13 +14,17 @@ import { useApp } from '../state';
 import {
   defaultKbps,
   estimateBytes,
+  fitReport,
   FRAME_RATES,
+  HEIGHT_TO_WIDTH,
   packSegments,
   PREVIEW_WIDTHS,
   RESOLUTIONS,
   rowId,
   transcodeSegments,
   unpackSegments,
+  WIDTHS,
+  WIDTH_TO_HEIGHT,
   type EncodeRow,
 } from '../media/transcode';
 import { clearJob, getBlob, getStoredFile, loadJob, newJobId, putBlob, saveJob, type VvshJob } from '../media/vvshjobs';
@@ -110,8 +114,8 @@ async function probeVideo(
 }
 
 const DEFAULT_ROWS: EncodeRow[] = [
-  { id: rowId(1080, 30), height: 1080, fps: 30, kbps: defaultKbps(1080, 30) },
-  { id: rowId(480, 30), height: 480, fps: 30, kbps: defaultKbps(480, 30) },
+  { id: rowId(1080, 30), height: 1080, width: 1920, fit: 'crop', fps: 30, kbps: defaultKbps(1080, 30) },
+  { id: rowId(480, 30), height: 480, width: 854, fit: 'crop', fps: 30, kbps: defaultKbps(480, 30) },
 ];
 
 export function VvshCompose() {
@@ -128,15 +132,33 @@ export function VvshCompose() {
   const [job, setJob] = useState<VvshJob | null>(null);
   const jobRef = useRef<VvshJob | null>(null);
   const [passPct, setPassPct] = useState<number | null>(null);
+  /** Provider-side processing percent while a conversion runs there. */
+  const [processPct, setProcessPct] = useState<number | null>(null);
   const [result, setResult] = useState<string | null>(null);
 
   // A job left over from an earlier visit (the page closed mid-publish) is picked up here.
+  // The whole configuration comes back with it — the chunk length included — so a resumed
+  // job keeps encoding into the same timeline its finished chunks were cut for.
   useEffect(() => {
     void loadJob().then((saved) => {
       if (saved && saved.status !== 'done') {
         jobRef.current = saved;
         setJob(saved);
-        if (saved.rows?.length) setRows(saved.rows.map((row) => ({ ...row, customFps: false, customHeight: false })));
+        if (saved.rows?.length) {
+          setRows(
+            saved.rows.map((row) => ({
+              ...row,
+              width: row.width ?? 0,
+              fit: row.fit ?? 'crop',
+              customFps: false,
+              customHeight: false,
+              customWidth: false,
+            }))
+          );
+        }
+        if (saved.chunkSeconds > 0) setChunkSeconds(String(saved.chunkSeconds));
+        if (saved.previewSplits > 0) setPreviews(String(saved.previewSplits));
+        if (saved.totalSeconds > 0) setSeconds(saved.totalSeconds);
       }
     });
   }, []);
@@ -169,8 +191,11 @@ export function VvshCompose() {
   // An encoding strictly above what the video really carries only adds bytes (an exact
   // match — 480p on a 480p file, 30 fps on a 30 fps file — is right and never warns), and
   // two of the same add nothing at all — the form points both out.
-  const overSource = (row: { height: number; fps: number }) =>
-    Boolean(source && (row.height > source.height || (source.fps > 0 && row.fps > source.fps)));
+  const overSource = (row: { height: number; width?: number; fps: number }) =>
+    Boolean(
+      source &&
+        (row.height > source.height || (row.width ?? 0) > source.width || (source.fps > 0 && row.fps > source.fps))
+    );
   const seenConfigs = new Map<string, number>();
   for (const row of rows) seenConfigs.set(rowId(row.height, row.fps), (seenConfigs.get(rowId(row.height, row.fps)) ?? 0) + 1);
   const duplicates = [...seenConfigs.entries()].filter(([, count]) => count > 1).map(([id]) => id);
@@ -178,6 +203,8 @@ export function VvshCompose() {
     id: row.id,
     label: `${row.height}p${row.fps}`,
     height: row.height,
+    width: row.width > 0 ? row.width : undefined,
+    fit: row.fit,
     kbps: row.kbps,
     fps: row.fps,
   }));
@@ -208,6 +235,21 @@ export function VvshCompose() {
       const probe = await probeVideo(picked, 0, previewWidthValue, previewQualityValue);
       if (probe.seconds > 0) setSeconds(probe.seconds);
       setSource({ width: probe.width, height: probe.height, fps: snapFps(probe.fps) });
+      // The video's own encoding is the only encoding to start: its exact size and frame
+      // rate, so publishing the file as it is takes no editing at all.
+      const fps = snapFps(probe.fps) || 30;
+      if (probe.width > 0 && probe.height > 0) {
+        setRows([
+          {
+            id: rowId(probe.height, fps),
+            height: probe.height,
+            width: probe.width,
+            fit: 'crop',
+            fps,
+            kbps: defaultKbps(probe.height, fps),
+          },
+        ]);
+      }
       // Sensible defaults, filled in for the user: 5-second chunks and one preview every
       // ten seconds of video (never more than 100), small and light images.
       setChunkSeconds('5');
@@ -219,15 +261,16 @@ export function VvshCompose() {
     }
   };
 
-  /** Piece uploads get one explicit retry. Provider conversion itself is polled by the
-   *  client core, which returns any transient retry warnings with the completed result. */
+  /** Piece uploads get one explicit retry. The finish runs the rest as a background job
+   *  that is polled below — it retries itself once with a warning on a total failure. */
   const uploadVideo = async (
     mode: 'publish' | 'convert',
     source: Blob,
     name: string,
     totalSeconds: number,
     previewImages: string[],
-    onProgress: (percent: number) => void
+    onProgress: (percent: number) => void,
+    onProcessing?: (percent: number | null) => void
   ): Promise<{ cid: string; warnings?: string[] }> => {
     if (!provider) throw new Error('Add a provider first');
     const session = await api<{ jobId: string }>('/api/vvsh/session', {
@@ -256,9 +299,31 @@ export function VvshCompose() {
       }
       onProgress(Math.min(99, Math.round(((at + slice.length) / source.size) * 100)));
     }
-    const answer = await api<{ cid: string; warnings?: string[] }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
-    for (const warning of answer.warnings ?? []) toast(`Warning: ${warning}`, 'info');
-    return answer;
+    // Finishing answers at once and the work runs as a job: poll it instead of holding
+    // one request open for a large upload. Warnings of the job's automatic retry arrive
+    // before the retry runs; a total failure arrives as the job's error.
+    let state = await api<{ status: 'running' | 'done' | 'error'; warnings?: string[]; cid?: string; error?: string; progress?: number }>(
+      `/api/vvsh/session/${session.jobId}/finish`,
+      { body: {} }
+    );
+    const warned = new Set<string>();
+    const showWarnings = () => {
+      for (const warning of state.warnings ?? []) {
+        if (warned.has(warning)) continue;
+        warned.add(warning);
+        toast(`Warning: ${warning}`, 'info');
+      }
+    };
+    showWarnings();
+    while (state.status === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      state = await api(`/api/vvsh/session/${session.jobId}`);
+      onProcessing?.(state.progress ?? null);
+      showWarnings();
+    }
+    onProcessing?.(null);
+    if (state.status === 'error') throw new Error(state.error || 'The upload failed');
+    return { cid: state.cid ?? '', warnings: state.warnings };
   };
 
   /** Publishes in stages — encode each quality, upload object by object, commit — and
@@ -276,6 +341,7 @@ export function VvshCompose() {
       const totalSeconds = probed.seconds || seconds;
       if (!(totalSeconds > 0)) throw new Error('Could not read a length from this video');
       if (!(chunkSecondsValue > 0)) throw new Error('Time per chunk must be 1 or more');
+      if (rows.some((row) => !(row.width > 0) || !(row.height > 0))) throw new Error('Every encoding needs a width and a height');
       if (probed.seconds) setSeconds(Math.round(probed.seconds));
       const id = resuming?.id ?? newJobId();
       const fresh: VvshJob = {
@@ -311,8 +377,11 @@ export function VvshCompose() {
       // One WebM recording per chunk, so every chunk plays on its own (sparse playback).
       const webm: Record<string, Uint8Array[]> = {};
       for (const row of rows) {
-        // Do not resume recorder-produced chunks from the old pipeline.
-        const key = `${id}:enc2:${row.id}`;
+        // The cache key carries the whole encode configuration: chunks recorded for a
+        // different chunk length or size are never spliced into this timeline (that is
+        // how a resumed job used to break playback — its old chunks sat in the wrong
+        // time slots and the video played only the first seconds).
+        const key = `${id}:enc3:${row.id}:${chunkSecondsValue}:${row.width}x${row.height}`;
         const done = await getBlob(key);
         if (done) {
           webm[row.id] = unpackSegments(done);
@@ -371,13 +440,22 @@ export function VvshCompose() {
 
   /** Upload the source for provider-side conversion and polled completion. */
   const runPassthrough = async () => {
-    if (!provider || !file) return;
+    if (!provider) return;
+    if (rows.some((row) => !(row.width > 0) || !(row.height > 0))) {
+      toast('Every encoding needs a width and a height', 'error');
+      return;
+    }
     try {
       setPassPct(0);
-      const probed = await probeVideo(file, previewSplits, previewWidthValue, previewQualityValue);
+      setProcessPct(null);
+      // After a reload the picker is empty — the video itself is kept in IndexedDB, so an
+      // unfinished job's source is picked back up from there.
+      const source: Blob | null = file ?? (job && job.status !== 'done' ? await getStoredFile(`${job.id}:source`) : null);
+      if (!source) throw new Error('Pick the video file first');
+      const probed = await probeVideo(source, previewSplits, previewWidthValue, previewQualityValue);
       const totalSeconds = probed.seconds || seconds;
-      const name = (title.trim() || file.name.replace(/\.[^.]+$/, '') || 'video') + '.vvsh';
-      const answer = await uploadVideo('convert', file, name, totalSeconds, probed.previews, setPassPct);
+      const name = (title.trim() || file?.name?.replace(/\.[^.]+$/, '') || job?.name?.replace(/\.vvsh$/i, '') || 'video') + '.vvsh';
+      const answer = await uploadVideo('convert', source, name, totalSeconds, probed.previews, setPassPct, setProcessPct);
       setPassPct(100);
       setResult(answer.cid);
       toast('Stored on the provider', 'success');
@@ -385,8 +463,47 @@ export function VvshCompose() {
       toast(errorMessage(e), 'error');
     } finally {
       setPassPct(null);
+      setProcessPct(null);
     }
   };
+
+  // A job still working when the page reopens continues on its own — the progress keeps
+  // moving after a refresh instead of waiting for another button press.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (autoStarted.current || job?.status !== 'working' || !provider) return;
+    autoStarted.current = true;
+    void run(job);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status, provider]);
+
+  // The progress card is always on the page (below the buttons): whatever runs fills it
+  // in where the user already is, instead of appearing somewhere they are not looking.
+  const canResume = Boolean(job && job.status !== 'done');
+  const progressPct = Math.max(
+    0,
+    Math.min(100, Math.round(processPct ?? passPct ?? (job && job.status !== 'done' ? job.pct : job?.status === 'done' ? 100 : 0)))
+  );
+  const progressTitle =
+    processPct !== null
+      ? 'Processing on the provider'
+      : passPct !== null
+        ? 'Uploading to the provider'
+        : job && job.status !== 'done'
+          ? job.stage
+          : job?.status === 'done' || result
+            ? 'Done'
+            : 'Progress';
+  const progressHint =
+    processPct !== null
+      ? `${processPct}% of the video processed`
+      : passPct !== null
+        ? `${passPct}%`
+        : job && job.status !== 'done'
+          ? `${job.pct}% · ${job.encoded.length}/${rows.length} encodings · ${job.uploaded.length} objects uploaded`
+          : job?.status === 'done' || result
+            ? 'Published'
+            : 'Nothing running yet — encoding, uploading and provider processing all show right here.';
 
   return (
     <div className="card form-stack">
@@ -396,6 +513,19 @@ export function VvshCompose() {
         just its metadata and the tree root — every branch and chunk is stored on its own, so seeking fetches only what it needs.
       </span>
       {!file ? (
+        job && job.status !== 'done' ? (
+          <div className="card row between">
+            <div>
+              <strong>{job.name}</strong>
+              <div className="small muted">
+                Unfinished job — the video itself is kept in this browser, so it survives a refresh. Resume below picks it back up.
+              </div>
+            </div>
+            <button className="small" onClick={() => input.current?.click()}>
+              Change
+            </button>
+          </div>
+        ) : (
         <div
           className={`dropzone ${over ? 'over' : ''}`}
           onClick={() => input.current?.click()}
@@ -412,6 +542,7 @@ export function VvshCompose() {
           <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>Drop a video or click to choose</h2>
           <p>Any video file — it is encoded to each quality below and published as a seekable stream.</p>
         </div>
+        )
       ) : (
         <div className="card row between">
           <div>
@@ -533,85 +664,156 @@ export function VvshCompose() {
       </details>
       <div className="field">
         <span>Encodings — one row per quality: resolution and frame rate</span>
-        {rows.map((row, index) => (
+        {rows.map((row, index) => {
+          const report = fitReport(source, row.width, row.height, row.fit);
+          const change = row.fit === 'crop' ? report.cropPct : report.squishPct;
+          const messages: string[] = [];
+          if (!row.height || !row.width) messages.push('Width and height must not be empty.');
+          if (overSource(row)) messages.push('This encoding is above what the video itself carries — the extra bytes add no detail.');
+          if (report.tooSmall) {
+            messages.push(`The content is too small (${source?.width}×${source?.height}) — it is scaled up, which adds no detail.`);
+          }
+          if (report.ratioWarning === 'wide') {
+            messages.push(`The ratio is too wide for this video — ${change.toFixed(0)}% will be ${row.fit === 'crop' ? 'cropped from the top and bottom' : 'squished out of shape'}.`);
+          }
+          if (report.ratioWarning === 'tall') {
+            messages.push(`The ratio is too tall for this video — ${change.toFixed(0)}% will be ${row.fit === 'crop' ? 'cropped from the sides' : 'squished out of shape'}.`);
+          }
+          if (report.note) messages.push(report.note);
+          return (
           // Keyed by position only: editing a row re-derives its id (480p30 → 720p30),
           // and a changing key would remount the row — that is what stole the focus from
           // the field being typed and jolted the form.
-          <div className="row" key={index} style={{ gap: 8, flexWrap: 'nowrap', alignItems: 'center' }}>
-            <select
-              value={row.customHeight || !RESOLUTIONS.includes(row.height) ? 'custom' : row.height}
-              onChange={(e) => {
-                const value = e.target.value;
-                if (value === 'custom') updateRow(index, { customHeight: true });
-                else updateRow(index, { height: Number(value), customHeight: false });
-              }}
-              aria-label="Resolution"
-            >
-              {RESOLUTIONS.map((height) => (
-                <option key={height} value={height}>
-                  {height}p
-                </option>
-              ))}
-              <option value="custom">Other…</option>
-            </select>
-            {(row.customHeight || !RESOLUTIONS.includes(row.height)) && (
-              <input
-                type="number"
-                min={16}
-                max={4320}
-                step={2}
-                aria-label="Custom height"
-                value={String(row.height)}
-                onChange={(e) => updateRow(index, { height: Math.min(4320, Math.max(16, Math.round(Number(e.target.value) || 720))), customHeight: true })}
-              />
-            )}
-            <select
-              value={FRAME_RATES.includes(row.fps) ? row.fps : 'custom'}
-              onChange={(e) => {
-                const value = e.target.value;
-                if (value === 'custom') updateRow(index, { customFps: true });
-                else updateRow(index, { fps: Number(value), customFps: false });
-              }}
-              aria-label="Frame rate"
-            >
-              {FRAME_RATES.map((fps) => (
-                <option key={fps} value={fps}>
-                  {fps} fps
-                </option>
-              ))}
-              <option value="custom">Other…</option>
-            </select>
-            {(row.customFps || !FRAME_RATES.includes(row.fps)) && (
-              <input
-                type="number"
-                min={1}
-                max={240}
-                step={1}
-                aria-label="Custom frame rate"
-                value={String(row.fps)}
-                onChange={(e) => updateRow(index, { fps: Math.min(240, Math.max(1, Math.round(Number(e.target.value) || 30))), customFps: true })}
-              />
-            )}
-            {/* A fixed slot, hidden when there is nothing to warn about: the row's height
-                never changes with the warning, so nothing below it moves. */}
-            <span
-              className="small"
-              title="This encoding is above what the video itself carries — the extra bytes add no detail"
-              style={{ color: 'var(--warning, #b8860b)', width: 16, textAlign: 'center', visibility: overSource(row) ? 'visible' : 'hidden' }}
-            >
-              ⚠
-            </span>
-            <span className="hint" style={{ minWidth: 96, whiteSpace: 'nowrap' }}>
-              ≈ {(estimateBytes(row, seconds) / (1024 * 1024)).toFixed(1)} MB
-            </span>
-            <button className="small" onClick={() => setRows((current) => current.filter((_, i) => i !== index))} disabled={rows.length <= 1}>
-              ×
-            </button>
+          <div key={index} className="card form-stack">
+            <div className="encode-grid">
+              <label className="field">
+                Height
+                <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                  <select
+                    value={row.customHeight || !RESOLUTIONS.includes(row.height) ? 'custom' : row.height}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value === 'custom') updateRow(index, { customHeight: true });
+                      else updateRow(index, { height: Number(value), width: HEIGHT_TO_WIDTH[Number(value)] ?? row.width, customHeight: false, customWidth: false });
+                    }}
+                    aria-label="Height"
+                  >
+                    {RESOLUTIONS.map((height) => (
+                      <option key={height} value={height}>
+                        {height}p
+                      </option>
+                    ))}
+                    <option value="custom">Other…</option>
+                  </select>
+                  {(row.customHeight || !RESOLUTIONS.includes(row.height)) && (
+                    <input
+                      type="number"
+                      min={1}
+                      max={4320}
+                      step={1}
+                      aria-label="Custom height"
+                      value={row.height ? String(row.height) : ''}
+                      placeholder="Height"
+                      style={{ width: 88 }}
+                      onChange={(e) => updateRow(index, { height: e.target.value.trim() === '' ? 0 : Math.min(4320, Math.max(1, Math.round(Number(e.target.value) || 0))), customHeight: true })}
+                    />
+                  )}
+                </div>
+              </label>
+              <label className="field">
+                Width
+                <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                  <select
+                    value={row.customWidth || !WIDTHS.includes(row.width) ? 'custom' : row.width}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value === 'custom') updateRow(index, { customWidth: true });
+                      else updateRow(index, { width: Number(value), height: WIDTH_TO_HEIGHT[Number(value)] ?? row.height, customWidth: false, customHeight: false });
+                    }}
+                    aria-label="Width"
+                  >
+                    {WIDTHS.map((width) => (
+                      <option key={width} value={width}>
+                        {width}w
+                      </option>
+                    ))}
+                    <option value="custom">Other…</option>
+                  </select>
+                  {(row.customWidth || !WIDTHS.includes(row.width)) && (
+                    <input
+                      type="number"
+                      min={1}
+                      max={7680}
+                      step={1}
+                      aria-label="Custom width"
+                      value={row.width ? String(row.width) : ''}
+                      placeholder="Width"
+                      style={{ width: 88 }}
+                      onChange={(e) => updateRow(index, { width: e.target.value.trim() === '' ? 0 : Math.min(7680, Math.max(1, Math.round(Number(e.target.value) || 0))), customWidth: true })}
+                    />
+                  )}
+                </div>
+              </label>
+              <label className="field">
+                Adjust to fill
+                <select
+                  value={row.fit}
+                  onChange={(e) => updateRow(index, { fit: e.target.value as 'crop' | 'squish' })}
+                  aria-label="Shape adjustment"
+                >
+                  <option value="crop">Crop to fill</option>
+                  <option value="squish">Squish to fill</option>
+                </select>
+              </label>
+            </div>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label className="field" style={{ marginBottom: 0 }}>
+                Frame rate
+                <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                  <select
+                    value={FRAME_RATES.includes(row.fps) ? row.fps : 'custom'}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value === 'custom') updateRow(index, { customFps: true });
+                      else updateRow(index, { fps: Number(value), customFps: false });
+                    }}
+                    aria-label="Frame rate"
+                  >
+                    {FRAME_RATES.map((fps) => (
+                      <option key={fps} value={fps}>
+                        {fps} fps
+                      </option>
+                    ))}
+                    <option value="custom">Other…</option>
+                  </select>
+                  {(row.customFps || !FRAME_RATES.includes(row.fps)) && (
+                    <input
+                      type="number"
+                      min={1}
+                      max={240}
+                      step={1}
+                      aria-label="Custom frame rate"
+                      value={String(row.fps)}
+                      style={{ width: 88 }}
+                      onChange={(e) => updateRow(index, { fps: Math.min(240, Math.max(1, Math.round(Number(e.target.value) || 30))), customFps: true })}
+                    />
+                  )}
+                </div>
+              </label>
+              <span className="hint" style={{ whiteSpace: 'nowrap' }}>
+                ≈ {(estimateBytes(row, seconds) / (1024 * 1024)).toFixed(1)} MB
+              </span>
+              <button className="small" style={{ marginLeft: 'auto' }} onClick={() => setRows((current) => current.filter((_, i) => i !== index))} disabled={rows.length <= 1}>
+                ×
+              </button>
+            </div>
+          <div className="tiny" style={{ minHeight: 16, color: 'var(--warning, #b8860b)' }}>{messages.join(' ')}</div>
           </div>
-        ))}
+          );
+        })}
         <button
           className="small"
-          onClick={() => setRows((current) => [...current, { id: rowId(720, 30), height: 720, fps: 30, kbps: defaultKbps(720, 30) }])}
+          onClick={() => setRows((current) => [...current, { id: rowId(720, 30), height: 720, width: 1280, fit: 'crop', fps: 30, kbps: defaultKbps(720, 30) }])}
         >
           + Add encoding
         </button>
@@ -636,10 +838,10 @@ export function VvshCompose() {
         </span>
       )}
       <div className="row">
-        <button className="primary small" disabled={!file || !provider || !rows.length || job?.status === 'working'} onClick={() => void run(job)}>
+        <button className="primary small" disabled={(!file && !canResume) || !provider || !rows.length || job?.status === 'working'} onClick={() => void run(job)}>
           {job && job.status !== 'done' ? 'Resume publishing' : 'Process & publish'}
         </button>
-        <button className="small" disabled={!file || !provider || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
+        <button className="small" disabled={(!file && !canResume) || !provider || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
           Convert on the provider
         </button>
         {job && job.status !== 'done' && (
@@ -656,38 +858,27 @@ export function VvshCompose() {
           </button>
         )}
       </div>
-      {passPct !== null && (
-        <div className="card form-stack">
-          <div className="row between">
-            <strong>Uploading to the provider</strong>
-            <span className="hint">{passPct}%</span>
-          </div>
-          <div style={{ height: 6, background: 'rgba(0,0,0,0.12)', borderRadius: 3 }}>
-            <div style={{ width: `${passPct}%`, height: '100%', background: 'var(--accent)', borderRadius: 3, transition: 'width 0.3s' }} />
-          </div>
+      {/* Always in place: pressing a button fills this card in, so the progress is never
+          somewhere else on the page than where the user is looking. */}
+      <div className="card form-stack">
+        <div className="row between">
+          <strong>{progressTitle}</strong>
+          <span className="hint">{progressHint}</span>
         </div>
-      )}
-      {job && job.status !== 'done' && (
-        <div className="card form-stack">
-          <div className="row between">
-            <strong>{job.stage}</strong>
-            <span className="hint">
-              {job.pct}% · {job.encoded.length}/{rows.length} encodings · {job.uploaded.length} objects uploaded
-            </span>
-          </div>
-          <div style={{ height: 6, background: 'rgba(0,0,0,0.12)', borderRadius: 3 }}>
-            <div style={{ width: `${job.pct}%`, height: '100%', background: 'var(--accent)', borderRadius: 3, transition: 'width 0.3s' }} />
-          </div>
-          {job.error && <div className="banner danger small">{job.error}</div>}
+        <div className="progress">
+          <div style={{ width: `${progressPct}%` }} />
+        </div>
+        {job && job.status !== 'done' && job.error && <div className="banner danger small">{job.error}</div>}
+        {job && job.status !== 'done' && (
           <span className="hint">Kept in this browser (IndexedDB) — closing or refreshing the page keeps the work; press resume to continue.</span>
-        </div>
-      )}
+        )}
+        {result && (
+          <span className="hint">
+            Content id: <code>{result}</code>
+          </span>
+        )}
+      </div>
       {!provider && <span className="hint">Add a content provider node first.</span>}
-      {result && (
-        <span className="hint">
-          Content id: <code>{result}</code>
-        </span>
-      )}
     </div>
   );
 }

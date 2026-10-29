@@ -28,6 +28,7 @@ export async function transcodeVvshChunks(
   // previously encoded quality, and emits only its own exact time interval.
   for (const [renditionIndex, rendition] of config.bitrates.entries()) {
     const height = mediaNumber(rendition.height, 0, 'Rendition height', 0, 4320);
+    const width = mediaNumber(rendition.width, 0, 'Rendition width', 0, 7680);
     const fps = mediaNumber(rendition.fps, 30, 'Rendition fps', 1, 240);
     const kbps = mediaNumber(rendition.kbps, 0, 'Rendition bitrate', 1, 200_000);
     const chunks: Uint8Array[] = [];
@@ -45,12 +46,18 @@ export async function transcodeVvshChunks(
             const dimensions: { width?: number; height?: number } = {};
             if (height) {
               dimensions.height = Math.max(2, Math.round(height / 2) * 2);
-              const aspect = (await track.getDisplayWidth()) / Math.max(1, await track.getDisplayHeight());
-              dimensions.width = Math.max(2, Math.round((dimensions.height * aspect) / 2) * 2);
+              if (width) {
+                dimensions.width = Math.max(2, Math.round(width / 2) * 2);
+              } else {
+                const aspect = (await track.getDisplayWidth()) / Math.max(1, await track.getDisplayHeight());
+                dimensions.width = Math.max(2, Math.round((dimensions.height * aspect) / 2) * 2);
+              }
             }
             return {
               ...dimensions,
-              fit: 'fill',
+              // 'cover' crops to fill a forced frame (the overflow is cut off); 'fill'
+              // squishes the picture into it. Without a width the frame matches the video.
+              fit: width && rendition.fit === 'crop' ? 'cover' : 'fill',
               allowRotationMetadata: false,
               frameRate: fps,
               codec: 'vp9',

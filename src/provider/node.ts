@@ -345,6 +345,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       bytes: number;
       quote: VvshConvertQuote;
       status: 'uploading' | 'running' | 'done' | 'error';
+      /** Encoding progress on this node, 0–100 (what polling clients show). */
+      progress: number;
       manifest?: Manifest;
       error?: string;
       warnings: string[];
@@ -1161,6 +1163,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         bytes: 0,
         quote,
         status: 'uploading',
+        progress: 0,
         warnings: [],
         at: Date.now(),
       });
@@ -1194,12 +1197,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
 
     const conversionState = (job: {
       status: string;
+      progress?: number;
       manifest?: Manifest;
       quote: VvshConvertQuote;
       error?: string;
       warnings: string[];
     }) => ({
       status: job.status,
+      progress: job.progress ?? 0,
       manifest: job.manifest,
       quote: job.quote,
       error: job.error,
@@ -1236,6 +1241,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
                 meta: job.meta,
                 sourceMime: job.sourceMime,
                 previews: job.previews,
+                onProgress: (percent) => {
+                  job.progress = percent;
+                  job.at = Date.now();
+                },
               },
               async (hash, data) => {
                 await this.store.putChunk(hash, Buffer.from(data));
@@ -1243,6 +1252,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             );
             job.manifest = manifest;
             job.status = 'done';
+            job.progress = 100;
             log.info(`Converted ${manifest.name} for ${account.id} into a .vvsh stream (${job.quote.credits} credits)`);
           } catch (error) {
             job.error = error instanceof Error ? error.message : String(error);
@@ -1346,7 +1356,20 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.requireAdmin(ctx);
       const offset = Math.max(0, Number(ctx.query.get('offset') ?? 0));
       const limit = Math.min(500, Math.max(1, Number(ctx.query.get('limit') ?? 100)));
-      return { items: this.store.list(offset, limit), stats: this.store.stats() };
+      const q = (ctx.query.get('q') ?? '').trim().toLowerCase();
+      if (!q) return { items: this.store.list(offset, limit), stats: this.store.stats() };
+      // A search looks through the catalog (up to a sane cap) for the content id, the
+      // file or title name, and the account that uploaded it.
+      const matched = this.store
+        .list(0, 5000)
+        .filter(
+          (record) =>
+            record.cid.toLowerCase().includes(q) ||
+            record.name.toLowerCase().includes(q) ||
+            (record.title ?? '').toLowerCase().includes(q) ||
+            record.uploader.toLowerCase().includes(q)
+        );
+      return { items: matched.slice(offset, offset + limit), stats: this.store.stats() };
     });
     // Everything the node knows about one content, for the dashboard's details modal.
     router.get('/v1/admin/content/:cid', (ctx) => {

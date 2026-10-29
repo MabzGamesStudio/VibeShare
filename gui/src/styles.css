@@ -886,6 +886,24 @@ table.table {
   background: transparent;
 }
 
+/* The encoding rows of the .vvsh publish form: height, width and shape in one line. */
+.encode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.encode-grid .field {
+  margin: 0;
+  min-width: 0;
+}
+
+.encode-grid select {
+  min-width: 0;
+  flex: 1;
+}
+
 .tab {
   flex: 0 0 auto;
   white-space: nowrap;

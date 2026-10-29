@@ -61,9 +61,22 @@ export async function transcodeVvshFfmpeg(
     const dir = await mkdtemp(join(tmpdir(), 'vibeshare-ffmpeg-'));
     try {
       const height = Math.max(0, Math.min(4320, Math.round(Number(rendition.height ?? 0))));
+      const width = Math.max(0, Math.min(7680, Math.round(Number(rendition.width ?? 0))));
       const fps = Math.max(1, Math.min(240, Number(rendition.fps ?? 30)));
       const kbps = Math.max(1, Math.round(Number(rendition.kbps)));
-      const filters = `${height ? `scale=-2:${Math.max(2, Math.round(height / 2) * 2)},` : ''}fps=${fps}`;
+      const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
+      // A forced width×height either crops to fill (scale to cover, then cut the overflow
+      // off the sides or the top/bottom) or squishes the picture into the frame; without a
+      // width the video keeps its own shape.
+      const scale =
+        width && height
+          ? rendition.fit === 'squish'
+            ? `scale=${even(width)}:${even(height)}`
+            : `scale=${even(width)}:${even(height)}:force_original_aspect_ratio=increase,crop=${even(width)}:${even(height)}`
+          : height
+            ? `scale=-2:${even(height)}`
+            : '';
+      const filters = [scale, `fps=${fps}`].filter(Boolean).join(',');
       const keyframes = Math.max(1, Math.round(config.chunkSeconds * fps));
       const args = [
         '-hide_banner', '-loglevel', 'error', '-fflags', '+genpts', '-i', 'pipe:0',

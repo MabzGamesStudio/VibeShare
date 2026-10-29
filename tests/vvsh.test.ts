@@ -309,8 +309,14 @@ describe('a client streaming and exporting a .vvsh', async () => {
   });
   assert.equal(retried.bytes, source.length, 'a local piece retry is idempotent');
   assert.equal(retried.duplicate, true);
-  const published = await api<{ cid: string; manifest: Manifest }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
-  const file = published.manifest.vvsh!;
+  const finishing = await api<{ status: string }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+  assert.equal(finishing.status, 'running', 'finishing answers at once and runs the work as a polled job');
+  const published = await waitFor(async () => {
+    const state = await api<{ status: string; cid?: string; manifest?: Manifest; error?: string }>(`/api/vvsh/session/${session.jobId}`);
+    if (state.status === 'error') throw new Error(state.error);
+    return state.status === 'done' ? state : undefined;
+  });
+  const file = published.manifest!.vvsh!;
 
   it('automatically saves the VVSH id in Published Content', async () => {
     const saved = await api<SavedState>('/api/saved');

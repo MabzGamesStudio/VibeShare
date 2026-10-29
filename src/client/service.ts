@@ -47,6 +47,16 @@ export class StorageWorker {
     return this.store.data.data.settings.storageService;
   }
 
+  /** Disk offered to one provider node: its own setting, or the shared default. */
+  private quotaFor(nodeId: string): number {
+    return (this.settings.perProvider?.[nodeId] ?? this.settings.quotaGiB) * GiB;
+  }
+
+  /** Bytes of job data a provider's live assignments take. */
+  private usedFor(assignments: StorageAssignment[]): number {
+    return assignments.filter((a) => a.status === 'active' || a.status === 'downloading').reduce((sum, a) => sum + a.bytes, 0);
+  }
+
   private note(message: string): void {
     this.messages.unshift({ at: new Date().toISOString(), message });
     this.messages.length = Math.min(this.messages.length, 60);
@@ -87,8 +97,6 @@ export class StorageWorker {
     this.syncing = true;
     try {
       if (!this.settings.enabled) return;
-      const quota = this.settings.quotaGiB * GiB;
-      let used = this.usedBytes();
       let complete = true;
       for (const provider of this.eligible()) {
         const state = this.state.get(provider.id) ?? { assignments: [], polling: false, online: false };
@@ -105,12 +113,14 @@ export class StorageWorker {
           const value = (offer: StorageOffer) =>
             (offer.rewards.upfront + offer.rewards.completion + offer.rewards.perChallenge * 10 + offer.rewards.perRetrieval * 10) /
             Math.max(offer.bytes / GiB, 0.001);
+          const quota = this.quotaFor(provider.id);
+          let offered = this.usedFor(state.assignments);
           for (const offer of offers.sort((a, b) => value(b) - value(a))) {
             if (offer.requireIdentity && provider.auth === 'anonymous') continue;
-            if (used + offer.bytes > quota) continue;
+            if (offered + offer.bytes > quota) continue;
             const assignment = await client.json<StorageAssignment>(`/v1/services/storage/offers/${offer.id}/accept`, { method: 'POST' });
             this.note(`Accepted "${offer.title ?? offer.id}" from ${provider.name} (${(offer.bytes / 1024 ** 2).toFixed(1)} MiB)`);
-            used += offer.bytes;
+            offered += offer.bytes;
             state.assignments.push(assignment);
             await this.download(provider, assignment);
           }
@@ -218,21 +228,25 @@ export class StorageWorker {
   }
 
   status(): ServiceStatus {
+    const providers = this.eligible().map((node) => {
+      const state = this.state.get(node.id);
+      const assignments = state?.assignments ?? [];
+      return {
+        id: node.id,
+        name: node.name,
+        online: state?.online ?? false,
+        quotaBytes: this.quotaFor(node.id),
+        usedBytes: this.usedFor(assignments),
+        assignments,
+        earned: assignments.reduce((sum, a) => sum + a.earned, 0),
+        error: state?.error,
+      };
+    });
     return {
       enabled: this.settings.enabled,
-      quotaBytes: this.settings.quotaGiB * GiB,
+      quotaBytes: providers.reduce((sum, provider) => sum + provider.quotaBytes, 0),
       usedBytes: this.usedBytes(),
-      providers: this.eligible().map((node) => {
-        const state = this.state.get(node.id);
-        return {
-          id: node.id,
-          name: node.name,
-          online: state?.online ?? false,
-          assignments: state?.assignments ?? [],
-          earned: (state?.assignments ?? []).reduce((sum, a) => sum + a.earned, 0),
-          error: state?.error,
-        };
-      }),
+      providers,
       log: this.messages,
     };
   }

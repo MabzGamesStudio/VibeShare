@@ -88,7 +88,7 @@ export function LibraryPage() {
           </div>
         )}
         <p className="hint" style={{ marginTop: 8 }}>
-          Review status on each algorithm node is shown under <Link to="/earn" className="link">Earn → Contributions</Link>.
+          Review status on each algorithm node is shown under <Link to="/earn" className="link">Earn → Algorithm nodes</Link>.
         </p>
       </div>
 

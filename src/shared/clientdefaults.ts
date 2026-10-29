@@ -91,12 +91,13 @@ export function defaultSettings(): Settings {
     debugLogs: false,
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
-    storageService: { enabled: false, quotaGiB: 5, providers: [] },
+    storageService: { enabled: false, quotaGiB: 5, providers: [], perProvider: {} },
     theme: 'system',
     tor: { mode: 'onion', proxy: '' },
     pauseHistory: false,
     searchHistory: true,
     searchSuggestions: true,
+    stateRefreshSeconds: 0,
     selectedBloom: { enabled: true, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
     previewBloom: { enabled: true, bits: 100_000, expected: BLOOM_EXPECTED_ITEMS },
     searchBloom: { enabled: false, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
@@ -337,9 +338,17 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.vvshScrubWidth = Math.min(640, Math.max(80, Number(next.vvshScrubWidth) || 220));
   next.historyMode = next.historyMode === 'lazy' ? 'lazy' : 'pages';
   next.loadPauseMs = Math.min(10_000, Math.max(0, Math.round(Number(next.loadPauseMs) || 0)));
+  next.stateRefreshSeconds = Math.min(86_400, Math.max(0, Math.round(Number(next.stateRefreshSeconds) || 0)));
   const languages = Array.isArray(next.preferences.languages) ? next.preferences.languages : [];
   next.preferences.languages = [...new Set(languages.map((code) => baseLanguage(String(code))).filter((code) => /^[a-z]{2,3}$/.test(code)))].slice(0, 30);
   next.storageService.quotaGiB = Math.max(0, Number(next.storageService.quotaGiB) || 0);
+  // Disk offered per provider node: whole, non-negative numbers of GiB (missing = the default).
+  const perProvider: Record<string, number> = {};
+  for (const [id, gib] of Object.entries(next.storageService.perProvider ?? {})) {
+    const value = Number(gib);
+    if (id && Number.isFinite(value)) perProvider[id] = Math.max(0, value);
+  }
+  next.storageService.perProvider = perProvider;
   try {
     const url = new URL(next.shareBaseUrl);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error();

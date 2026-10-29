@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
 import { useLocation } from 'react-router-dom';
 import { api, errorMessage, onNodesChanged } from './api';
@@ -28,8 +28,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ClientState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  /** When `/api/state` was last read — automatic re-reads are spaced at least this far. */
+  const lastRefresh = useRef(0);
 
   const refresh = useCallback(async () => {
+    lastRefresh.current = Date.now();
     try {
       setState(await api<ClientState>('/api/state'));
       setError(null);
@@ -58,19 +61,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [toast]
   );
 
-  // No polling: the state is re-read from the client (never from nodes) when the user
-  // moves to another page or comes back to the window.
+  // The state is read once when the app opens. After that the GUI re-reads it (always from
+  // the client, never from the nodes) only as often as `stateRefreshSeconds` allows — 0,
+  // the default, means not at all: credits and node status stay live over the events
+  // stream and the app re-reads after its own changes anyway. Only settings, pages or
+  // nodes changed elsewhere (another window, the daemon) need the automatic read.
   const location = useLocation();
+  const settingsRef = useRef(state?.settings);
+  settingsRef.current = state?.settings;
+  const maybeRefresh = useCallback(() => {
+    const every = (settingsRef.current?.stateRefreshSeconds ?? 0) * 1000;
+    if (every <= 0 || Date.now() - lastRefresh.current < every) return;
+    void refresh();
+  }, [refresh]);
   useEffect(() => {
     void refresh();
-  }, [refresh, location.pathname]);
+  }, [refresh]);
+  useEffect(() => {
+    maybeRefresh();
+  }, [maybeRefresh, location.pathname]);
   // Credits and node status arrive live from the client as answers from nodes change them.
   useEffect(() => onNodesChanged((nodes) => setState((current) => (current ? { ...current, nodes } : current))), []);
   useEffect(() => {
-    const onFocus = () => void refresh();
+    const onFocus = () => maybeRefresh();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [refresh]);
+  }, [maybeRefresh]);
 
   useEffect(() => {
     const theme = state?.settings.theme ?? 'system';

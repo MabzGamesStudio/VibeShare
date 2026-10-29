@@ -52,10 +52,16 @@ export async function convertVvsh(
     sourceMime?: string;
     previews?: string[];
     createdAt?: string;
+    /** How far the encoding is, 0–100 — the job reports it to polling clients. */
+    onProgress?: (percent: number) => void;
   },
   onObject: (hash: VvshHash, data: Uint8Array) => void | Promise<void>
 ): Promise<{ manifest: Manifest; vvsh: VvshFile }> {
-  const webm = await transcodeVvshWebm(source, options.config, options.totalSeconds);
+  const { chunkCount } = vvshPlan(options.totalSeconds, options.config);
+  const units = Math.max(1, options.config.bitrates.length * chunkCount);
+  const webm = await transcodeVvshWebm(source, options.config, options.totalSeconds, (rendition, chunk, fraction) =>
+    options.onProgress?.(Math.min(99, Math.round(((rendition * chunkCount + chunk + fraction) / units) * 100)))
+  );
   const { file } = await buildVvsh(
     new Uint8Array(0),
     { totalSeconds: options.totalSeconds, config: options.config, sourceMime: 'video/webm', previews: options.previews, webm },

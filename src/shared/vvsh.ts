@@ -20,6 +20,10 @@ export interface VvshRendition {
   label: string;
   /** Vertical resolution, when known. */
   height?: number;
+  /** Horizontal resolution, when the encoding forces one (crop or squish to fit). */
+  width?: number;
+  /** How a forced width×height treats a video of another shape: crop to fill or squish. */
+  fit?: 'crop' | 'squish';
   /** Nominal bitrate in kbit/s (the encoding level). */
   kbps: number;
   /** Frames per second of this encoding, when it was encoded to one. */

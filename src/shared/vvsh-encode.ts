@@ -323,6 +323,12 @@ export async function buildVvsh(
       const totals: VvshFrameStats = { i: 0, p: 0, b: 0 };
       const chunks = files.map((file, index) => {
         const { clusters } = splitWebm(file);
+        // Every chunk must fit its own time slot: one from another chunk length would sit
+        // in the wrong place on the stream's timeline and break playback after it.
+        const span = Math.max(...clusters.map((cluster) => readClusterTimecode(cluster))) - Math.min(...clusters.map((cluster) => readClusterTimecode(cluster)));
+        if (span > chunkUnits * 1.5) {
+          throw new Error(`Encoding ${rendition.label || rendition.id} chunk ${index + 1} spans ${Math.round(span / 1000)}s but its slot is ${config.chunkSeconds}s — it was encoded with a different chunk length`);
+        }
         const pieces: Uint8Array[] = [];
         const frames: VvshFrameStats = { i: 0, p: 0, b: 0 };
         for (const cluster of clusters) {

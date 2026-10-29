@@ -2,13 +2,13 @@
 // ClientCore. The daemon mounts it on its HTTP server; the web client answers the same
 // routes in a service worker. Browser-safe.
 import type { CommentPostRequest, ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
-import { MiB, type ManifestMeta } from '../shared/content.js';
+import { MiB, type Manifest, type ManifestMeta } from '../shared/content.js';
 import { isDevBuild } from '../shared/devbuild.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, Preferences } from '../shared/protocol.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
-import type { VvshFile } from '../shared/vvsh.js';
+import type { VvshConvertQuote, VvshFile } from '../shared/vvsh.js';
 import type { ClientCore } from './core.js';
 import { SCOPES_OF_EVENT } from './bloom.js';
 import { formatSeed, parseSeed } from './model.js';
@@ -24,6 +24,22 @@ export interface ApiRoute {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   handler: (request: ApiRequest) => unknown;
+}
+
+/** A finished upload's background work: what the GUI polls `/api/vvsh/session/:id` for. */
+interface VvshJobState {
+  status: 'running' | 'done' | 'error';
+  /** How many times the whole job ran (one automatic retry after a total failure). */
+  attempts: number;
+  warnings: string[];
+  cid?: string;
+  manifest?: Manifest;
+  listed?: number;
+  quote?: VvshConvertQuote;
+  error?: string;
+  /** Provider-side processing progress, 0–100 (convert mode). */
+  progress?: number;
+  updatedAt: number;
 }
 
 export function clientRoutes(core: ClientCore): ApiRoute[] {
@@ -379,8 +395,35 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     return { bytes: session.bytes };
   });
 
+  // Finishing starts the heavy work (encoding and uploading to the provider) as a
+  // background job and answers at once — a large upload never holds one HTTP request
+  // open. The GUI polls the session below. If the job fails entirely it is retried once,
+  // with a warning kept for the GUI to show; only a second failure ends the job.
+  const vvshJobs = new Map<string, VvshJobState>();
+  const vvshJobView = (id: string, job: VvshJobState) => ({
+    jobId: id,
+    status: job.status,
+    attempts: job.attempts,
+    warnings: job.warnings,
+    cid: job.cid,
+    manifest: job.manifest,
+    listed: job.listed,
+    quote: job.quote,
+    error: job.error,
+    progress: job.progress,
+  });
+
+  on('GET', '/api/vvsh/session/:id', (request) => {
+    const id = String(request.params.id);
+    const job = vvshJobs.get(id);
+    if (!job) throw notFound('No such vvsh upload');
+    return vvshJobView(id, job);
+  });
+
   on('POST', '/api/vvsh/session/:id/finish', async (request) => {
     const id = String(request.params.id);
+    const existing = vvshJobs.get(id);
+    if (existing) return vvshJobView(id, existing);
     const session = vvshSessions.get(id);
     if (!session) throw notFound('No such vvsh upload');
     vvshSessions.delete(id);
@@ -389,9 +432,47 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     }
     const source = concatBytes(session.pieces);
     session.pieces.length = 0;
-    return session.mode === 'publish'
-      ? core.publishVvshStream(session.nodeId, source, session.options)
-      : core.convertVvshOn(session.nodeId, { data: source, ...session.options });
+    for (const [key, job] of vvshJobs) if (job.status !== 'running' && Date.now() - job.updatedAt > 3_600_000) vvshJobs.delete(key);
+    const job: VvshJobState = { status: 'running', attempts: 0, warnings: [], updatedAt: Date.now() };
+    vvshJobs.set(id, job);
+    const work = (): Promise<{ cid: string; manifest: Manifest; listed: number; quote?: VvshConvertQuote; warnings?: string[] }> =>
+      session.mode === 'publish'
+        ? core.publishVvshStream(session.nodeId, source, session.options)
+        : core.convertVvshOn(session.nodeId, {
+            data: source,
+            ...session.options,
+            onProgress: (percent) => {
+              job.progress = percent;
+              job.updatedAt = Date.now();
+            },
+          });
+    void (async () => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        job.attempts = attempt;
+        job.updatedAt = Date.now();
+        try {
+          const result = await work();
+          job.status = 'done';
+          job.cid = result.cid;
+          job.manifest = result.manifest;
+          job.listed = result.listed;
+          job.quote = result.quote;
+          if (result.warnings?.length) job.warnings.push(...result.warnings);
+          job.updatedAt = Date.now();
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (attempt === 1) {
+            job.warnings.push(`The upload failed (${message}). Retrying once.`);
+            continue;
+          }
+          job.status = 'error';
+          job.error = message;
+          job.updatedAt = Date.now();
+        }
+      }
+    })();
+    return vvshJobView(id, job);
   });
 
   on('POST', '/api/vvsh/quote', async (request) => {

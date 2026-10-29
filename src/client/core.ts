@@ -1474,6 +1474,8 @@ export class ClientCore {
       meta?: ManifestMeta;
       sourceMime?: string;
       previews?: string[];
+      /** How far the provider's own processing is, 0–100, from each polled state. */
+      onProgress?: (percent: number) => void;
     }
   ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number; warnings: string[] }> {
     const client = this.nodes.client(node);
@@ -1515,6 +1517,7 @@ export class ClientCore {
     }
     type ConversionState = {
       status: 'uploading' | 'running' | 'done' | 'error';
+      progress?: number;
       manifest?: Manifest;
       quote: VvshConvertQuote;
       error?: string;
@@ -1523,13 +1526,17 @@ export class ClientCore {
     let converted = await retryOnce('Starting provider conversion', () =>
       client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {}, timeoutMs: 10_000 })
     );
+    options.onProgress?.(converted.progress ?? 0);
     const deadline = Date.now() + 24 * 60 * 60 * 1000;
     while (converted.status !== 'done' && converted.status !== 'error') {
       if (Date.now() >= deadline) throw new Error('Provider conversion did not finish within 24 hours');
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Spaced polling: the provider works for minutes on a large video — asking it every
+      // few seconds is enough to notice progress without hammering it.
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       converted = await retryOnce('Polling provider conversion', () =>
         client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}`, { timeoutMs: 10_000 })
       );
+      options.onProgress?.(converted.progress ?? 0);
     }
     warnings.push(...(converted.warnings ?? []));
     if (converted.status === 'error' || !converted.manifest) throw new Error(converted.error || 'Provider conversion failed');

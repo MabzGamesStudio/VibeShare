@@ -19,8 +19,11 @@ async function recordChunk(file: Blob, row: EncodeRow, start: number, end: numbe
   try {
     if (video.readyState < 1) await event(video, 'loadedmetadata');
     if (!Number.isFinite(video.duration) || start >= video.duration) throw new Error('The chunk starts beyond the end of the video');
-    const height = Math.max(2, Math.round(row.height / 2) * 2);
-    const width = Math.max(2, Math.round((height * video.videoWidth / Math.max(1, video.videoHeight)) / 2) * 2);
+    const height = Math.max(2, Math.round((row.height || video.videoHeight) / 2) * 2);
+    const width =
+      row.width > 0
+        ? Math.max(2, Math.round(row.width / 2) * 2)
+        : Math.max(2, Math.round((height * video.videoWidth) / Math.max(1, video.videoHeight) / 2) * 2);
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -47,7 +50,15 @@ async function recordChunk(file: Blob, row: EncodeRow, start: number, end: numbe
     });
 
     const draw = () => {
-      context.drawImage(video, 0, 0, width, height);
+      if (row.width > 0 && row.fit === 'crop') {
+        // Scale to cover the frame, then cut the overflow off the sides or top/bottom.
+        const scale = Math.max(width / Math.max(1, video.videoWidth), height / Math.max(1, video.videoHeight));
+        const sw = width / scale;
+        const sh = height / scale;
+        context.drawImage(video, (video.videoWidth - sw) / 2, (video.videoHeight - sh) / 2, sw, sh, 0, 0, width, height);
+      } else {
+        context.drawImage(video, 0, 0, width, height);
+      }
       animation = requestAnimationFrame(draw);
     };
     if (video.readyState < 1) await event(video, 'loadeddata');

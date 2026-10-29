@@ -118,9 +118,12 @@ export interface NodeEntry {
 
 export interface StorageServiceSettings {
   enabled: boolean;
+  /** GiB of disk offered to each provider node by default. */
   quotaGiB: number;
   /** Node ids of providers to store data for; empty = every enabled provider. */
   providers: string[];
+  /** GiB offered per provider node id; nodes not listed fall back to quotaGiB. */
+  perProvider: Record<string, number>;
 }
 
 /** How a page shows its content. */
@@ -300,6 +303,14 @@ export interface Settings {
   searchHistory: boolean;
   /** Whether the search bar shows matching past searches under the search box. */
   searchSuggestions: boolean;
+  /**
+   * How often the GUI may re-read `/api/state` on its own — when you navigate or come
+   * back to the window — in seconds. 0 (the default) means never: state is read when the
+   * app opens and after the app itself changes something. Credits and node status stay
+   * live either way (they arrive over the events stream); an automatic re-read only adds
+   * settings, pages and nodes changed elsewhere (another window, the daemon itself).
+   */
+  stateRefreshSeconds: number;
   /** Content you have selected (opened): a local bloom filter of what you have already seen. */
   selectedBloom: BloomFilterSettings;
   /** Content previews you have seen on screen, without selecting them. */
@@ -540,12 +551,18 @@ export interface ExternalPublishRequest {
 
 export interface ServiceStatus {
   enabled: boolean;
+  /** Total disk offered across all provider nodes (the sum of their quotas). */
   quotaBytes: number;
+  /** Bytes of job data kept on disk. */
   usedBytes: number;
   providers: {
     id: string;
     name: string;
     online: boolean;
+    /** Disk offered to this provider node. */
+    quotaBytes: number;
+    /** Job data this provider's assignments currently take. */
+    usedBytes: number;
     assignments: StorageAssignment[];
     earned: number;
     error?: string;
