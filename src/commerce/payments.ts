@@ -13,7 +13,8 @@ import {
   type Router,
 } from '../shared/http.js';
 import { log } from '../shared/log.js';
-import type { Invoice, PaymentMethodInfo, PaymentType } from '../shared/protocol.js';
+import type { Invoice, PaymentMethodInfo, PaymentReceipt, PaymentType } from '../shared/protocol.js';
+import { receiptSigningPayload } from '../shared/protocol.js';
 import { JsonFile } from '../shared/store.js';
 import type { Auth } from './auth.js';
 import type { Account, Ledger } from './ledger.js';
@@ -44,7 +45,8 @@ export interface EvmConfig extends BaseMethodConfig {
   type: 'evm';
   network: string;
   chainId?: number;
-  rpcUrl: string;
+  /** JSON-RPC endpoint; a public one per chain is used when this is left empty. */
+  rpcUrl?: string;
   address: string;
   currency: string;
   decimals: number;
@@ -59,10 +61,23 @@ export interface EvmConfig extends BaseMethodConfig {
 export interface BitcoinConfig extends BaseMethodConfig {
   type: 'bitcoin';
   network?: string;
-  apiUrl: string;
+  /** Esplora API base URL; a public one is used when this is left empty. */
+  apiUrl?: string;
   address: string;
   creditsPerCoin: number;
   confirmations?: number;
+}
+
+/**
+ * Monero: the operator's address only. Because a node never asks for — and never
+ * accepts — view keys, seeds or private keys, payments cannot be verified from here:
+ * the payer sends the transaction id and the operator confirms it in their wallet.
+ */
+export interface MoneroConfig extends BaseMethodConfig {
+  type: 'monero';
+  network?: string;
+  address: string;
+  creditsPerCoin: number;
 }
 
 /** SOL or an SPL token (USDC, …), checked over Solana JSON-RPC. */
@@ -77,11 +92,20 @@ export interface SolanaConfig extends BaseMethodConfig {
   creditsPerCoin: number;
 }
 
-/** Bitcoin over Lightning through an LNbits wallet. */
+/**
+ * Bitcoin over Lightning. Two ways, both address-only on the operator's side: an
+ * LNbits wallet (which creates and checks invoices automatically) or a plain Lightning
+ * address / LNURL, where the payer sends the payment hash and the operator confirms.
+ */
 export interface LightningConfig extends BaseMethodConfig {
   type: 'lightning';
-  lnbitsUrl: string;
-  invoiceKey: string;
+  /** 'lnbits' when a wallet API is configured, otherwise 'address'. */
+  mode?: 'lnbits' | 'address';
+  /** A lightning address (you@wallet.example) or LNURL for the address mode. */
+  address?: string;
+  lnbitsUrl?: string;
+  /** LNbits *invoice* key: it can only create and read invoices, never spend. */
+  invoiceKey?: string;
   /** Credits for one bitcoin (100,000,000 sats). */
   creditsPerCoin: number;
 }
@@ -112,10 +136,140 @@ export type PaymentConfig =
   | VoucherConfig
   | EvmConfig
   | BitcoinConfig
+  | MoneroConfig
   | SolanaConfig
   | LightningConfig
   | CheckoutConfig
   | ManualConfig;
+
+// ---------------------------------------------------------------------------
+// Built-in crypto options and safety
+
+/** Public Esplora endpoint used when the operator does not run their own. */
+export const DEFAULT_ESPLORA = 'https://mempool.space/api';
+
+/** Public JSON-RPC endpoints per EVM chain, so an address is all an operator needs. */
+const DEFAULT_EVM_RPC: Record<number, string> = {
+  1: 'https://cloudflare-eth.com',
+  10: 'https://mainnet.optimism.io',
+  137: 'https://polygon-rpc.com',
+  8453: 'https://mainnet.base.org',
+  42161: 'https://arb1.arbitrum.io/rpc',
+};
+
+export function defaultEvmRpc(chainId?: number): string | undefined {
+  return chainId ? DEFAULT_EVM_RPC[chainId] : undefined;
+}
+
+/**
+ * The four crypto options every node ships with: Bitcoin, Bitcoin Lightning, Ethereum
+ * and Monero. They start **disabled** with an empty address — the operator fills in an
+ * address and flips them on. Only public addresses are ever asked for: no seeds, no
+ * private keys, no view keys (a node cannot spend with an address).
+ */
+export function defaultCryptoPaymentConfigs(): PaymentConfig[] {
+  return [
+    {
+      id: 'btc',
+      type: 'bitcoin',
+      label: 'Bitcoin',
+      description: 'On-chain bitcoin (BTC) to the operator address.',
+      enabled: false,
+      address: '',
+      apiUrl: DEFAULT_ESPLORA,
+      creditsPerCoin: 100_000_000,
+      confirmations: 1,
+    },
+    {
+      id: 'ln',
+      type: 'lightning',
+      label: 'Bitcoin Lightning',
+      description: 'Lightning (sats) to a lightning address — or through your own LNbits wallet.',
+      enabled: false,
+      mode: 'address',
+      address: '',
+      creditsPerCoin: 100_000_000,
+    },
+    {
+      id: 'eth',
+      type: 'evm',
+      label: 'Ethereum',
+      description: 'Ether (ETH) on Ethereum to the operator address.',
+      enabled: false,
+      network: 'Ethereum',
+      chainId: 1,
+      rpcUrl: '',
+      address: '',
+      currency: 'ETH',
+      decimals: 18,
+      creditsPerCoin: 1_000_000,
+      confirmations: 1,
+    },
+    {
+      id: 'xmr',
+      type: 'monero',
+      label: 'Monero',
+      description: 'Monero (XMR) to the operator address — the operator confirms the transfer.',
+      enabled: false,
+      address: '',
+      creditsPerCoin: 1_000,
+    },
+  ];
+}
+
+/** Field names that must never appear in a payment configuration. */
+const FORBIDDEN_PAYMENT_FIELDS = [
+  'seed',
+  'seedphrase',
+  'mnemonic',
+  'recoveryphrase',
+  'passphrase',
+  'privatekey',
+  'privkey',
+  'private',
+  'secretkey',
+  'viewkey',
+  'spendkey',
+  'xprv',
+  'zprv',
+  'wif',
+];
+
+/** Looks like a seed phrase, an extended private key or a raw private key. */
+function looksLikeSecret(value: string): boolean {
+  const text = value.trim();
+  if (/^(xprv|zprv|yprv|tprv)[1-9A-HJ-NP-Za-km-z]{20,}$/.test(text)) return true;
+  if (/^0x[0-9a-fA-F]{64}$/.test(text)) return true;
+  if (/^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(text)) return true;
+  const words = text.split(/\s+/);
+  return words.length >= 12 && words.length <= 24 && words.every((word) => /^[a-z]{3,8}$/.test(word));
+}
+
+/**
+ * Payment methods take public addresses only. This rejects any configuration that
+ * carries a seed phrase, private key, view key or passphrase — in a field named after
+ * one, or in a value that looks like one — with an explanation of why.
+ */
+export function assertNoPaymentSecrets(configs: PaymentConfig[]): void {
+  for (const config of configs) {
+    const id = typeof config?.id === 'string' && config.id ? config.id : 'unnamed';
+    for (const [key, value] of Object.entries(config as unknown as Record<string, unknown>)) {
+      const field = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (FORBIDDEN_PAYMENT_FIELDS.includes(field)) {
+        throw badRequest(
+          `Payment method "${id}": "${key}" is never allowed. VibeShare only ever asks for public addresses — it cannot and must not receive seed phrases, private keys or view keys. Remove the field.`
+        );
+      }
+      // Checked in every field: a seed phrase pasted into the wrong box is exactly the
+      // accident this is here for.
+      if (typeof value === 'string' && looksLikeSecret(value)) {
+        throw badRequest(
+          `Payment method "${id}": the value of "${key}" looks like a seed phrase or private key. Never paste one here — remove it and use a public address instead.`
+        );
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Stored state
@@ -127,6 +281,8 @@ export interface StoredInvoice extends Invoice {
   paymentHash?: string;
   tx?: string;
   note?: string;
+  /** When it was paid (or rejected) — what the signed receipt records. */
+  settledAt?: string;
 }
 
 interface Voucher {
@@ -187,6 +343,13 @@ function fill(template: string, invoice: StoredInvoice): string {
 }
 
 const notPaid = (message: string) => new HttpError(409, 'not_paid', message);
+
+/** Crypto methods need the operator's address before they can ask anyone to pay. */
+function requireAddress(where: string, address?: string): string {
+  const value = String(address ?? '').trim();
+  if (!value) throw badRequest(`${where} is not configured yet — add the operator's public address in the node's payments settings first`);
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Methods
@@ -261,13 +424,19 @@ class VoucherMethod extends Method<VoucherConfig> {
 }
 
 /** Invoices whose exact amount identifies the payer: base amount plus a small unique tail. */
-abstract class ExactAmountMethod<C extends EvmConfig | BitcoinConfig | SolanaConfig> extends Method<C> {
+abstract class ExactAmountMethod<C extends EvmConfig | BitcoinConfig | SolanaConfig | MoneroConfig> extends Method<C> {
   abstract decimals(): number;
   abstract currency(): string;
   abstract paymentUri(invoice: StoredInvoice, units: bigint): string;
 
+  /** The operator's public address this method pays to (never a key). */
+  protected address(): string {
+    return requireAddress(this.config.label ?? this.config.id, this.config.address);
+  }
+
   async createInvoice(account: Account, credits: number): Promise<StoredInvoice> {
     const value = this.checkCredits(credits);
+    const to = this.address();
     const base = unitsForCredits(value, this.config.creditsPerCoin, this.decimals());
     const tailMax = base / 1000n > 1000n ? base / 1000n : 1000n;
     const open = new Set(
@@ -282,10 +451,10 @@ abstract class ExactAmountMethod<C extends EvmConfig | BitcoinConfig | SolanaCon
     } while (open.has(units.toString()));
     const amount = formatUnits(units, this.decimals());
     const invoice = this.payments.newInvoice(account, this.config.id, value, this.expiry(), {
-      address: this.config.address,
+      address: to,
       amount,
       currency: this.currency(),
-      instructions: `Send exactly ${amount} ${this.currency()} to ${this.config.address}, then paste the transaction id.`,
+      instructions: `Send exactly ${amount} ${this.currency()} to ${to}, then paste the transaction id.`,
     });
     invoice.expectedUnits = units.toString();
     invoice.pay.uri = this.paymentUri(invoice, units);
@@ -327,18 +496,20 @@ class EvmMethod extends ExactAmountMethod<EvmConfig> {
       network: this.config.network,
       currency: this.config.currency,
       rate: { credits: this.config.creditsPerCoin, per: `1 ${this.config.currency}` },
+      needsProof: true,
     };
   }
 
   paymentUri(_invoice: StoredInvoice, units: bigint): string {
     const chain = this.config.chainId ? `@${this.config.chainId}` : '';
-    if (this.config.token) return `ethereum:${this.config.token}${chain}/transfer?address=${this.config.address}&uint256=${units}`;
-    return `ethereum:${this.config.address}${chain}?value=${units}`;
+    if (this.config.token) return `ethereum:${this.config.token}${chain}/transfer?address=${this.address()}&uint256=${units}`;
+    return `ethereum:${this.address()}${chain}?value=${units}`;
   }
 
   async verify(txHash: string, units: bigint): Promise<number | null> {
     if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) throw badRequest('Not a transaction hash');
-    const url = this.config.rpcUrl;
+    const url = this.config.rpcUrl?.trim() || defaultEvmRpc(this.config.chainId);
+    if (!url) throw badRequest('This chain has no built-in RPC endpoint — set one in the payments settings');
     const receipt = await rpc<{ status: string; blockNumber: string; logs: { address: string; topics: string[]; data: string }[] } | null>(
       url,
       'eth_getTransactionReceipt',
@@ -346,7 +517,7 @@ class EvmMethod extends ExactAmountMethod<EvmConfig> {
     );
     if (!receipt) throw notPaid('The transaction is not mined yet');
     if (receipt.status !== '0x1') throw notPaid('The transaction failed');
-    const address = this.config.address.toLowerCase();
+    const address = this.address().toLowerCase();
     if (this.config.token) {
       const token = this.config.token.toLowerCase();
       const paid = receipt.logs.some(
@@ -386,20 +557,21 @@ class BitcoinMethod extends ExactAmountMethod<BitcoinConfig> {
       network: this.config.network ?? 'bitcoin',
       currency: 'BTC',
       rate: { credits: this.config.creditsPerCoin, per: '1 BTC' },
+      needsProof: true,
     };
   }
   paymentUri(_invoice: StoredInvoice, units: bigint): string {
-    return `bitcoin:${this.config.address}?amount=${formatUnits(units, 8)}`;
+    return `bitcoin:${this.address()}?amount=${formatUnits(units, 8)}`;
   }
 
   async verify(txid: string, units: bigint): Promise<number | null> {
     if (!/^[0-9a-fA-F]{64}$/.test(txid)) throw badRequest('Not a bitcoin transaction id');
-    const api = this.config.apiUrl.replace(/\/$/, '');
+    const api = (this.config.apiUrl?.trim() || DEFAULT_ESPLORA).replace(/\/$/, '');
     const tx = await requestJson<{
       vout: { scriptpubkey_address?: string; value: number }[];
       status: { confirmed: boolean; block_height?: number; block_time?: number };
     }>(`${api}/tx/${txid}`);
-    const paid = tx.vout.some((out) => out.scriptpubkey_address === this.config.address && BigInt(out.value) === units);
+    const paid = tx.vout.some((out) => out.scriptpubkey_address === this.address() && BigInt(out.value) === units);
     if (!paid) throw notPaid('The transaction does not pay the invoice amount to this node');
     const needed = this.config.confirmations ?? 1;
     if (needed > 0) {
@@ -425,11 +597,12 @@ class SolanaMethod extends ExactAmountMethod<SolanaConfig> {
       network: 'solana',
       currency: this.config.currency,
       rate: { credits: this.config.creditsPerCoin, per: `1 ${this.config.currency}` },
+      needsProof: true,
     };
   }
   paymentUri(invoice: StoredInvoice, units: bigint): string {
     const token = this.config.mint ? `&spl-token=${this.config.mint}` : '';
-    return `solana:${this.config.address}?amount=${formatUnits(units, this.decimals())}${token}&memo=${invoice.id}`;
+    return `solana:${this.address()}?amount=${formatUnits(units, this.decimals())}${token}&memo=${invoice.id}`;
   }
 
   async verify(signature: string, units: bigint): Promise<number | null> {
@@ -449,12 +622,12 @@ class SolanaMethod extends ExactAmountMethod<SolanaConfig> {
     if (this.config.mint) {
       const sum = (list: Balance[] | undefined) =>
         (list ?? [])
-          .filter((entry) => entry.owner === this.config.address && entry.mint === this.config.mint)
+          .filter((entry) => entry.owner === this.address() && entry.mint === this.config.mint)
           .reduce((total, entry) => total + BigInt(entry.uiTokenAmount.amount), 0n);
       received = sum(tx.meta.postTokenBalances) - sum(tx.meta.preTokenBalances);
     } else {
       const keys = tx.transaction.message.accountKeys.map((key) => (typeof key === 'string' ? key : key.pubkey));
-      const index = keys.indexOf(this.config.address);
+      const index = keys.indexOf(this.address());
       if (index >= 0) received = BigInt(tx.meta.postBalances[index] - tx.meta.preBalances[index]);
     }
     if (received !== units) throw notPaid('The transaction does not pay the invoice amount to this node');
@@ -462,13 +635,72 @@ class SolanaMethod extends ExactAmountMethod<SolanaConfig> {
   }
 }
 
+/**
+ * Monero. A node never receives a view key (that is a private key) and Monero amounts
+ * are hidden without one, so nothing can be checked from here: the invoice names the
+ * exact amount and the operator's address, the payer sends the transfer and pastes its
+ * transaction id, and the operator confirms it in their own wallet.
+ */
+class MoneroMethod extends ExactAmountMethod<MoneroConfig> {
+  decimals(): number {
+    return 12;
+  }
+  currency(): string {
+    return 'XMR';
+  }
+  info() {
+    return {
+      ...this.baseInfo('Monero'),
+      network: this.config.network ?? 'monero',
+      currency: 'XMR',
+      rate: { credits: this.config.creditsPerCoin, per: '1 XMR' },
+      needsProof: true,
+      review: true,
+    };
+  }
+  paymentUri(_invoice: StoredInvoice, units: bigint): string {
+    return `monero:${this.address()}?tx_amount=${formatUnits(units, 12)}`;
+  }
+
+  async verify(): Promise<number | null> {
+    throw notPaid('Monero transfers are confirmed by the operator');
+  }
+
+  async claim(account: Account, body: Record<string, unknown>): Promise<ClaimResult> {
+    const invoice = this.ownInvoice(account, body.invoiceId);
+    if (invoice.status === 'paid') return { credited: 0, balance: account.balance, invoice };
+    const tx = String(body.txid ?? body.txHash ?? body.tx ?? '').trim();
+    if (!tx) throw badRequest('Paste the Monero transaction id so the operator can check the transfer');
+    const key = `monero:${tx.toLowerCase()}`;
+    if (this.payments.data.used[key]) throw new HttpError(409, 'already_claimed', 'This transaction was already claimed');
+    this.payments.data.used[key] = invoice.id;
+    invoice.tx = tx;
+    invoice.note = String(body.note ?? '').slice(0, 500) || undefined;
+    invoice.status = 'pending-review';
+    this.payments.changed();
+    return { credited: 0, balance: account.balance, invoice };
+  }
+}
+
 class LightningMethod extends Method<LightningConfig> {
+  /** Address mode needs no wallet API — that is the default when none is configured. */
+  private get addressMode(): boolean {
+    if (this.config.mode) return this.config.mode === 'address';
+    return !(this.config.lnbitsUrl && this.config.invoiceKey);
+  }
+
   info() {
     return {
       ...this.baseInfo('Bitcoin Lightning'),
       network: 'lightning',
       currency: 'BTC',
       rate: { credits: this.config.creditsPerCoin, per: '1 BTC' },
+      description:
+        this.config.description ?? (this.addressMode ? 'Pay a lightning address (sats); the operator confirms the transfer.' : undefined),
+      // An LNbits wallet checks the payment itself; a plain lightning address cannot,
+      // so the payer proves the payment and the operator confirms it.
+      needsProof: this.addressMode,
+      review: this.addressMode,
     };
   }
 
@@ -476,13 +708,25 @@ class LightningMethod extends Method<LightningConfig> {
     const value = this.checkCredits(credits);
     const sats = unitsForCredits(value, this.config.creditsPerCoin, 8);
     const minutes = this.config.invoiceMinutes ?? 60;
-    const created = await requestJson<{ payment_hash: string; payment_request?: string; bolt11?: string }>(
-      `${this.config.lnbitsUrl.replace(/\/$/, '')}/api/v1/payments`,
-      {
-        body: { out: false, amount: Number(sats), memo: `${value} credits`, expiry: minutes * 60 },
-        headers: { 'x-api-key': this.config.invoiceKey },
-      }
-    );
+    if (this.addressMode) {
+      const address = requireAddress(this.config.label ?? this.config.id, this.config.address);
+      const invoice = this.payments.newInvoice(account, this.config.id, value, this.expiry(), {
+        address,
+        amount: `${sats} sats`,
+        currency: 'BTC',
+        uri: `lightning:${address}`,
+        instructions: `Pay exactly ${sats} satoshis (${formatUnits(sats, 8)} BTC) to ${address}, then paste the payment hash your wallet shows.`,
+      });
+      invoice.expectedUnits = sats.toString();
+      this.payments.changed();
+      return invoice;
+    }
+    const wallet = (this.config.lnbitsUrl ?? '').replace(/\/$/, '');
+    if (!wallet || !this.config.invoiceKey) throw badRequest('This Lightning method needs an LNbits URL and invoice key, or a lightning address');
+    const created = await requestJson<{ payment_hash: string; payment_request?: string; bolt11?: string }>(`${wallet}/api/v1/payments`, {
+      body: { out: false, amount: Number(sats), memo: `${value} credits`, expiry: minutes * 60 },
+      headers: { 'x-api-key': this.config.invoiceKey },
+    });
     const request = created.payment_request ?? created.bolt11 ?? '';
     const invoice = this.payments.newInvoice(account, this.config.id, value, this.expiry(), {
       amount: formatUnits(sats, 8),
@@ -499,10 +743,22 @@ class LightningMethod extends Method<LightningConfig> {
   async claim(account: Account, body: Record<string, unknown>): Promise<ClaimResult> {
     const invoice = this.ownInvoice(account, body.invoiceId);
     if (invoice.status === 'paid') return { credited: 0, balance: account.balance, invoice };
-    const status = await requestJson<{ paid: boolean }>(
-      `${this.config.lnbitsUrl.replace(/\/$/, '')}/api/v1/payments/${invoice.paymentHash}`,
-      { headers: { 'x-api-key': this.config.invoiceKey } }
-    );
+    if (this.addressMode) {
+      const proof = String(body.paymentHash ?? body.payment_hash ?? body.preimage ?? body.txid ?? body.txHash ?? '').trim();
+      if (!proof) throw badRequest('Paste the payment hash (or preimage) your wallet shows for this payment');
+      const key = `lightning:${proof.toLowerCase()}`;
+      if (this.payments.data.used[key]) throw new HttpError(409, 'already_claimed', 'This payment was already claimed');
+      this.payments.data.used[key] = invoice.id;
+      invoice.tx = proof;
+      invoice.note = String(body.note ?? '').slice(0, 500) || undefined;
+      invoice.status = 'pending-review';
+      this.payments.changed();
+      return { credited: 0, balance: account.balance, invoice };
+    }
+    const wallet = (this.config.lnbitsUrl ?? '').replace(/\/$/, '');
+    const status = await requestJson<{ paid: boolean }>(`${wallet}/api/v1/payments/${invoice.paymentHash}`, {
+      headers: { 'x-api-key': this.config.invoiceKey ?? '' },
+    });
     if (!status.paid) throw notPaid('The Lightning invoice is not paid yet');
     return this.payments.settle(invoice, `lightning:${invoice.paymentHash}`, invoice.paymentHash ?? '');
   }
@@ -591,6 +847,7 @@ const METHOD_CLASSES: Record<PaymentType, new (config: never, payments: Payments
   voucher: VoucherMethod,
   evm: EvmMethod,
   bitcoin: BitcoinMethod,
+  monero: MoneroMethod,
   solana: SolanaMethod,
   lightning: LightningMethod,
   checkout: CheckoutMethod,
@@ -611,7 +868,9 @@ export class Payments {
   constructor(
     path: string | null,
     readonly ledger: Ledger,
-    private readonly configs: () => PaymentConfig[]
+    private readonly configs: () => PaymentConfig[],
+    /** The node that issues receipts: its id, name and signing key. */
+    private readonly issuer?: () => { id: string; name?: string; sign: (payload: string) => string }
   ) {
     this.store = new JsonFile<PaymentsData>(path, () => ({ invoices: {}, used: {}, vouchers: {} }));
     this.data = this.store.data;
@@ -689,9 +948,49 @@ export class Payments {
     invoice.status = 'paid';
     invoice.tx = tx;
     invoice.credits = credits;
+    invoice.settledAt = new Date().toISOString();
     this.changed();
     const account = this.ledger.credit(invoice.accountId, credits, `payment ${invoice.method}`, invoice.id);
     return { credited: credits, balance: account.balance, invoice: publicInvoice(invoice) };
+  }
+
+  /** The payment type behind a method id (also for methods that are switched off). */
+  typeOf(methodId: string): PaymentType {
+    return this.configs().find((config) => config.id === methodId)?.type ?? 'manual';
+  }
+
+  /**
+   * The signed receipt of an invoice: what the operator asked to be paid (the transfer
+   * request), the payer's proof of the transfer, and the credits granted. The node signs
+   * it, so the payer can keep it as evidence — and check the signature later.
+   */
+  receiptFor(invoice: StoredInvoice, status: StoredInvoice['status'] = invoice.status): PaymentReceipt {
+    const issuer = this.issuer?.();
+    const receipt: Omit<PaymentReceipt, 'sig'> = {
+      id: `rcpt-${invoice.id}`,
+      invoiceId: invoice.id,
+      method: invoice.method,
+      type: this.typeOf(invoice.method),
+      nodeId: issuer?.id ?? '',
+      nodeName: issuer?.name,
+      accountId: invoice.accountId,
+      request: {
+        credits: invoice.credits,
+        address: invoice.pay.address,
+        amount: invoice.pay.amount,
+        currency: invoice.pay.currency,
+        uri: invoice.pay.uri,
+        instructions: invoice.pay.instructions,
+        createdAt: invoice.createdAt,
+        expiresAt: invoice.expiresAt,
+      },
+      tx: invoice.tx,
+      note: invoice.note,
+      credits: invoice.credits,
+      status,
+      settledAt: status === 'paid' || status === 'rejected' ? invoice.settledAt : undefined,
+    };
+    return issuer ? { ...receipt, sig: issuer.sign(receiptSigningPayload(receipt)) } : receipt;
   }
 
   createVouchers(credits: number, count: number, note?: string): string[] {
@@ -717,6 +1016,13 @@ export class Payments {
       const invoice = this.invoice(ctx.params.id);
       if (!invoice || invoice.accountId !== account.id) throw notFound('No such invoice');
       return publicInvoice(invoice);
+    });
+    // The signed receipt of the payment request and of what was credited.
+    router.get('/v1/payments/invoices/:id/receipt', (ctx) => {
+      const account = auth.require(ctx);
+      const invoice = this.invoice(ctx.params.id);
+      if (!invoice || invoice.accountId !== account.id) throw notFound('No such invoice');
+      return { receipt: this.receiptFor(invoice) };
     });
     router.post('/v1/payments/:method/claim', async (ctx) => {
       const account = auth.require(ctx);
@@ -752,6 +1058,9 @@ export class Payments {
       if (!invoice) throw notFound('No such invoice');
       if (invoice.status === 'paid') throw badRequest('The invoice is already paid');
       invoice.status = 'rejected';
+      invoice.settledAt = new Date().toISOString();
+      // Nothing was accepted here, so the payer's proof can be claimed again.
+      for (const [key, id] of Object.entries(this.data.used)) if (id === invoice.id) delete this.data.used[key];
       this.changed();
       return publicInvoice(invoice);
     });

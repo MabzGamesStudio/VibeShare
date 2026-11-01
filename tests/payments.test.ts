@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, describe, it } from 'node:test';
-import { hmacHex } from '../src/shared/crypto.js';
-import type { Invoice } from '../src/shared/protocol.js';
-import { admin, clientFor, startProvider } from './helpers.js';
+import { hmacHex, verifySignature } from '../src/shared/crypto.js';
+import { receiptSigningPayload, type Invoice, type PaymentReceipt } from '../src/shared/protocol.js';
+import type { StoredReceipt } from '../src/client/receipts.js';
+import { admin, clientFor, startClient, startProvider, tempDir } from './helpers.js';
 
 const ADDRESS = '0x00000000000000000000000000000000000000aa';
 const TOKEN = '0x00000000000000000000000000000000000000cc';
@@ -198,5 +199,180 @@ describe('payment methods', async () => {
     assert.deepEqual(queue.invoices.map((i) => i.id), [inv.id]);
     await admin(url, `/v1/admin/invoices/${inv.id}/approve`, { body: {} });
     assert.equal((await buyer.json<Invoice>(`/v1/payments/invoices/${inv.id}`)).status, 'paid');
+  });
+});
+
+const MONERO_ADDRESS = '4' + 'a'.repeat(94);
+
+/**
+ * The four crypto options every node ships with: Bitcoin, Bitcoin Lightning, Ethereum
+ * and Monero. Disabled until the operator adds a public address — and never a key.
+ */
+describe('built-in crypto payments', async () => {
+  const provider = await startProvider({ signup: { grant: 0 } });
+  const url = provider.url();
+  const buyer = clientFor(url, 'pseudonym');
+  /** Flips one built-in method on, the way the admin GUI does. */
+  const enable = async (id: string, patch: Record<string, unknown>) => {
+    const config = await admin<{ payments: Record<string, unknown>[] }>(url, '/v1/admin/config');
+    await admin(url, '/v1/admin/config', {
+      method: 'PUT',
+      body: { payments: config.payments.map((method) => (method.id === id ? { ...method, enabled: true, ...patch } : method)) },
+    });
+  };
+  after(async () => {
+    await provider.stop();
+  });
+
+  it('ships the four crypto options disabled until an operator turns them on', async () => {
+    const info = await buyer.fetchInfo();
+    assert.deepEqual(info.payments.map((m) => m.id), ['voucher'], 'nothing but the voucher is offered at first');
+    const config = await admin<{ payments: { id: string; type: string; enabled?: boolean }[] }>(url, '/v1/admin/config');
+    const built = config.payments.filter((method) => ['btc', 'ln', 'eth', 'xmr'].includes(method.id));
+    assert.deepEqual(
+      built.map((method) => method.type),
+      ['bitcoin', 'lightning', 'evm', 'monero']
+    );
+    for (const method of built) assert.equal(method.enabled, false, `${method.id} starts disabled`);
+
+    // Switched on without an address, a method says so instead of handing out a broken invoice.
+    await enable('xmr', {});
+    await assert.rejects(buyer.json('/v1/payments/xmr/invoices', { body: { credits: 100 } }), /add the operator's public address/i);
+    const config2 = await admin<{ payments: Record<string, unknown>[] }>(url, '/v1/admin/config');
+    await admin(url, '/v1/admin/config', {
+      method: 'PUT',
+      body: { payments: config2.payments.map((method) => (method.id === 'xmr' ? { ...method, enabled: false } : method)) },
+    });
+  });
+
+  it('never accepts a seed phrase or a private key in a payment method', async () => {
+    const config = await admin<{ payments: Record<string, unknown>[] }>(url, '/v1/admin/config');
+    const seed = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    await assert.rejects(
+      admin(url, '/v1/admin/config', {
+        method: 'PUT',
+        body: { payments: [...config.payments, { id: 'bad', type: 'manual', instructions: 'x', seedPhrase: seed }] },
+      }),
+      /never allowed/i
+    );
+    await assert.rejects(
+      admin(url, '/v1/admin/config', {
+        method: 'PUT',
+        body: { payments: [...config.payments, { id: 'bad2', type: 'manual', instructions: seed }] },
+      }),
+      /looks like a seed phrase or private key/i
+    );
+    const after = await admin<{ payments: { id: string }[] }>(url, '/v1/admin/config');
+    assert.equal(after.payments.some((method) => method.id === 'bad' || method.id === 'bad2'), false, 'nothing was stored');
+  });
+
+  it('takes a Monero address, hands out an invoice, and credits it when the operator approves', async () => {
+    await enable('xmr', { address: MONERO_ADDRESS, creditsPerCoin: 100 });
+    const method = (await buyer.fetchInfo()).payments.find((m) => m.id === 'xmr')!;
+    assert.equal(method.type, 'monero');
+    assert.equal(method.network, 'monero');
+    assert.equal(method.needsProof, true);
+    assert.equal(method.review, true, 'Monero transfers are confirmed by the operator');
+
+    const invoice = await buyer.json<Invoice & { pay: { amount: string } }>('/v1/payments/xmr/invoices', { body: { credits: 100 } });
+    assert.equal(invoice.pay.address, MONERO_ADDRESS);
+    assert.ok(invoice.pay.uri!.startsWith(`monero:${MONERO_ADDRESS}?tx_amount=`));
+    const txid = 'f'.repeat(64);
+    const claimed = await buyer.json<{ credited: number; invoice: Invoice }>('/v1/payments/xmr/claim', { body: { invoiceId: invoice.id, txid } });
+    assert.equal(claimed.credited, 0, 'nothing is credited before the operator checks the transfer');
+    assert.equal(claimed.invoice.status, 'pending-review');
+
+    // The same transfer cannot be claimed against a second invoice.
+    const other = await buyer.json<Invoice>('/v1/payments/xmr/invoices', { body: { credits: 100 } });
+    await assert.rejects(buyer.json('/v1/payments/xmr/claim', { body: { invoiceId: other.id, txid } }), /already claimed/);
+
+    await admin(url, `/v1/admin/invoices/${invoice.id}/approve`, { body: {} });
+    const account = await buyer.json<{ account: { balance: number } }>('/v1/account');
+    assert.equal(account.account.balance, 100, 'approving the invoice grants the credits');
+  });
+
+  it('takes a lightning address and reviews the payment proof the payer sends', async () => {
+    await enable('ln', { mode: 'address', address: 'shop@wallet.example', creditsPerCoin: 100_000_000 });
+    const method = (await buyer.fetchInfo()).payments.find((m) => m.id === 'ln')!;
+    assert.equal(method.needsProof, true);
+    assert.equal(method.review, true);
+
+    const invoice = await buyer.json<Invoice & { pay: { amount: string; address: string } }>('/v1/payments/ln/invoices', {
+      body: { credits: 200 },
+    });
+    assert.equal(invoice.pay.address, 'shop@wallet.example');
+    assert.match(invoice.pay.amount, /sats$/);
+    assert.equal(invoice.pay.uri, 'lightning:shop@wallet.example');
+    const paid = await buyer.json<{ credited: number; invoice: Invoice }>('/v1/payments/ln/claim', {
+      body: { invoiceId: invoice.id, paymentHash: 'h'.repeat(64) },
+    });
+    assert.equal(paid.credited, 0);
+    assert.equal(paid.invoice.status, 'pending-review');
+    await admin(url, `/v1/admin/invoices/${invoice.id}/approve`, { body: {} });
+    assert.equal((await buyer.json<Invoice>(`/v1/payments/invoices/${invoice.id}`)).status, 'paid');
+  });
+
+  it('hands out a signed receipt for the payment request and for what it credited', async () => {
+    const invoice = await buyer.json<Invoice>('/v1/payments/xmr/invoices', { body: { credits: 50 } });
+    const { receipt } = await buyer.json<{ receipt: PaymentReceipt }>(`/v1/payments/invoices/${invoice.id}/receipt`);
+    assert.equal(receipt.status, 'open');
+    assert.equal(receipt.request.credits, 50);
+    assert.equal(receipt.request.address, MONERO_ADDRESS);
+    assert.equal(receipt.nodeId, provider.identity.id);
+    assert.ok(receipt.sig, 'the node signs its receipts');
+    const { sig, ...unsigned } = receipt;
+    assert.equal(verifySignature(receipt.nodeId, receiptSigningPayload(unsigned), sig!), true, 'the signature checks out');
+
+    // Nobody else can read it.
+    const stranger = clientFor(url, 'pseudonym');
+    await assert.rejects(stranger.json(`/v1/payments/invoices/${invoice.id}/receipt`), /No such invoice/);
+  });
+});
+
+/** The client's own copy: every request and transfer is saved as a receipt on this device. */
+describe('client receipts', async () => {
+  const { dir, cleanup } = tempDir();
+  const provider = await startProvider({
+    signup: { grant: 0 },
+    payments: [
+      { id: 'voucher', type: 'voucher' },
+      { id: 'xmr', type: 'monero', label: 'Monero', address: MONERO_ADDRESS, creditsPerCoin: 100 },
+    ],
+  });
+  const { client, api } = await startClient(dir);
+  after(async () => {
+    await client.stop();
+    await provider.stop();
+    cleanup();
+  });
+
+  it('saves the payment request, the transfer proof and the credits locally', async () => {
+    await api('/api/nodes', { body: { text: provider.reference() } });
+    assert.deepEqual((await api<{ receipts: StoredReceipt[] }>('/api/receipts')).receipts, []);
+
+    const invoice = await api<Invoice & { pay: { address: string } }>(`/api/nodes/${provider.identity.id}/invoices`, {
+      body: { method: 'xmr', credits: 50 },
+    });
+    const requested = (await api<{ receipts: StoredReceipt[] }>('/api/receipts')).receipts;
+    assert.equal(requested.length, 1, 'the operator’s transfer request is kept automatically');
+    assert.equal(requested[0].status, 'open');
+    assert.equal(requested[0].request.address, MONERO_ADDRESS);
+    assert.equal(requested[0].verified, true, 'the node signed it');
+
+    const txid = 'b'.repeat(64);
+    await api(`/api/nodes/${provider.identity.id}/claim`, { body: { method: 'xmr', invoiceId: invoice.id, txid } });
+    const claimed = (await api<{ receipts: StoredReceipt[] }>('/api/receipts')).receipts[0];
+    assert.equal(claimed.status, 'pending-review');
+    assert.equal(claimed.tx, txid, 'the transaction id the client made is recorded');
+
+    await admin(provider.url(), `/v1/admin/invoices/${invoice.id}/approve`, { body: {} });
+    await api(`/api/nodes/${provider.identity.id}/claim`, { body: { method: 'xmr', invoiceId: invoice.id, txid } });
+    const settled = (await api<{ receipts: StoredReceipt[] }>('/api/receipts')).receipts[0];
+    assert.equal(settled.status, 'paid');
+    assert.equal(settled.credits, 50);
+    assert.equal(settled.verified, true);
+
+    await api(`/api/receipts/${settled.id}`, { method: 'DELETE' });
+    assert.deepEqual((await api<{ receipts: StoredReceipt[] }>('/api/receipts')).receipts, [], 'a deleted receipt is gone');
   });
 });

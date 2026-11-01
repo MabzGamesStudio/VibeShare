@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type { Account } from '../commerce/ledger.js';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
+import { defaultCryptoPaymentConfigs } from '../commerce/payments.js';
 import { isKeyId, randomId, verifySignature } from '../shared/crypto.js';
 import { buildManifestFromBuffer, contentIdOf, validateManifest } from '../shared/content.js';
 import {
@@ -173,7 +174,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     trustProxy: false,
     tor: { ...DEFAULT_NODE_TOR },
     signup: { grant: 100, powBits: 0, anonymous: true, perIpPerHour: 30 },
-    payments: [{ id: 'voucher', type: 'voucher' }],
+    payments: [{ id: 'voucher', type: 'voucher' }, ...defaultCryptoPaymentConfigs()],
     peers: [],
     pricing: { feed: 0, search: 0, lookup: 0, submission: 0 },
     rewards: { vote: 1, voteDailyCap: 50, acceptedSuggestion: 10, report: 2, reportDailyCap: 100, requireIdentity: false, autoAcceptAgreement: 3 },

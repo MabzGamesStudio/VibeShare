@@ -107,10 +107,11 @@ Authenticated requests send `Authorization: Bearer <token>`. On `401` a client o
 | `GET /v1/payments` | `{ methods }` |
 | `POST /v1/payments/:method/invoices` `{ credits }` | Returns an `Invoice` with `pay { address, amount, currency, uri, checkoutUrl, instructions }` |
 | `GET /v1/payments/invoices/:id` | Status: `open`, `paid`, `expired`, `pending-review`, `rejected` |
-| `POST /v1/payments/:method/claim` | `voucher`: `{ code }` · `evm`/`bitcoin`/`solana`: `{ invoiceId, txHash }` · `lightning`/`checkout`: `{ invoiceId }` · `manual`: `{ invoiceId, note }` |
+| `GET /v1/payments/invoices/:id/receipt` | The node's **signed receipt** (`PaymentReceipt`): the payment request it issued, the payer's transfer proof, the credits granted/owed, `status` and `sig` over `receiptSigningPayload(receipt)` — clients verify it with the node id as the public key and keep it locally |
+| `POST /v1/payments/:method/claim` | `voucher`: `{ code }` · `evm`/`bitcoin`/`solana`/`monero`: `{ invoiceId, txHash }` · `lightning`: `{ invoiceId }` (LNbits) or `{ invoiceId, paymentHash }` (address mode) · `checkout`: `{ invoiceId }` · `manual`: `{ invoiceId, note }` |
 | `POST /v1/payments/:method/webhook` | For `checkout` methods: `x-vs-signature: hex HMAC-SHA256(secret, body)` with body `{ eventId, invoice, amount \| credits }`, or Stripe's `Stripe-Signature` for `checkout.session.completed` events |
 
-On-chain invoices ask for an exact amount: the price plus a small unique tail, so the transaction identifies the invoice. Each transaction is credited once.
+On-chain invoices ask for an exact amount: the price plus a small unique tail, so the transaction identifies the invoice. Each transaction is credited once. `PaymentMethodInfo` carries `needsProof` (the payer must send a transaction id or payment hash) and `review` (the operator confirms the transfer by hand — Monero, a Lightning address, `manual`), so a client knows what to ask for before paying. Payment methods only ever hold public addresses: nodes reject configurations carrying a seed phrase, private key or view key.
 
 ## 4. Content provider
 

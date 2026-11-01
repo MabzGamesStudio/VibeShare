@@ -7,6 +7,7 @@ import type { Identity } from '../shared/crypto.js';
 import { base32Decode, base32Encode } from '../shared/encoding.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
 import type { ProfileAccess, SealedBlob } from '../shared/profiles.js';
+import type { StoredReceipt } from './receipts.js';
 
 /** The saved form of the seen-content bloom filters of one profile. */
 export interface BloomData {
@@ -151,6 +152,8 @@ export interface Doc<T> {
 export interface ClientStoreLike {
   readonly data: Doc<ClientData>;
   readonly accounts: Doc<{ accounts: Record<string, StoredAccount> }>;
+  /** Payment receipts kept on this device (see client/receipts.ts). */
+  readonly receipts: Doc<{ receipts: StoredReceipt[] }>;
   identity: Identity;
   changed(): void;
   replaceIdentity(seed: Uint8Array): Identity;

@@ -1,10 +1,12 @@
 import { Coins, ExternalLink, Gift, Wallet } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { AccountResponse, NodeEntry } from '../../../src/shared/clientapi';
 import type { Invoice, PaymentMethodInfo } from '../../../src/shared/protocol';
+import type { StoredReceipt } from '../../../src/client/receipts';
 import { api, errorMessage } from '../api';
 import { CodeBox, Empty, Loading, Spinner, StatusDot } from '../components/ui';
+import { CryptoSafetyNotice } from '../components/CryptoSafetyNotice';
 import { OfferLinksCard } from '../components/OfferLinks';
 import { useApp } from '../state';
 import { timeAgo } from '../util';
@@ -53,6 +55,11 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
     }
   };
 
+  // Crypto methods always mean a transfer made outside the app; the node says whether it
+  // needs the payer's proof (a transaction id or payment hash) for that transfer.
+  const crypto = ['evm', 'bitcoin', 'monero', 'solana', 'lightning'].includes(method.type);
+  const needsProof = method.needsProof ?? crypto;
+
   if (method.type === 'voucher') {
     return (
       <div className="form-stack">
@@ -70,6 +77,7 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
   if (!invoice) {
     return (
       <div className="form-stack">
+        {crypto && <CryptoSafetyNotice compact />}
         {method.rate && (
           <p className="small muted">
             {method.rate.credits.toLocaleString()} credits per {method.rate.per}
@@ -86,14 +94,17 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
     );
   }
 
-  const crypto = ['evm', 'bitcoin', 'solana'].includes(method.type);
   return (
     <div className="form-stack">
+      {crypto && <CryptoSafetyNotice compact />}
       <div className="row between">
         <strong>{invoice.credits.toLocaleString()} credits</strong>
         <span className={`badge ${invoice.status === 'paid' ? 'ok' : invoice.status === 'open' ? 'accent' : 'warn'}`}>{invoice.status}</span>
       </div>
       {invoice.pay.instructions && <p className="small">{invoice.pay.instructions}</p>}
+      {method.review && (
+        <p className="hint">This node has no way to check the transfer itself: the operator confirms it in their own wallet before the credits land.</p>
+      )}
       {invoice.pay.amount && (
         <div>
           <div className="hint">Amount</div>
@@ -119,10 +130,16 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
         )}
       </div>
       {invoice.expiresAt && invoice.status === 'open' && <p className="hint">Expires {new Date(invoice.expiresAt).toLocaleString()}</p>}
-      {crypto && invoice.status !== 'paid' && (
+      {needsProof && invoice.status !== 'paid' && (
         <label className="field">
-          Transaction id
-          <input type="text" className="mono" value={proof} onChange={(e) => setProof(e.target.value)} placeholder="0x… / txid / signature" />
+          {method.type === 'lightning' ? 'Payment hash or preimage' : method.type === 'monero' ? 'Monero transaction id' : 'Transaction id'}
+          <input
+            type="text"
+            className="mono"
+            value={proof}
+            onChange={(e) => setProof(e.target.value)}
+            placeholder={method.type === 'lightning' ? 'your wallet shows this after paying' : '0x… / txid / signature'}
+          />
         </label>
       )}
       {method.type === 'manual' && invoice.status === 'open' && (
@@ -134,12 +151,96 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
       {invoice.status !== 'paid' && invoice.status !== 'rejected' && (
         <button
           className="primary"
-          disabled={busy || (crypto && !proof.trim())}
-          onClick={() => claim({ invoiceId: invoice.id, txHash: crypto ? proof.trim() : undefined, note: method.type === 'manual' ? proof : undefined })}
+          disabled={busy || (needsProof && !proof.trim())}
+          onClick={() => claim({ invoiceId: invoice.id, txHash: needsProof ? proof.trim() : undefined, note: method.type === 'manual' ? proof : undefined })}
         >
-          {busy && <Spinner />} {crypto ? 'I paid — check it' : method.type === 'manual' ? 'Send for approval' : 'Check payment'}
+          {busy && <Spinner />}{' '}
+          {needsProof
+            ? method.review
+              ? 'I paid — send for review'
+              : 'I paid — check it'
+            : method.type === 'manual'
+              ? 'Send for approval'
+              : 'Check payment'}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Receipts this device saved automatically: for every payment request a node issued and
+ * every transfer made, what was asked, what was paid (with the transaction id) and what
+ * the node granted — signed by the node, kept locally, never uploaded.
+ */
+function Receipts() {
+  const [receipts, setReceipts] = useState<StoredReceipt[]>([]);
+  const load = useCallback(() => {
+    api<{ receipts: StoredReceipt[] }>('/api/receipts')
+      .then((r) => setReceipts(r.receipts ?? []))
+      .catch(() => undefined);
+  }, []);
+  useEffect(load, [load]);
+  if (!receipts.length) return null;
+
+  return (
+    <div className="card form-stack">
+      <h3>Receipts</h3>
+      <p className="small muted">
+        Signed by the node and saved on this device only: the payment request, the transfer you made and the credits it bought. Keep them as
+        proof of what each node owes you or has already credited.
+      </p>
+      {receipts.map((receipt) => (
+        <div key={receipt.id} className="card form-stack">
+          <div className="row between">
+            <strong>
+              {receipt.credits.toLocaleString()} credits · {receipt.method}
+            </strong>
+            <span className="row" style={{ gap: 8 }}>
+              <span
+                className={`badge ${
+                  receipt.status === 'paid' ? 'ok' : receipt.status === 'pending-review' ? 'warn' : receipt.status === 'rejected' ? 'danger' : ''
+                }`}
+              >
+                {receipt.status}
+              </span>
+              <button
+                className="small danger"
+                onClick={async () => {
+                  await api(`/api/receipts/${receipt.id}`, { method: 'DELETE' }).catch(() => undefined);
+                  load();
+                }}
+              >
+                Delete
+              </button>
+            </span>
+          </div>
+          <div className="small muted">
+            {receipt.nodeName ? `${receipt.nodeName} · ` : ''}
+            {receipt.type} · requested {timeAgo(receipt.request.createdAt)}
+            {receipt.settledAt ? ` · settled ${timeAgo(receipt.settledAt)}` : ''} ·{' '}
+            {receipt.verified ? 'signature verified' : 'signature not verified'}
+          </div>
+          {receipt.request.address && (
+            <div>
+              <div className="hint">{receipt.type === 'lightning' ? 'Lightning invoice' : 'Paid to'}</div>
+              <CodeBox text={receipt.request.address} />
+            </div>
+          )}
+          {receipt.request.amount && (
+            <div>
+              <div className="hint">Amount</div>
+              <CodeBox text={`${receipt.request.amount}${receipt.request.currency ? ' ' + receipt.request.currency : ''}`} />
+            </div>
+          )}
+          {receipt.tx && (
+            <div>
+              <div className="hint">Your proof of the transfer</div>
+              <CodeBox text={receipt.tx} />
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -288,6 +389,7 @@ export function WalletPage() {
         </div>
       )}
       <div style={{ height: 16 }} />
+      <Receipts />
       <OfferLinksCard />
     </div>
   );

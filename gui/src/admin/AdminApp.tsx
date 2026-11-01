@@ -2,6 +2,7 @@ import { LogOut, Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import type { NodeInfo } from '../../../src/shared/protocol';
 import { CodeBox, Loading, Modal, Spinner } from '../components/ui';
+import { CryptoSafetyNotice } from '../components/CryptoSafetyNotice';
 import { formatBytes, timeAgo } from '../util';
 import { admin, loadToken, message, setToken } from './api';
 import { AlgorithmTabs } from './AlgorithmTabs';
@@ -472,8 +473,204 @@ interface InvoiceRow {
   tx?: string;
 }
 
+interface CryptoField {
+  key: string;
+  label: string;
+  placeholder?: string;
+  hint?: string;
+  kind?: 'number' | 'select';
+  options?: string[];
+}
+
+/**
+ * The four built-in crypto options. They ship disabled with an empty address: the
+ * operator fills in a public address (and at most an endpoint) and switches them on.
+ * Nothing here ever asks for a seed phrase, a private key or a view key.
+ */
+const CRYPTO_METHODS: {
+  id: string;
+  type: string;
+  label: string;
+  note: string;
+  stub: Record<string, unknown>;
+  fields: CryptoField[];
+}[] = [
+  {
+    id: 'btc',
+    type: 'bitcoin',
+    label: 'Bitcoin (on-chain)',
+    note: 'Transfers are checked against a public Esplora API (mempool.space) unless you name your own.',
+    stub: { type: 'bitcoin', label: 'Bitcoin', enabled: false, address: '', apiUrl: '', creditsPerCoin: 100_000_000, confirmations: 1 },
+    fields: [
+      { key: 'address', label: 'Public address', placeholder: 'bc1…', hint: 'Where payments arrive. An address only — never a key.' },
+      { key: 'apiUrl', label: 'Esplora API (optional)', placeholder: 'https://mempool.space/api' },
+      { key: 'creditsPerCoin', label: 'Credits per BTC', kind: 'number' },
+      { key: 'confirmations', label: 'Confirmations needed', kind: 'number' },
+    ],
+  },
+  {
+    id: 'ln',
+    type: 'lightning',
+    label: 'Bitcoin Lightning',
+    note: 'A lightning address needs nothing else: you confirm each transfer in your wallet. An LNbits URL + invoice key checks payments automatically — an invoice key can only create and read invoices, and is still never a seed or private key.',
+    stub: {
+      type: 'lightning',
+      label: 'Bitcoin Lightning',
+      enabled: false,
+      mode: 'address',
+      address: '',
+      lnbitsUrl: '',
+      invoiceKey: '',
+      creditsPerCoin: 100_000_000,
+    },
+    fields: [
+      { key: 'mode', label: 'Mode', kind: 'select', options: ['address', 'lnbits'], hint: 'address = you confirm; lnbits = automatic' },
+      { key: 'address', label: 'Lightning address', placeholder: 'you@wallet.example' },
+      { key: 'lnbitsUrl', label: 'LNbits URL (optional)', placeholder: 'https://lnbits.example' },
+      { key: 'invoiceKey', label: 'LNbits invoice key (optional)', hint: 'Invoice scoped only — still never a seed or private key.' },
+      { key: 'creditsPerCoin', label: 'Credits per BTC', kind: 'number' },
+    ],
+  },
+  {
+    id: 'eth',
+    type: 'evm',
+    label: 'Ethereum (ETH)',
+    note: 'Transfers are checked over a public JSON-RPC endpoint unless you name your own.',
+    stub: {
+      type: 'evm',
+      label: 'Ethereum',
+      enabled: false,
+      network: 'Ethereum',
+      chainId: 1,
+      rpcUrl: '',
+      address: '',
+      currency: 'ETH',
+      decimals: 18,
+      creditsPerCoin: 1_000_000,
+      confirmations: 1,
+    },
+    fields: [
+      { key: 'address', label: 'Public address', placeholder: '0x…' },
+      { key: 'rpcUrl', label: 'RPC URL (optional)', placeholder: 'https://…' },
+      { key: 'chainId', label: 'Chain id', kind: 'number' },
+      { key: 'creditsPerCoin', label: 'Credits per ETH', kind: 'number' },
+      { key: 'confirmations', label: 'Confirmations needed', kind: 'number' },
+    ],
+  },
+  {
+    id: 'xmr',
+    type: 'monero',
+    label: 'Monero (XMR)',
+    note: 'No node ever receives a Monero view key (that is a private key), so a payer sends the transaction id and you confirm the transfer in your own wallet.',
+    stub: { type: 'monero', label: 'Monero', enabled: false, address: '', creditsPerCoin: 1_000 },
+    fields: [
+      { key: 'address', label: 'Public address', placeholder: '4…' },
+      { key: 'creditsPerCoin', label: 'Credits per XMR', kind: 'number' },
+    ],
+  },
+];
+
+/**
+ * The built-in crypto payments: one card per coin with the shortest possible setup
+ * (an address, maybe an endpoint), a quick on/off switch, and the safety notice.
+ */
+function CryptoPayments() {
+  const [methods, setMethods] = useState<Record<string, unknown>[] | null>(null);
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<{ payments?: Record<string, unknown>[] }>('/v1/admin/config')
+      .then((config) => setMethods(config.payments ?? []))
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  if (!methods) return null;
+  const find = (id: string) => methods.find((method) => method.id === id);
+  const put = async (method: (typeof CRYPTO_METHODS)[number], patch: Record<string, unknown>) => {
+    const next = { ...method.stub, ...(find(method.id) ?? {}), id: method.id, ...patch };
+    const list = [...methods.filter((entry) => entry.id !== method.id), next];
+    setMethods(list);
+    try {
+      await admin('/v1/admin/config', { method: 'PUT', body: { payments: list } });
+      load();
+    } catch (e) {
+      // The node refuses configurations carrying secrets, among other things.
+      show(message(e));
+      load();
+    }
+  };
+
+  return (
+    <div className="card form-stack">
+      <h3>Crypto payments (built-in)</h3>
+      <p className="small muted">
+        Four ready-made crypto options, all off until you switch them on. Add an operator address — a public address, nothing else is ever
+        needed — and clients can buy credits with a transfer they make themselves in their own wallet. Payments never happen inside the app.
+      </p>
+      <CryptoSafetyNotice />
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="form-stack">
+        {CRYPTO_METHODS.map((method) => {
+          const config = { ...method.stub, ...(find(method.id) ?? {}) };
+          const enabled = config.enabled === true;
+          const address = String(config.address ?? '').trim();
+          const wallet = String(config.lnbitsUrl ?? '').trim();
+          return (
+            <div key={method.id} className="card form-stack">
+              <div className="row between">
+                <div>
+                  <strong>{method.label}</strong>
+                  <div className="tiny faint mono">{method.type}</div>
+                </div>
+                <label className="row small" style={{ gap: 6 }}>
+                  <input type="checkbox" checked={enabled} onChange={(e) => void put(method, { enabled: e.target.checked })} />
+                  {enabled ? 'Offered to clients' : 'Disabled'}
+                </label>
+              </div>
+              <div className="form-grid">
+                {method.fields.map((field) => (
+                  <label className="field" key={field.key}>
+                    {field.label}
+                    {field.hint ? <span className="hint">{field.hint}</span> : null}
+                    {field.kind === 'select' ? (
+                      <select
+                        value={String(config[field.key] ?? field.options?.[0] ?? '')}
+                        onChange={(e) => void put(method, { [field.key]: e.target.value })}
+                      >
+                        {(field.options ?? []).map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type={field.kind === 'number' ? 'number' : 'text'}
+                        className={field.key === 'address' ? 'mono' : undefined}
+                        value={String(config[field.key] ?? '')}
+                        placeholder={field.placeholder}
+                        onChange={(e) => void put(method, { [field.key]: field.kind === 'number' ? Number(e.target.value) : e.target.value })}
+                      />
+                    )}
+                  </label>
+                ))}
+              </div>
+              <p className="small muted">{method.note}</p>
+              {enabled && !address && !wallet ? (
+                <div className="banner danger small">Add a public address (or a Lightning wallet) — without one clients cannot pay here.</div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Payments() {
   const [credits, setCredits] = useState('1000');
+
   const [count, setCount] = useState('5');
   const [note, setNote] = useState('');
   const [codes, setCodes] = useState<string[] | null>(null);
@@ -493,6 +690,7 @@ function Payments() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
+      <CryptoPayments />
       <div className="card form-stack">
         <h3>Vouchers</h3>
         <p className="small muted">

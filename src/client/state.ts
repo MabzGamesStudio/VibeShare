@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { generateIdentity, identityFromSeed, type Identity } from '../shared/crypto.js';
 import { normalizeSettings } from '../shared/clientdefaults.js';
 import { emptyClientData, formatSeed, parseSeed, type ClientData, type ClientStoreLike } from './model.js';
+import type { StoredReceipt } from './receipts.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
 import { JsonFile } from '../shared/store.js';
 
@@ -14,6 +15,8 @@ export { formatSeed, parseSeed } from './model.js';
 export class ClientStore implements ClientStoreLike {
   readonly data: JsonFile<ClientData>;
   readonly accounts: JsonFile<{ accounts: Record<string, StoredAccount> }>;
+  /** Payment receipts, signed by the nodes that issued them. */
+  readonly receipts: JsonFile<{ receipts: StoredReceipt[] }>;
   identity: Identity;
 
   constructor(private readonly dir: string | null) {
@@ -21,6 +24,7 @@ export class ClientStore implements ClientStoreLike {
     this.data = new JsonFile<ClientData>(this.path('client.json'), emptyClientData);
     this.data.data.settings = normalizeSettings(this.data.data.settings);
     this.accounts = new JsonFile(this.path('accounts.json'), () => ({ accounts: {} }));
+    this.receipts = new JsonFile<{ receipts: StoredReceipt[] }>(this.path('receipts.json'), () => ({ receipts: [] }));
   }
 
   path(name: string): string | null {
@@ -67,5 +71,6 @@ export class ClientStore implements ClientStoreLike {
   flush(): void {
     this.data.flush();
     this.accounts.flush();
+    this.receipts.flush();
   }
 }

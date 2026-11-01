@@ -6,12 +6,13 @@ import { MiB, type Manifest, type ManifestMeta } from '../shared/content.js';
 import { isDevBuild } from '../shared/devbuild.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
-import type { Invoice, Preferences } from '../shared/protocol.js';
+import type { Invoice, PaymentReceipt, Preferences } from '../shared/protocol.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import type { VvshConvertQuote, VvshFile } from '../shared/vvsh.js';
 import type { ClientCore } from './core.js';
 import { SCOPES_OF_EVENT } from './bloom.js';
 import { formatSeed, parseSeed } from './model.js';
+import { listReceipts, recordReceipt, removeReceipt } from './receipts.js';
 
 export interface ApiRequest {
   params: Record<string, string>;
@@ -47,6 +48,22 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   const routes: ApiRoute[] = [];
   const on = (method: ApiRoute['method'], path: string, handler: ApiRoute['handler']) => routes.push({ method, path, handler });
   const node = (request: ApiRequest) => nodes.require(request.params.id);
+
+  /**
+   * Fetches the node's signed receipt for an invoice and keeps it on this device:
+   * the operator's payment request, the client's transfer proof and the credits.
+   */
+  const saveReceipt = async (entry: NodeEntry, invoiceId: string | undefined): Promise<void> => {
+    if (!invoiceId) return;
+    try {
+      const { receipt } = await nodes
+        .client(entry)
+        .json<{ receipt: PaymentReceipt }>(`/v1/payments/invoices/${encodeURIComponent(invoiceId)}/receipt`);
+      recordReceipt(core.store, receipt);
+    } catch {
+      // A node that does not sign receipts (an older build) simply has none to keep.
+    }
+  };
 
   on('GET', '/api/state', () => core.state());
 
@@ -153,9 +170,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/nodes/:id/payments', (request) => nodes.client(node(request)).json('/v1/payments', { auth: false }));
   on('POST', '/api/nodes/:id/invoices', async (request) => {
     const body = await request.json<{ method?: string; credits?: number }>();
-    return nodes.client(node(request)).json<Invoice>(`/v1/payments/${encodeURIComponent(String(body.method))}/invoices`, {
+    const entry = node(request);
+    const invoice = await nodes.client(entry).json<Invoice>(`/v1/payments/${encodeURIComponent(String(body.method))}/invoices`, {
       body: { credits: body.credits },
     });
+    // The operator's payment request is a receipt of its own — kept on this device.
+    await saveReceipt(entry, invoice.id);
+    return invoice;
   });
   on('GET', '/api/nodes/:id/invoices/:invoice', (request) =>
     nodes.client(node(request)).json<Invoice>(`/v1/payments/invoices/${encodeURIComponent(request.params.invoice)}`)
@@ -168,8 +189,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       timeoutMs: 30000,
     });
     nodes.setBalance(entry.id, result.balance);
+    // Save what the node granted (and the transfer proof) as the receipt for this payment.
+    await saveReceipt(entry, typeof rest.invoiceId === 'string' ? rest.invoiceId : undefined);
     return result;
   });
+  // Receipts: the payment requests this device has seen and the credits they bought.
+  on('GET', '/api/receipts', () => ({ receipts: listReceipts(core.store) }));
+  on('DELETE', '/api/receipts/:id', (request) => ({ removed: removeReceipt(core.store, request.params.id) }));
 
   // Discovery
   on('POST', '/api/feed', async (request) => {

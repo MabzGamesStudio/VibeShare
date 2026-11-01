@@ -30,7 +30,7 @@ import { ensureDir, JsonFile } from '../shared/store.js';
 import { Auth, type SignupConfig } from './auth.js';
 import { Ledger } from './ledger.js';
 import { Moderation } from './moderation.js';
-import { Payments, type PaymentConfig } from './payments.js';
+import { Payments, assertNoPaymentSecrets, type PaymentConfig } from './payments.js';
 import { serveStatic } from '../shared/assets.js';
 
 export interface BaseConfig {
@@ -142,7 +142,13 @@ export abstract class BaseNode<C extends BaseConfig> {
     this.ledger = new Ledger(this.path('ledger.json'), this.path('ledger-audit.jsonl'));
     this.auth = new Auth(this.ledger, () => this.identity.id, () => this.config.signup);
     this.moderation = new Moderation(this.path('moderation.json'));
-    this.payments = new Payments(this.path('payments.json'), this.ledger, () => this.config.payments);
+    this.payments = new Payments(this.path('payments.json'), this.ledger, () => this.config.payments, () => ({
+      id: this.identity.id,
+      name: this.config.name,
+      // Receipts are signed with the node's own key — never with anything a payment
+      // method carries, and the signature is the whole point of keeping them.
+      sign: (payload) => signData(this.identity, payload),
+    }));
     this.tor = new TorRouter(() => ({ mode: this.config.tor.outbound, proxy: this.config.tor.proxy }));
   }
 
@@ -313,6 +319,9 @@ export abstract class BaseNode<C extends BaseConfig> {
       for (const method of next.payments) {
         if (!method.id || !method.type) throw badRequest('Every payment method needs an id and a type');
       }
+      // Never store seeds, private keys or view keys in a node config: payment methods
+      // take public addresses only, and the GUI says so as well.
+      assertNoPaymentSecrets(next.payments);
       this.configFile.data = next;
       this.configFile.changed();
       void this.applyTor();

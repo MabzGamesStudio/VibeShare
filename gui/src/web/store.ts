@@ -2,6 +2,7 @@
 import { normalizeSettings } from '../../../src/shared/clientdefaults';
 import { generateIdentity, identityFromSeed, randomId, type Identity } from '../../../src/shared/crypto';
 import type { StoredAccount } from '../../../src/shared/nodeclient';
+import type { StoredReceipt } from '../../../src/client/receipts';
 import {
   emptyClientData,
   formatSeed,
@@ -92,6 +93,8 @@ export class WebStore implements ClientStoreLike {
     private readonly kv: KeyValue,
     readonly data: SavedDoc<ClientData>,
     readonly accounts: SavedDoc<{ accounts: Record<string, StoredAccount> }>,
+    /** Payment receipts, signed by the nodes that issued them. */
+    readonly receipts: SavedDoc<{ receipts: StoredReceipt[] }>,
     public identity: Identity,
     /** True the first time this browser runs the client. */
     readonly fresh: boolean
@@ -109,7 +112,15 @@ export class WebStore implements ClientStoreLike {
     const data = { ...emptyClientData(), ...client };
     data.settings = normalizeSettings(data.settings);
     const accounts = (await kv.get<{ accounts: Record<string, StoredAccount> }>('accounts')) ?? { accounts: {} };
-    return new WebStore(kv, new SavedDoc(kv, 'client', data), new SavedDoc(kv, 'accounts', accounts), identity, !client);
+    const receipts = (await kv.get<{ receipts: StoredReceipt[] }>('receipts')) ?? { receipts: [] };
+    return new WebStore(
+      kv,
+      new SavedDoc(kv, 'client', data),
+      new SavedDoc(kv, 'accounts', accounts),
+      new SavedDoc(kv, 'receipts', receipts),
+      identity,
+      !client
+    );
   }
 
   changed(): void {
@@ -129,7 +140,7 @@ export class WebStore implements ClientStoreLike {
 
   /** Resolves once every change so far is stored. */
   async saved(): Promise<void> {
-    await Promise.all([this.data.saved(), this.accounts.saved()]);
+    await Promise.all([this.data.saved(), this.accounts.saved(), this.receipts.saved()]);
   }
 }
 

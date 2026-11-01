@@ -20,5 +20,11 @@
   "policy": { "maxRating": "13+", "defaultMaxRating": "13+", "autoListSubmissions": false },
   "topics": ["science", "learning", "technology", "history", "nature", "health", "diy"],
   "pageSize": 24,
-  "payments": [{ "id": "voucher", "type": "voucher" }]
+  "payments": [
+    { "id": "voucher", "type": "voucher" },
+    { "id": "btc", "type": "bitcoin", "label": "Bitcoin", "enabled": false, "address": "", "creditsPerCoin": 60000000 },
+    { "id": "ln", "type": "lightning", "label": "Bitcoin Lightning", "enabled": false, "mode": "address", "address": "", "creditsPerCoin": 60000000 },
+    { "id": "eth", "type": "evm", "label": "Ethereum", "enabled": false, "network": "Ethereum", "chainId": 1, "address": "", "currency": "ETH", "decimals": 18, "creditsPerCoin": 3000000 },
+    { "id": "xmr", "type": "monero", "label": "Monero", "enabled": false, "address": "", "creditsPerCoin": 1500 }
+  ]
 }

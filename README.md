@@ -221,7 +221,8 @@ This is a first version. Things to know:
 
 - **Live streaming** is not implemented yet; streaming is on-demand (chunked, seekable).
 - Provider and algorithm nodes need a reachable address (a public IP, a reverse proxy or a tunnel) — or a Tor onion address (`--onion`), which needs neither. Client nodes do not, even when they store data for providers.
-- Crypto payments are verified against the operator's own RPC/explorer endpoints; invoices are identified by a unique amount, so pay the exact amount shown.
+- Crypto payments are verified against the operator's own RPC/explorer endpoints; invoices are identified by a unique amount, so pay the exact amount shown. Monero and Lightning-address payments (and anything else a node cannot check itself) are confirmed by the operator in their wallet, and every payment comes with a receipt signed by the node and kept locally by the client.
+- **Crypto safety**: VibeShare only ever needs **public addresses** — never enter a seed phrase or a private key anywhere in it, and nodes refuse to store one. This software is vibe-coded and may have vulnerabilities, and it is an open source free market: pay only small amounts you can afford to lose and keep anything substantial in a wallet you control.
 - The JSON-file storage of nodes suits small and medium nodes; very large catalogs would want a database.
 - Desktop apps and binaries are unsigned until signing certificates are configured in the release workflow.
 - The crawler's platform adapters follow each platform's public API or feed format; they are tested against recorded responses, and platforms change their APIs from time to time. YouTube search needs a Data API key (channel feeds do not); the platforms in the *API keys* tab do nothing until the operator adds credentials, and each platform's developer terms (attribution, caching, rate limits, approval for some APIs such as Instagram's hashtag search or X's paid tiers) are the operator's to follow.

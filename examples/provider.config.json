@@ -85,6 +85,8 @@
     { "id": "btc", "type": "bitcoin", "apiUrl": "https://mempool.space/api", "address": "bc1qYOUR_ADDRESS", "creditsPerCoin": 60000000, "confirmations": 1 },
     { "id": "sol", "type": "solana", "rpcUrl": "https://api.mainnet-beta.solana.com", "address": "YOUR_SOLANA_ADDRESS", "currency": "SOL", "creditsPerCoin": 150000 },
     { "id": "lightning", "type": "lightning", "lnbitsUrl": "https://legend.lnbits.com", "invoiceKey": "LNBITS_INVOICE_KEY", "creditsPerCoin": 60000000 },
+    { "id": "lnaddr", "type": "lightning", "label": "Lightning address", "mode": "address", "address": "you@wallet.example", "creditsPerCoin": 60000000 },
+    { "id": "xmr", "type": "monero", "label": "Monero", "address": "4YOUR_MONERO_ADDRESS", "creditsPerCoin": 1500 },
     {
       "id": "card",
       "type": "checkout",

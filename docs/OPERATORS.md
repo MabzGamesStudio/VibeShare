@@ -87,17 +87,24 @@ storage backends always connect directly.
 
 Each entry has an `id` (unique, used in URLs), a `type`, and optionally `label`, `description`, `enabled`, `minCredits`, `maxCredits`, `invoiceMinutes`. Full examples: [examples/provider.config.json](../examples/provider.config.json).
 
+Every node ships with **four built-in crypto options** — Bitcoin, Bitcoin Lightning, Ethereum and Monero (`id`s `btc`, `ln`, `eth`, `xmr`) — **disabled** and without an address. Turn one on under *Payments → Crypto payments (built-in)*, paste a **public address** (that is all any of them needs; an endpoint is optional and a public one is used by default) and it is offered to clients at once.
+
+> **Never enter a seed phrase, a private key or a Monero view key anywhere in this software.** Payment methods take public addresses only, and the node **refuses to save a config that looks like it carries one** (a field named after a secret, a mnemonic-looking value, an `xprv…`, a raw `0x…` private key). An address cannot spend anything. Also keep in mind that this software is vibe-coded and may have vulnerabilities, and that VibeShare is an open source free market: **nobody should ever send a large amount of crypto to a node operator**, and credits are always cheap.
+
 | Type | Settings | How it is checked |
 |---|---|---|
 | `voucher` | — | Codes from *Payments → Vouchers* (or `POST /v1/admin/vouchers`). Sell or give them anywhere. |
-| `evm` | `network`, `chainId`, `rpcUrl`, `address`, `currency`, `decimals`, `token` (ERC-20 contract, omit for ETH/native), `creditsPerCoin`, `confirmations` | Receipt over JSON-RPC: status, recipient (or ERC-20 `Transfer` log), exact amount, confirmations, block time inside the invoice window. Works on Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain… |
-| `bitcoin` | `apiUrl` (Esplora: `https://mempool.space/api`, blockstream, or your own), `address`, `creditsPerCoin`, `confirmations` | Output to the address with the exact amount, confirmations |
+| `bitcoin` | `address`, `creditsPerCoin`, `confirmations`; `apiUrl` optional (Esplora — defaults to `https://mempool.space/api`) | Output to the address with the exact amount, confirmations |
+| `lightning` | `mode: address \| lnbits`; address mode: `address` (a lightning address such as `you@wallet.example`); lnbits mode: `lnbitsUrl` + `invoiceKey` (invoice-scoped only); `creditsPerCoin` (per BTC) | LNbits mode: invoice created and checked through LNbits. Address mode: the payer pastes the payment hash and **you confirm the transfer in your wallet**. |
+| `evm` | `address`, `currency`, `decimals`, `creditsPerCoin`; `network`, `chainId`, `confirmations`; `rpcUrl` optional (a public endpoint per chain is used otherwise); `token` for ERC-20 | Receipt over JSON-RPC: status, recipient (or ERC-20 `Transfer` log), exact amount, confirmations, block time inside the invoice window. Works on Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain… |
+| `monero` | `address`, `creditsPerCoin` (per XMR) | **You confirm it**: Monero needs a view key (a private key) to check transfers, so the node never sees one. The payer sends the transaction id, the invoice waits under *Payments → Invoices*, and you check it in your wallet before approving. |
 | `solana` | `rpcUrl`, `address`, `currency`, `mint` (SPL token, omit for SOL), `decimals`, `creditsPerCoin` | Balance change of the address (or its token account) equals the exact amount |
-| `lightning` | `lnbitsUrl`, `invoiceKey`, `creditsPerCoin` (per BTC) | Invoice created and checked through LNbits |
 | `checkout` | `checkoutUrl` (may contain `{invoice}`, `{account}`, `{credits}`), `secret`, `format: generic \| stripe`, `creditsPerUnit`, `currency` | Signed webhook to `/v1/payments/<id>/webhook`. Stripe: point a webhook for `checkout.session.completed` there and use Payment Links with `?client_reference_id={invoice}`. Generic: HMAC-SHA256 of the body in `x-vs-signature`, body `{ eventId, invoice, amount }` — glue for Ko-fi, Gumroad, BTCPay, Coinbase Commerce, PayPal IPN… |
 | `manual` | `instructions` (may contain `{invoice}`) | The payer adds a note; you approve or reject under *Payments → Invoices*. |
 
-On-chain invoices ask for the price plus a small unique tail (≤ 0.1 %, at least 1000 base units), so a transaction identifies its invoice without memos. Every transaction is credited once.
+On-chain invoices ask for the price plus a small unique tail (≤ 0.1 %, at least 1000 base units), so a transaction identifies its invoice without memos. Every transaction is credited once, and methods that the node cannot check itself (`monero`, a Lightning address, `manual`) land in the approval queue with the payer's proof.
+
+**Receipts.** The node signs a receipt for every invoice it issues and every payment it credits: what it asked to be paid (address, exact amount, expiry), the payer's proof of the transfer (transaction id, payment hash) and the credits granted. Clients fetch it automatically (`GET /v1/payments/invoices/:id/receipt`) and keep it on their own device, so both sides hold the same signed record. The **Payments** tab of the client (Wallet) lists them.
 
 ## Content provider
 

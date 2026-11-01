@@ -1,5 +1,6 @@
 import { isAbsolute } from 'node:path';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
+import { defaultCryptoPaymentConfigs } from '../commerce/payments.js';
 import type { Account } from '../commerce/ledger.js';
 import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import { isDevBuild } from '../shared/devbuild.js';
@@ -136,7 +137,7 @@ export function providerDefaults(): ProviderConfig {
     trustProxy: false,
     tor: { ...DEFAULT_NODE_TOR },
     signup: { grant: 500, powBits: 0, anonymous: true, perIpPerHour: 30 },
-    payments: [{ id: 'voucher', type: 'voucher' }],
+    payments: [{ id: 'voucher', type: 'voucher' }, ...defaultCryptoPaymentConfigs()],
     peers: [],
     pricing: {
       manifest: 0,
