@@ -286,6 +286,38 @@ interface ContentDetailsData {
     vvsh?: VvshFile;
   };
   chunks?: { id: string; size: number; backends: string[] }[];
+  tier?: {
+    cid: string;
+    tier: string;
+    label: string;
+    assignedAt: string;
+    expiresAt?: string;
+    daysLeft?: number;
+    manual?: boolean;
+    plan: { media: Record<string, number>; externalUrls: number };
+    backups: { urls: number; domains: string[]; satisfied: boolean; note?: string };
+    upgrades: { id: string; label: string; price: number; lifecycleDays: number; downgradeTo: string | null }[];
+  };
+  jobs?: {
+    id: string;
+    title?: string;
+    bytes: number;
+    replicas: number;
+    durationSeconds: number;
+    status: string;
+    createdAt: string;
+    managed?: boolean;
+    rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
+    holders: {
+      id: string;
+      accountId: string;
+      status: string;
+      acceptedAt: string;
+      earned: number;
+      links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string }[];
+    }[];
+  }[];
+  media?: { id: string; type: string; medium?: string }[];
   suggestions?: SuggestionRow[];
 }
 
@@ -294,12 +326,33 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
   const [data, setData] = useState<ContentDetailsData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showVvsh, setShowVvsh] = useState(false);
+  const [tierPick, setTierPick] = useState('');
+  const [extendDays, setExtendDays] = useState('30');
+  const [configTiers, setConfigTiers] = useState<{ id: string; label: string }[]>([]);
+  const [jobTests, setJobTests] = useState<Record<string, string>>({});
+  const [linkTests, setLinkTests] = useState<Record<string, string>>({});
+  const [endpoint, setEndpoint] = useState('');
+  const [endpointResult, setEndpointResult] = useState('');
   const [toast, show] = useToast();
-  useEffect(() => {
-    admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`).then(setData).catch((e) => setError(message(e)));
+  const load = useCallback(() => {
+    admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`)
+      .then((answer) => {
+        setData(answer);
+        setTierPick(answer.tier?.tier || answer.tier?.upgrades[0]?.id || '');
+      })
+      .catch((e) => setError(message(e)));
+    admin<{ config: { tiers: { id: string; label: string }[] } }>('/v1/admin/tiers')
+      .then((answer) => setConfigTiers(answer.config.tiers ?? []))
+      .catch(() => undefined);
   }, [cid]);
+  useEffect(load, [load]);
   const meta = (data?.manifest?.meta ?? {}) as { title?: string; description?: string; tags?: string[]; topics?: string[]; format?: string; rating?: string; durationSeconds?: number };
   const sources = [...new Set([...(data?.manifest?.sources ?? []), ...(data?.record.sources ?? [])])];
+  const tier = data?.tier;
+  // The picker always has something to offer: the content's upgrade menu, or the node's
+  // configured tiers — so a tier can be set even for content not on one yet.
+  const tierOptions: { id: string; label: string }[] =
+    tier?.upgrades?.length ? tier.upgrades : configTiers.length ? configTiers : [{ id: 'default', label: 'default' }];
   return (
     <Modal title="Content details" onClose={onClose} wide>
       {error ? (
@@ -399,6 +452,278 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
               Send content to peers
             </button>
             {toast && <span className="small">{toast}</span>}
+          </div>
+          <div>
+            <h3>Storage tier</h3>
+            {tier && tier.tier ? (
+              <>
+                <div className="row between small" style={{ marginTop: 6 }}>
+                  <strong>{tier.label}</strong>
+                  <span className="muted">
+                    {[
+                      ...Object.entries(tier.plan.media)
+                        .filter(([, count]) => count > 0)
+                        .map(([medium, count]) => `${count}× ${medium}`),
+                      ...(tier.plan.externalUrls > 0 ? [`${tier.plan.externalUrls} URL backups`] : []),
+                    ].join(' · ') || 'no copies planned'}
+                  </span>
+                </div>
+                <div className="small muted">
+                  Lifecycle: {tier.expiresAt ? `ends ${new Date(tier.expiresAt).toLocaleDateString()}` : 'no expiry'}
+                  {tier.daysLeft !== undefined ? ` · ${tier.daysLeft} day${tier.daysLeft === 1 ? '' : 's'} left` : ''}
+                  {tier.manual ? ' · set by hand' : ''}
+                </div>
+                <div className="small muted">
+                  URL backups: {tier.backups.urls} on {tier.backups.domains.length} domain
+                  {tier.backups.domains.length === 1 ? '' : 's'} {tier.backups.satisfied ? '· satisfied' : '· still wanted'}
+                  {tier.backups.note ? ` — ${tier.backups.note}` : ''}
+                </div>
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                  <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
+                    Tier
+                    <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
+                      {tierOptions.map((entry) => (
+                        <option key={entry.id} value={entry.id}>
+                          {entry.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                    Extend (days)
+                    <input type="number" min={0} value={extendDays} onChange={(e) => setExtendDays(e.target.value)} />
+                  </label>
+                  <button
+                    className="small"
+                    disabled={!tierPick}
+                    onClick={async () => {
+                      await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { tier: tierPick } }).catch((e) => show(message(e)));
+                      load();
+                    }}
+                  >
+                    {tier.tier ? 'Set tier' : 'Add to tier'}
+                  </button>
+                  <button
+                    className="small"
+                    disabled={!(Number(extendDays) > 0)}
+                    onClick={async () => {
+                      await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { extendDays: Number(extendDays) } }).catch((e) =>
+                        show(message(e))
+                      );
+                      load();
+                    }}
+                  >
+                    Extend lifecycle
+                  </button>
+                  <button
+                    className="small danger"
+                    onClick={async () => {
+                      await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                      load();
+                    }}
+                  >
+                    Forget
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+                <p className="small muted" style={{ width: '100%', margin: 0 }}>
+                  This content is not on any tier yet — pick one and add it. The tier's plan decides the copies to keep and the content's
+                  storage job.
+                </p>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
+                  Tier
+                  <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
+                    {tierOptions.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="small"
+                  disabled={!tierPick}
+                  onClick={async () => {
+                    await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { tier: tierPick } }).catch((e) => show(message(e)));
+                    load();
+                  }}
+                >
+                  Add to tier
+                </button>
+              </div>
+            )}
+          </div>
+          <div>
+            <h3>Storage media</h3>
+            {(data.media ?? []).length === 0 ? (
+              <p className="small muted" style={{ marginTop: 6 }}>
+                No local bytes — downloads come from URL backups, holders or peers.
+              </p>
+            ) : (
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                {(data.media ?? []).map((entry) => (
+                  <span key={entry.id} className="badge">
+                    {entry.medium ? `${entry.medium} · ` : ''}
+                    {entry.id} ({entry.type})
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <h3>Storage jobs</h3>
+            <p className="small muted" style={{ marginTop: 6 }}>
+              A storage job offers client nodes credits to keep copies of this content for its term. <strong>Retrieval</strong>: when a
+              download needs a chunk this node does not have, a holder is asked for it and paid the per-retrieval reward — the bytes must
+              hash to the chunk id exactly. <strong>Challenge</strong>: every so often a holder must prove it still keeps its copy (its own
+              chunk bytes behind a random nonce) and is paid per passed challenge. Upfront pay follows the first pass and completion pay
+              the end of the term; a holder that fails a retrieval or challenge is out of the job and the data is pulled from the other
+              holders or their URLs. <strong>Test job</strong> runs one real retrieval against a holder and pays its account the reward.
+            </p>
+            {(data.jobs ?? []).length === 0 ? (
+              <p className="small muted" style={{ marginTop: 6 }}>
+                No storage jobs for this content yet.
+              </p>
+            ) : (
+              (data.jobs ?? []).map((job) => (
+                <div key={job.id} style={{ marginTop: 8 }}>
+                  <div className="row between small">
+                    <strong>{job.title ?? job.id.slice(0, 12) + '…'}</strong>
+                    <span className="muted">
+                      {formatBytes(job.bytes)} · {job.replicas} cop{job.replicas === 1 ? 'y' : 'ies'} · {Math.round(job.durationSeconds / 86400)} days ·{' '}
+                      {job.status}
+                    </span>
+                    {job.managed ? <span className="badge ok">automatic</span> : null}
+                    <button
+                      className="small"
+                      title="Ask a holder for a real chunk and pay its account the reward when the bytes match"
+                      onClick={async () => {
+                        setJobTests((m) => ({ ...m, [job.id]: 'Testing…' }));
+                        try {
+                          const result = await admin<{ test: { ok: boolean; account?: string; chunkId: string; credited: number; error?: string } }>(
+                            `/v1/admin/storage/jobs/${job.id}/test`,
+                            { method: 'POST', body: {} }
+                          );
+                          const t = result.test;
+                          setJobTests((m) => ({
+                            ...m,
+                            [job.id]: t.ok
+                              ? `✓ holder ${t.account?.slice(0, 16)}… answered chunk ${t.chunkId.slice(0, 12)}… — paid ${t.credited} credits`
+                              : `✗ ${t.error ?? 'no answer'}`,
+                          }));
+                        } catch (e) {
+                          setJobTests((m) => ({ ...m, [job.id]: `✗ ${message(e)}` }));
+                        }
+                      }}
+                    >
+                      Test job
+                    </button>
+                    <button
+                      className="small danger"
+                      onClick={async () => {
+                        if (!window.confirm('Delete this storage job and every assignment under it?')) return;
+                        await admin(`/v1/admin/storage/jobs/${job.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                        load();
+                      }}
+                    >
+                      Delete job
+                    </button>
+                  </div>
+                  <div className="tiny faint">
+                    {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/challenge ·{' '}
+                    {job.rewards.completion} at completion · opened {timeAgo(job.createdAt)}
+                  </div>
+                  {jobTests[job.id] ? <div className="tiny" style={{ marginTop: 4 }}>{jobTests[job.id]}</div> : null}
+                  {job.holders.length === 0 ? (
+                    <div className="tiny faint" style={{ marginTop: 4 }}>
+                      No client accepted this job yet.
+                    </div>
+                  ) : (
+                    job.holders.map((holder) => (
+                      <div key={holder.id} style={{ marginTop: 6, paddingLeft: 10, borderLeft: '2px solid var(--border)' }}>
+                        <div className="small">
+                          <span className="mono tiny">{holder.accountId}</span>{' '}
+                          <span className={`badge ${holder.status === 'active' ? 'ok' : holder.status === 'failed' ? 'danger' : ''}`}>{holder.status}</span>{' '}
+                          <span className="tiny faint">
+                            accepted {timeAgo(holder.acceptedAt)} · {holder.earned} credits earned
+                          </span>
+                        </div>
+                        {holder.links.length === 0 ? (
+                          <div className="tiny faint">No URLs or base URLs offered by this account.</div>
+                        ) : (
+                          holder.links.map((link) => (
+                            <div key={link.id} className="tiny">
+                              <span className={`badge ${link.status === 'accepted' ? 'ok' : link.status === 'rejected' ? 'danger' : ''}`}>{link.status}</span>{' '}
+                              <span className="mono">{link.baseUrl ? `${link.baseUrl} (base URL)` : link.url}</span>
+                              {link.cid ? <span className="faint"> · {link.cid.slice(0, 14)}…</span> : null}{' '}
+                              <button
+                                className="small"
+                                onClick={async () => {
+                                  const target = link.baseUrl ? `${link.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` : link.url ?? '';
+                                  setLinkTests((m) => ({ ...m, [link.id]: 'Checking…' }));
+                                  try {
+                                    const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
+                                      `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
+                                      { method: 'POST', body: { url: target } }
+                                    );
+                                    setLinkTests((m) => ({
+                                      ...m,
+                                      [link.id]: result.verify.ok
+                                        ? `✓ ${result.verify.url} serves ${formatBytes(result.verify.bytes)} matching the expected hash`
+                                        : `✗ ${result.verify.url} — ${result.verify.error ?? 'does not match'}`,
+                                    }));
+                                  } catch (e) {
+                                    setLinkTests((m) => ({ ...m, [link.id]: `✗ ${message(e)}` }));
+                                  }
+                                }}
+                              >
+                                Test
+                              </button>
+                              {linkTests[link.id] ? <div className="tiny faint">{linkTests[link.id]}</div> : null}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              ))
+            )}
+            <div className="row" style={{ gap: 8, marginTop: 10 }}>
+              <input
+                type="text"
+                className="mono"
+                style={{ flex: 1 }}
+                placeholder="Check any endpoint for this content (https://host/… or a base URL)"
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+              />
+              <button
+                className="small"
+                disabled={!endpoint.trim()}
+                onClick={async () => {
+                  setEndpointResult('Checking…');
+                  try {
+                    const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
+                      `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
+                      { method: 'POST', body: { url: endpoint.trim() } }
+                    );
+                    setEndpointResult(
+                      result.verify.ok
+                        ? `✓ ${result.verify.url} is available and serves ${formatBytes(result.verify.bytes)} matching the expected hash`
+                        : `✗ ${result.verify.url} — ${result.verify.error ?? 'does not match the expected hash'}`
+                    );
+                  } catch (e) {
+                    setEndpointResult(`✗ ${message(e)}`);
+                  }
+                }}
+              >
+                Check endpoint
+              </button>
+            </div>
+            {endpointResult ? <div className="tiny" style={{ marginTop: 4 }}>{endpointResult}</div> : null}
           </div>
           {data.suggestions && data.suggestions.length > 0 && (
             <div>
@@ -515,39 +840,13 @@ interface Backend {
   status: { ok: boolean; detail: string };
 }
 
-interface JobRow {
-  id: string;
-  title?: string;
-  bytes: number;
-  replicas: number;
-  holders: number;
-  assignments: number;
-  durationSeconds: number;
-  rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
-  status: string;
-  createdAt: string;
-}
-
-interface AssignmentRow {
-  id: string;
-  jobId: string;
-  accountId: string;
-  status: string;
-  challenges: { passed: number; failed: number };
-  retrievals: number;
-  earned: number;
-  expiresAt: string;
-}
-
 function Storage() {
   const [backends, setBackends] = useState<Backend[] | null>(null);
-  const [jobs, setJobs] = useState<JobRow[]>([]);
-  const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
   const [toast, show] = useToast();
   const load = useCallback(() => {
-    admin<{ backends: Backend[] }>('/v1/admin/storage/backends').then((r) => setBackends(r.backends)).catch((e) => show(message(e)));
-    admin<{ jobs: JobRow[] }>('/v1/admin/storage/jobs').then((r) => setJobs(r.jobs)).catch(() => undefined);
-    admin<{ assignments: AssignmentRow[] }>('/v1/admin/storage/assignments').then((r) => setAssignments(r.assignments)).catch(() => undefined);
+    admin<{ backends: Backend[] }>('/v1/admin/storage/backends')
+      .then((r) => setBackends(r.backends))
+      .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
 
@@ -574,83 +873,6 @@ function Storage() {
                   <td className="small">priority {backend.priority}</td>
                   <td className="small">{backend.writable ? 'read/write' : 'read only'}</td>
                   <td className="small muted">{backend.status.detail}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-      <div className="card">
-        <h3>Storage jobs</h3>
-        {jobs.length === 0 ? (
-          <p className="small muted">None. Create one from the Content tab, or enable automatic jobs in Settings.</p>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Job</th>
-                <th>Holders</th>
-                <th>Rewards</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job) => (
-                <tr key={job.id}>
-                  <td>
-                    <strong>{job.title ?? job.id}</strong>
-                    <div className="tiny faint">
-                      {formatBytes(job.bytes)} · {Math.round(job.durationSeconds / 86400)} days
-                    </div>
-                  </td>
-                  <td className="small">
-                    {job.holders}/{job.replicas}
-                  </td>
-                  <td className="tiny">
-                    {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/proof · {job.rewards.completion} at end
-                  </td>
-                  <td>
-                    <span className={`badge ${job.status === 'open' ? 'ok' : ''}`}>{job.status}</span>
-                  </td>
-                  <td>
-                    {job.status === 'open' && (
-                      <button
-                        className="small"
-                        onClick={async () => {
-                          await admin(`/v1/admin/storage/jobs/${job.id}/close`, { body: {} }).catch((e) => show(message(e)));
-                          load();
-                        }}
-                      >
-                        Close
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-      <div className="card">
-        <h3>Client assignments</h3>
-        {assignments.length === 0 ? (
-          <p className="small muted">No client stores data for this node yet.</p>
-        ) : (
-          <table className="table">
-            <tbody>
-              {assignments.slice(0, 100).map((a) => (
-                <tr key={a.id}>
-                  <td className="mono tiny">{a.accountId.slice(0, 20)}…</td>
-                  <td>
-                    <span className="badge">{a.status}</span>
-                  </td>
-                  <td className="small">
-                    {a.challenges.passed} ✓ / {a.challenges.failed} ✗
-                  </td>
-                  <td className="small">{a.retrievals} retrievals</td>
-                  <td className="small">{a.earned} credits</td>
-                  <td className="tiny faint">until {new Date(a.expiresAt).toLocaleDateString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -828,7 +1050,334 @@ function Peering() {
   );
 }
 
+interface TierRow {
+  id: string;
+  label: string;
+  media: Record<string, number>;
+  externalUrls: number;
+  pricePerMiB: number;
+  lifecycleDays: number;
+  downgradeTo: string | null;
+}
+interface TiersConfigRow {
+  enabled: boolean;
+  auto: boolean;
+  defaultTier: string;
+  media: { id: string; label: string; backends: string[] }[];
+  tiers: TierRow[];
+}
+interface TierAssignmentRow {
+  cid: string;
+  title?: string;
+  tier: string;
+  bytes: number;
+  expiresAt?: string;
+  manual?: boolean;
+}
+
+/** Content storage tiers: the copy plans, their lifecycles, and every content's assignment. */
+function Tiers() {
+  const [config, setConfig] = useState<TiersConfigRow | null>(null);
+  const [assignments, setAssignments] = useState<TierAssignmentRow[]>([]);
+  const [backends, setBackends] = useState<string[]>([]);
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<{ config: TiersConfigRow; assignments: TierAssignmentRow[]; backends: string[] }>('/v1/admin/tiers')
+      .then((r) => {
+        setConfig(r.config);
+        setAssignments(r.assignments);
+        setBackends(r.backends);
+      })
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const save = async (next: TiersConfigRow) => {
+    setConfig(next);
+    try {
+      await admin('/v1/admin/config', { method: 'PUT', body: { tiers: next } });
+    } catch (e) {
+      show(message(e));
+    }
+  };
+
+  if (!config) return <Loading />;
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="card form-stack">
+        <h3>Storage tiers</h3>
+        <p className="small muted">
+          Every upload is assigned the default tier — its plan says how many copies sit on which medium and how many external user URL
+          backups it wants. Users pay credits to raise a content's tier or extend its lifecycle; expired assignments downgrade along
+          their chain or are forgotten.
+        </p>
+        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+          <label className="row small" style={{ gap: 4 }}>
+            <input type="checkbox" checked={config.enabled} onChange={(e) => void save({ ...config, enabled: e.target.checked })} />
+            Use storage tiers
+          </label>
+          <label className="row small" style={{ gap: 4 }}>
+            <input type="checkbox" checked={config.auto} onChange={(e) => void save({ ...config, auto: e.target.checked })} />
+            Assign tiers automatically
+          </label>
+          <label className="field" style={{ marginBottom: 0, maxWidth: 180 }}>
+            Default tier
+            <select value={config.defaultTier} onChange={(e) => void save({ ...config, defaultTier: e.target.value })}>
+              {config.tiers.map((tier) => (
+                <option key={tier.id} value={tier.id}>
+                  {tier.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="small"
+            title="Restores the bronze/silver/gold plan with its media"
+            onClick={() =>
+              void save({
+                ...config,
+                enabled: true,
+                auto: true,
+                defaultTier: 'bronze',
+                media: [
+                  { id: 'hdd', label: 'HDD', backends: [] },
+                  { id: 'ssd', label: 'SSD', backends: [] },
+                ],
+                tiers: [
+                  { id: 'bronze', label: 'Bronze', media: {}, externalUrls: 2, pricePerMiB: 0, lifecycleDays: 90, downgradeTo: null },
+                  { id: 'silver', label: 'Silver', media: { hdd: 1 }, externalUrls: 2, pricePerMiB: 1, lifecycleDays: 180, downgradeTo: 'bronze' },
+                  { id: 'gold', label: 'Gold', media: { hdd: 1, ssd: 1 }, externalUrls: 3, pricePerMiB: 3, lifecycleDays: 365, downgradeTo: 'silver' },
+                ],
+              })
+            }
+          >
+            Reset to defaults
+          </button>
+        </div>
+        <div>
+          <h4>Storage media</h4>
+          <p className="small muted">
+            The medium names a tier counts copies on; backends ({backends.join(', ') || 'none'}) whose bytes count as that medium, empty
+            for the node's defaults.
+          </p>
+          {config.media.map((medium, index) => (
+            <div className="row" key={index} style={{ gap: 8 }}>
+              <input
+                type="text"
+                value={medium.label}
+                placeholder="Label"
+                style={{ maxWidth: 130 }}
+                onChange={(e) => void save({ ...config, media: config.media.map((m, i) => (i === index ? { ...m, label: e.target.value } : m)) })}
+              />
+              <input
+                type="text"
+                className="mono"
+                value={medium.backends.join(', ')}
+                placeholder="backend ids (comma separated)"
+                style={{ flex: 1 }}
+                onChange={(e) =>
+                  void save({
+                    ...config,
+                    media: config.media.map((m, i) =>
+                      i === index ? { ...m, backends: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) } : m
+                    ),
+                  })
+                }
+              />
+              <button
+                className="small danger"
+                onClick={() => void save({ ...config, media: config.media.filter((_, i) => i !== index), tiers: config.tiers.map((t) => ({ ...t, media: Object.fromEntries(Object.entries(t.media).filter(([id]) => id !== medium.id)) })) })}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <button
+            className="small"
+            onClick={() =>
+              void save({ ...config, media: [...config.media, { id: `medium${config.media.length + 1}`, label: `Medium ${config.media.length + 1}`, backends: [] }] })
+            }
+          >
+            + Add medium
+          </button>
+        </div>
+      </div>
+
+      <div className="card form-stack">
+        <h3>Tiers</h3>
+        {config.tiers.map((tier, index) => (
+          <div key={tier.id} className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              type="text"
+              value={tier.label}
+              style={{ maxWidth: 120 }}
+              onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, label: e.target.value } : t)) })}
+            />
+            {config.media.map((medium) => (
+              <label key={medium.id} className="row tiny" style={{ gap: 4 }}>
+                {medium.label}
+                <input
+                  type="number"
+                  min={0}
+                  value={tier.media[medium.id] ?? 0}
+                  style={{ width: 52 }}
+                  onChange={(e) =>
+                    void save({
+                      ...config,
+                      tiers: config.tiers.map((t, i) =>
+                        i === index ? { ...t, media: { ...t.media, [medium.id]: Math.max(0, Number(e.target.value) || 0) } } : t
+                      ),
+                    })
+                  }
+                />
+              </label>
+            ))}
+            <label className="row tiny" style={{ gap: 4 }}>
+              URL backups
+              <input
+                type="number"
+                min={0}
+                value={tier.externalUrls}
+                style={{ width: 52 }}
+                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, externalUrls: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+              />
+            </label>
+            <label className="row tiny" style={{ gap: 4 }}>
+              Credits/MiB
+              <input
+                type="number"
+                min={0}
+                value={tier.pricePerMiB}
+                style={{ width: 60 }}
+                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, pricePerMiB: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+              />
+            </label>
+            <label className="row tiny" style={{ gap: 4 }}>
+              Lifecycle (days)
+              <input
+                type="number"
+                min={0}
+                value={tier.lifecycleDays}
+                style={{ width: 60 }}
+                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, lifecycleDays: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+              />
+            </label>
+            <label className="row tiny" style={{ gap: 4 }}>
+              Expires to
+              <select
+                value={tier.downgradeTo ?? ''}
+                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, downgradeTo: e.target.value || null } : t)) })}
+              >
+                <option value="">forgotten</option>
+                {config.tiers
+                  .filter((other) => other.id !== tier.id)
+                  .map((other) => (
+                    <option key={other.id} value={other.id}>
+                      {other.label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <button className="small danger" onClick={() => void save({ ...config, tiers: config.tiers.filter((_, i) => i !== index) })}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <button
+          className="small"
+          onClick={() =>
+            void save({
+              ...config,
+              tiers: [
+                ...config.tiers,
+                {
+                  id: `tier${config.tiers.length + 1}`,
+                  label: `Tier ${config.tiers.length + 1}`,
+                  media: {},
+                  externalUrls: 1,
+                  pricePerMiB: 1,
+                  lifecycleDays: 90,
+                  downgradeTo: config.defaultTier,
+                },
+              ],
+            })
+          }
+        >
+          + Add tier
+        </button>
+      </div>
+
+      <div className="card form-stack">
+        <h3>Assignments</h3>
+        {assignments.length === 0 ? (
+          <p className="small muted">No content assigned yet — every upload lands in the default tier automatically.</p>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Content</th>
+                <th>Size</th>
+                <th>Tier</th>
+                <th>Lifecycle ends</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map((assignment) => (
+                <tr key={assignment.cid}>
+                  <td className="small">
+                    {assignment.title ?? assignment.cid.slice(0, 18) + '…'}
+                    {assignment.manual && (
+                      <span className="badge" style={{ marginLeft: 6 }}>
+                        manual
+                      </span>
+                    )}
+                  </td>
+                  <td className="small">{formatBytes(assignment.bytes)}</td>
+                  <td>
+                    <select
+                      value={assignment.tier}
+                      onChange={async (e) => {
+                        await admin(`/v1/admin/tiers/${encodeURIComponent(assignment.cid)}`, { body: { tier: e.target.value } }).catch((err) =>
+                          show(message(err))
+                        );
+                        load();
+                      }}
+                    >
+                      {config.tiers.map((tier) => (
+                        <option key={tier.id} value={tier.id}>
+                          {tier.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="small">{assignment.expiresAt ? new Date(assignment.expiresAt).toLocaleDateString() : 'never'}</td>
+                  <td>
+                    <button
+                      className="small danger"
+                      onClick={async () => {
+                        await admin(`/v1/admin/tiers/${encodeURIComponent(assignment.cid)}`, { method: 'DELETE' }).catch((err) => show(message(err)));
+                        load();
+                      }}
+                    >
+                      Forget
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ProviderTabs({ tab }: { tab: string }) {
+
   if (tab === 'content') return <Content />;
   if (tab === 'storage')
     return (
@@ -838,6 +1387,7 @@ export function ProviderTabs({ tab }: { tab: string }) {
         <SyncJob />
       </>
     );
+  if (tab === 'tiers') return <Tiers />;
   return null;
 }
 

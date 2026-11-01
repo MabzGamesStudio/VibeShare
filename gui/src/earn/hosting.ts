@@ -359,6 +359,38 @@ export function newHostId(): string {
   return `h-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// ---------------------------------------------------------------------- step drafts
+
+/** What the setup wizard holds between visits: every field, per platform. */
+export interface HostDraft {
+  values: Record<string, string>;
+  /** The manually edited base URL (empty = built from the fields). */
+  baseUrl: string;
+  label: string;
+  cid: string;
+}
+
+const DRAFTS_KEY = 'vibeshare-earn-drafts';
+
+export function loadDrafts(): Record<string, HostDraft> {
+  try {
+    const raw = typeof localStorage === 'undefined' ? null : localStorage.getItem(DRAFTS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, HostDraft>) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Saves every step's fields as they are typed — nothing is lost between steps. */
+export function saveDrafts(drafts: Record<string, HostDraft>): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // The drafts still work for this visit when storage is unavailable.
+  }
+}
+
 // ---------------------------------------------------------------------- pushing job data
 
 function toBase64(data: Uint8Array): string {

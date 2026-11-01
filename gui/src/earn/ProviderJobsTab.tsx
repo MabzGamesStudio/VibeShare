@@ -8,11 +8,14 @@ import {
   HOSTING_PLATFORMS,
   contentUrl,
   hostingPlatform,
+  loadDrafts,
   loadHosts,
   newHostId,
   pushHostedContent,
+  saveDrafts,
   saveHosts,
   type HostConfig,
+  type HostDraft,
 } from './hosting';
 
 /** The platform setup as a guided flow: one step per screen instead of all at once. */
@@ -35,48 +38,52 @@ export function ProviderJobsTab() {
   const [platformId, setPlatformId] = useState(HOSTING_PLATFORMS[0].id);
   const [step, setStep] = useState(0);
   useEffect(() => setStep(0), [platformId]);
-  const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
-  const [baseEdits, setBaseEdits] = useState<Record<string, string>>({});
-  const [label, setLabel] = useState('');
-  const [cid, setCid] = useState('');
+  // Every field auto-saves as it is typed, per platform — moving between steps or
+  // closing the page keeps all of it.
+  const [drafts, setDrafts] = useState<Record<string, HostDraft>>(() => loadDrafts());
+  useEffect(() => saveDrafts(drafts), [drafts]);
   const [pushHostId, setPushHostId] = useState('');
   const [pushCid, setPushCid] = useState('');
   const [pushFile, setPushFile] = useState<File | null>(null);
   const [pushing, setPushing] = useState(false);
+  // Provider jobs to host: the wizard fetches a job's content id from a provider here.
+  const [jobNode, setJobNode] = useState('');
+  const [jobItems, setJobItems] = useState<{ cid: string; title?: string; source: string }[]>([]);
 
   const platform = hostingPlatform(platformId);
+  const draft: HostDraft = drafts[platformId] ?? { values: {}, baseUrl: '', label: '', cid: '' };
+  const update = (patch: Partial<HostDraft>) =>
+    setDrafts((current) => ({ ...current, [platformId]: { ...draft, ...patch } }));
   const values = {
     ...Object.fromEntries(platform.fields.map((field) => [field.id, field.default ?? ''])),
-    ...(drafts[platformId] ?? {}),
+    ...draft.values,
   };
-  const edited = platformId in baseEdits;
-  const baseUrl = (edited ? baseEdits[platformId] : platform.buildBaseUrl(values)).trim();
-
-  const update = (patch: Record<string, string>) =>
-    setDrafts((current) => ({ ...current, [platformId]: { ...current[platformId], ...patch } }));
+  const edited = Boolean(draft.baseUrl);
+  const baseUrl = (draft.baseUrl || platform.buildBaseUrl(values)).trim();
 
   const commit = (list: HostConfig[]) => {
     setHosts(list);
     saveHosts(list);
   };
 
-  const save = () => {
+  const save = (): HostConfig | null => {
     if (!/^https?:\/\//.test(baseUrl)) {
       toast('Fill in the fields so a base URL can be built (or type one)', 'error');
-      return;
+      return null;
     }
     const host: HostConfig = {
       id: newHostId(),
       platform: platform.id,
-      label: label.trim() || platform.name,
+      label: draft.label.trim() || platform.name,
       baseUrl: baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`,
       values,
       autoPush: false,
       createdAt: new Date().toISOString(),
     };
     commit([...hosts, host]);
-    setLabel('');
+    update({ label: '' });
     toast(`Saved ${host.label}`, 'success');
+    return host;
   };
 
   const offer = async (host: HostConfig) => {
@@ -124,6 +131,29 @@ export function ProviderJobsTab() {
       toast(errorMessage(e), 'error');
     }
     setPushing(false);
+  };
+
+  /** Saves the host and pushes the fetched job's content id to it with the access key. */
+  const publishJob = async () => {
+    const cid = draft.cid.trim();
+    if (!cid) {
+      toast('Fetch a job content id first', 'error');
+      return;
+    }
+    const host = save();
+    if (!host) return;
+    try {
+      setPushing(true);
+      const response = await fetch(streamUrl(cid, true));
+      if (!response.ok) throw new Error(`Could not download ${cid} from your providers`);
+      const data = new Uint8Array(await response.arrayBuffer());
+      const result = await pushHostedContent(host, cid, data);
+      toast(result.message, result.ok ? 'success' : 'info');
+    } catch (e) {
+      toast(errorMessage(e), 'error');
+    } finally {
+      setPushing(false);
+    }
   };
 
   return (
@@ -199,7 +229,7 @@ export function ProviderJobsTab() {
                 value={values[field.id] ?? ''}
                 placeholder={field.placeholder}
                 autoComplete={field.secret ? 'off' : undefined}
-                onChange={(e) => update({ [field.id]: e.target.value })}
+                onChange={(e) => update({ values: { ...values, [field.id]: e.target.value } })}
               />
               {field.hint && <span className="hint">{field.hint}</span>}
             </label>
@@ -216,12 +246,12 @@ export function ProviderJobsTab() {
             className="mono"
             value={baseUrl}
             placeholder="https://you.example/baseUrl/"
-            onChange={(e) => setBaseEdits((current) => ({ ...current, [platformId]: e.target.value }))}
+            onChange={(e) => update({ baseUrl: e.target.value })}
           />
           <span className="hint">
             Built from the fields above; edit it if the platform shows a different URL.{' '}
             {edited && (
-              <button type="button" className="small" onClick={() => setBaseEdits((current) => ({ ...current, [platformId]: platform.buildBaseUrl(values) }))}>
+              <button type="button" className="small" onClick={() => update({ baseUrl: '' })}>
                 Suggest from fields
               </button>
             )}
@@ -231,11 +261,61 @@ export function ProviderJobsTab() {
         {/^https?:\/\//.test(baseUrl) && (
           <label className="field">
             Content id
-            <input type="text" className="mono" value={cid} placeholder="vs1… or a source id" onChange={(e) => setCid(e.target.value)} />
+            <input type="text" className="mono" value={draft.cid} placeholder="vs1… or a source id" onChange={(e) => update({ cid: e.target.value })} />
             <span className="hint">Appended to the base URL automatically — this is the URL providers download from.</span>
-            <CodeBox text={contentUrl(baseUrl, cid.trim() || '<content-id>')} />
+            <CodeBox text={contentUrl(baseUrl, draft.cid.trim() || '<content-id>')} />
           </label>
         )}
+
+        <div className="field">
+          <span>From a provider job — fetch a content id to host</span>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
+              Content provider
+              <select value={jobNode || providers[0]?.id || ''} onChange={(e) => setJobNode(e.target.value)}>
+                {providers.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="small"
+              disabled={!providers.length}
+              onClick={async () => {
+                const node = jobNode || providers[0]?.id;
+                if (!node) return;
+                try {
+                  const answer = await api<{ items: { cid: string; title?: string; source: string }[] }>(`/api/nodes/${node}/storage-jobs`);
+                  setJobItems(answer.items ?? []);
+                  if (answer.items?.length) update({ cid: answer.items[0].cid });
+                  toast(answer.items?.length ? `Found ${answer.items.length} job content id${answer.items.length === 1 ? '' : 's'}` : 'No jobs found on that provider', answer.items?.length ? 'success' : 'info');
+                } catch (e) {
+                  toast(errorMessage(e), 'error');
+                }
+              }}
+            >
+              <Download size={13} /> Fetch job content ids
+            </button>
+            {jobItems.length > 0 && (
+              <label className="field" style={{ marginBottom: 0, minWidth: 220 }}>
+                Job content id
+                <select value={draft.cid} onChange={(e) => update({ cid: e.target.value })}>
+                  {jobItems.map((item) => (
+                    <option key={item.cid} value={item.cid}>
+                      {(item.title ?? item.cid.slice(0, 20) + '…') + ` — ${item.source}`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+          <span className="hint">
+            The provider's jobs name the content they want hosted — fetch one and its content id fills in above. "Publish" then pushes
+            those bytes to this host with the access key and saves it.
+          </span>
+        </div>
           </>
         )}
 
@@ -243,7 +323,7 @@ export function ProviderJobsTab() {
           <>
             <label className="field">
               Name this host
-              <input type="text" value={label} placeholder={platform.name} onChange={(e) => setLabel(e.target.value)} />
+              <input type="text" value={draft.label} placeholder={platform.name} onChange={(e) => update({ label: e.target.value })} />
             </label>
             <p className="small muted">
               Saving keeps the base URL and its access details on this device. Then offer it to your provider nodes — they query{' '}
@@ -251,6 +331,12 @@ export function ProviderJobsTab() {
               “Push job data to a host” below.
             </p>
             {/^https?:\/\//.test(baseUrl) && <CodeBox text={baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`} />}
+            <div className="row">
+              <button className="primary small" disabled={pushing || !draft.cid.trim()} onClick={() => void publishJob()}>
+                <Upload size={14} /> Publish the job's content id to this host & save
+              </button>
+              <span className="hint">Downloads the content id from your providers and pushes it to the site with the access key.</span>
+            </div>
           </>
         )}
 
@@ -318,7 +404,7 @@ export function ProviderJobsTab() {
                         className="small"
                         onClick={() => {
                           setPushHostId(host.id);
-                          setPushCid(cid.trim());
+                          setPushCid(draft.cid.trim());
                         }}
                       >
                         <Upload size={13} /> Push content

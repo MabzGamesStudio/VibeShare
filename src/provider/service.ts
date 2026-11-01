@@ -46,6 +46,8 @@ export interface StorageJob {
   /** No new assignments after this time (undefined = open until closed). */
   openUntil?: string;
   status: 'open' | 'closed';
+  /** True for the tier-driven job the node opens and resizes by itself. */
+  managed?: boolean;
 }
 
 interface Assignment extends StorageAssignment {
@@ -89,7 +91,9 @@ export class StorageService {
     private readonly ledger: Ledger,
     private readonly config: () => StorageServiceConfig,
     /** Reads a chunk; `peers: false` restricts it to the provider's own storage. */
-    private readonly readChunk: (id: string, options?: { peers?: boolean }) => Promise<Buffer | null>
+    private readonly readChunk: (id: string, options?: { peers?: boolean }) => Promise<Buffer | null>,
+    /** A holder that failed a retrieval: the node pulls the job's data from their URLs instead. */
+    private readonly onHolderOut?: (accountId: string, job?: StorageJob) => void
   ) {
     this.store = new JsonFile<ServiceData>(path, () => ({ jobs: {}, assignments: {} }));
     this.timer = setInterval(() => void this.tick().catch((error) => log.warn('storage service tick:', error)), 5000);
@@ -119,9 +123,14 @@ export class StorageService {
     rewards?: Partial<StorageRewards>;
     requireIdentity?: boolean;
     openUntil?: string;
+    managed?: boolean;
   }): StorageJob {
     if (!input.chunks.length) throw badRequest('A job needs at least one chunk');
     const unique = new Map(input.chunks.map((chunk) => [chunk.id, chunk.size]));
+    // The operator's job replaces the automatic tier job for the same content.
+    if (input.cid) for (const job of Object.values(this.data.jobs)) {
+      if (job.managed && job.cid === input.cid) this.deleteJob(job.id);
+    }
     const job: StorageJob = {
       id: randomId('job-', 8),
       cid: input.cid,
@@ -135,6 +144,7 @@ export class StorageService {
       createdAt: new Date().toISOString(),
       openUntil: input.openUntil,
       status: 'open',
+      managed: input.managed,
     };
     this.data.jobs[job.id] = job;
     this.store.changed();
@@ -146,6 +156,57 @@ export class StorageService {
     if (!job) throw notFound('No such job');
     job.status = 'closed';
     this.store.changed();
+  }
+
+  /** Removes a job entirely: its assignments and pending tasks go with it. */
+  deleteJob(id: string): boolean {
+    if (!this.data.jobs[id]) return false;
+    delete this.data.jobs[id];
+    for (const [taskId, task] of [...this.tasks]) {
+      if (this.data.assignments[task.assignmentId]?.jobId === id) {
+        this.tasks.delete(taskId);
+        for (const waiter of task.waiters) waiter(null);
+      }
+    }
+    for (const [assignmentId, assignment] of Object.entries(this.data.assignments)) {
+      if (assignment.jobId === id) delete this.data.assignments[assignmentId];
+    }
+    this.store.changed();
+    return true;
+  }
+
+  /**
+   * Tests one job by asking a holder for a real chunk: the bytes must hash to the chunk
+   * id exactly. A passed test pays the holder `reward` credits; a failed one takes them
+   * out of the job like any retrieval that does not answer.
+   */
+  async testJob(jobId: string, reward: number): Promise<{ ok: boolean; account?: string; chunkId: string; credited: number; error?: string }> {
+    const job = this.data.jobs[jobId];
+    if (!job) throw notFound('No such job');
+    const chunkId = job.chunkIds[Math.floor(Math.random() * job.chunkIds.length)];
+    const holders = Object.values(this.data.assignments).filter((a) => a.jobId === jobId && a.status === 'active');
+    if (!holders.length) return { ok: false, chunkId, credited: 0, error: 'No client holds this job yet' };
+    const holder = holders[Math.floor(Math.random() * holders.length)];
+    const data = await new Promise<Buffer | null>((resolve) => {
+      const task = this.addTask({ type: 'retrieve', assignmentId: holder.id, accountId: holder.accountId, chunkId });
+      task.waiters.push((bytes) => resolve(bytes));
+      // The task deadline in tick() also settles this waiter with null.
+    });
+    if (!data) {
+      this.eliminate(holder);
+      return { ok: false, account: holder.accountId, chunkId, credited: 0, error: 'No answer in time — the holder is out of the job' };
+    }
+    if (chunkIdOf(data) !== chunkId) {
+      this.eliminate(holder);
+      return { ok: false, account: holder.accountId, chunkId, credited: 0, error: 'The bytes did not match the chunk — the holder is out of the job' };
+    }
+    const credited = Math.max(0, Math.round(reward));
+    if (credited > 0) {
+      holder.earned += credited;
+      this.ledger.credit(holder.accountId, credited, 'storage test', holder.id);
+      this.store.changed();
+    }
+    return { ok: true, account: holder.accountId, chunkId, credited };
   }
 
   jobs(): (StorageJob & { holders: number; assignments: number })[] {
@@ -209,6 +270,11 @@ export class StorageService {
     if (this.liveAssignments(job.id).length >= job.replicas) throw new HttpError(409, 'full', 'The job has no free slots');
     if (this.liveAssignments(job.id).some((a) => a.accountId === account.id)) {
       throw new HttpError(409, 'duplicate', 'You already store this job');
+    }
+    // One copy per user: never two assignments of the same content on one account, even
+    // across separate jobs.
+    if (job.cid && Object.values(this.data.assignments).some((a) => a.accountId === account.id && LIVE.includes(a.status) && this.data.jobs[a.jobId]?.cid === job.cid)) {
+      throw new HttpError(409, 'duplicate', 'You already store a copy of this content');
     }
     const now = Date.now();
     const assignment: Assignment = {
@@ -274,7 +340,8 @@ export class StorageService {
 
   private view(assignment: Assignment): StorageAssignment {
     const { accountId: _account, upfrontPaid: _paid, lastChallengeAt: _last, ...rest } = assignment;
-    return rest;
+    const job = this.data.jobs[assignment.jobId];
+    return { ...rest, cid: job?.cid, title: job?.title };
   }
 
   /** Long poll: returns undelivered tasks, waiting up to `waitSeconds` for one. */
@@ -366,8 +433,22 @@ export class StorageService {
       this.ledger.credit(account.id, credited, `storage ${task.type}`, assignment.id);
     }
     this.store.changed();
-    if (!ok) throw badRequest(task.type === 'retrieve' ? 'The bytes do not match the chunk' : 'Wrong proof');
+    if (!ok) {
+      // Wrong bytes or a wrong proof means the holder does not really have the data:
+      // out of the job right away, and the node pulls the data from their URLs instead.
+      this.eliminate(assignment);
+      throw badRequest(task.type === 'retrieve' ? 'The bytes do not match the chunk' : 'Wrong proof');
+    }
     return { credited };
+  }
+
+  /** A holder that fails to hand back a chunk is out of the job: the node pulls the job's
+   *  data from the URLs that account offered instead and looks for other holders. */
+  private eliminate(assignment: Assignment): void {
+    if (!LIVE.includes(assignment.status)) return;
+    assignment.status = 'failed';
+    this.store.changed();
+    this.onHolderOut?.(assignment.accountId, this.data.jobs[assignment.jobId]);
   }
 
   private async challenge(assignment: Assignment): Promise<void> {
@@ -425,11 +506,23 @@ export class StorageService {
         if (assignment) assignment.challenges.failed++;
         this.store.changed();
       }
+      if (task.type === 'retrieve') {
+        // A retrieval nobody answered: that holder's copy does not count any more.
+        const assignment = this.data.assignments[task.assignmentId];
+        if (assignment) this.eliminate(assignment);
+      }
     }
     for (const assignment of Object.values(this.data.assignments)) {
       if (!LIVE.includes(assignment.status)) continue;
       if (Date.parse(assignment.expiresAt) <= now) {
         this.finish(assignment);
+        continue;
+      }
+      // An assignment that never finished downloading frees its slot again — the job
+      // stays open for others instead of waiting on a client that never stored anything.
+      if (assignment.status === 'downloading' && now - Date.parse(assignment.acceptedAt) > 15 * 60_000) {
+        assignment.status = 'released';
+        this.store.changed();
         continue;
       }
       if (assignment.status !== 'active') continue;
@@ -461,6 +554,13 @@ export class StorageService {
       assignment.status = 'failed';
     }
     this.store.changed();
+  }
+
+  /** Live holders of one content across its jobs (client nodes keeping copies). */
+  holdersOf(cid: string): number {
+    return this.jobs()
+      .filter((job) => job.cid === cid)
+      .reduce((sum, job) => sum + job.holders, 0);
   }
 
   stats(): { jobs: number; activeAssignments: number; onlineHolders: number } {

@@ -50,6 +50,7 @@ import {
 } from './storage/backends.js';
 import { basename } from 'node:path';
 import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
+import { defaultTiersConfig, TierManager, withDefaultTiers, type TierState, type TiersConfig } from './tiers.js';
 import { vvshEncoderBackend } from './transcode.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { decodeVvshChunk, decodeVvshFrames } from '../shared/vvsh-encode.js';
@@ -122,6 +123,8 @@ export interface ProviderConfig extends BaseConfig {
     /** What a client gets when it sends no configuration of its own. */
     defaults: { chunkSeconds: number; previewSplits: number; bitrates: { id: string; label: string; height?: number; kbps: number }[] };
   };
+  /** Content storage tiers: where copies live, how many, and for how long. */
+  tiers: TiersConfig;
 }
 
 export function providerDefaults(): ProviderConfig {
@@ -147,6 +150,7 @@ export function providerDefaults(): ProviderConfig {
     peering: { peers: [], acceptPush: true, sync: { enabled: false, intervalMs: 3_600_000, sendRatePerMin: 120, receiveRatePerMin: 120 } },
     contentUrls: { autoAccept: true, maxUrlsPerClient: 16, maxBaseUrlsPerClient: 4, creditPerDownload: 2 },
     vvsh: { convert: { perMiB: 1, perChunk: 1, perRendition: 2, perPreview: 1 }, chunkPerMiB: 1, defaults: defaultVvshConfig() },
+    tiers: defaultTiersConfig(),
     storage: {
       backends: [{ id: 'local', type: 'local', path: 'blobs' }],
       replication: 1,
@@ -192,6 +196,8 @@ const UPLOAD_TTL_MS = 24 * 3600_000;
 export class ProviderNode extends BaseNode<ProviderConfig> {
   readonly store: ContentStore;
   readonly service: StorageService;
+  /** Content storage tiers: which copies live where, and for how long. */
+  readonly tiers: TierManager;
   private uploads: JsonFile<{ uploads: Record<string, PendingUpload> }>;
   /** Content ids clients reported; the node learns what is out there from them. */
   private reports: JsonFile<{ ids: Record<string, { at: string; account: string }> }>;
@@ -203,6 +209,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private suggestions: JsonFile<{ items: Record<string, ProviderSuggestion & { signature: string }> }>;
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
   private gcTimer: NodeJS.Timeout;
+  private tierTimer: NodeJS.Timeout;
   private syncTimer: NodeJS.Timeout | null = null;
 
   constructor(options: NodeOptions<ProviderConfig>) {
@@ -216,7 +223,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.path('storage-service.json'),
       this.ledger,
       () => this.config.storageService,
-      (id, options) => this.store.getChunk(id, options)
+      (id, options) => this.store.getChunk(id, options),
+      // A holder that failed a retrieval is out of the job — the job's data is pulled from
+      // the URLs that account offered (its base URL endpoint or its full URL) instead.
+      (accountId, job) => {
+        if (job?.cid) void this.fetchContentUrl(job.cid, accountId).catch(() => undefined);
+      }
     );
     this.store = new ContentStore({
       indexPath: this.path('content-index.json'),
@@ -230,6 +242,21 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     });
     this.gcTimer = setInterval(() => void this.collectGarbage(), 15 * 60_000);
     this.gcTimer.unref();
+    this.tiers = new TierManager(this.path('tiers.json'), () => this.config.tiers, this.ledger, {
+      releaseBytes: (cid) => this.store.releaseContentBytes(cid),
+      deleteContent: (cid) => {
+        // A content without local memory keeps no jobs either.
+        for (const job of this.service.jobs()) if (job.cid === cid) this.service.deleteJob(job.id);
+        return this.store.deleteContent(cid);
+      },
+      holders: (cid) => this.service.holdersOf(cid),
+      bytesOf: (cid) => this.store.getContent(cid)?.size ?? 0,
+      // A tier change always reshapes the content's storage job (created, resized, deleted).
+      onChanged: (cid) => this.syncTierJob(cid),
+    });
+    // Tier lifecycles: expired assignments downgrade along their chain or are forgotten.
+    this.tierTimer = setInterval(() => void this.tiers.tick().catch((error) => log.warn('tier tick:', error)), 3_600_000);
+    this.tierTimer.unref();
   }
 
   backends(): BlobBackend[] {
@@ -319,6 +346,22 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       ids.add(backend.id);
     }
     if (config.pricing.creatorShare < 0 || config.pricing.creatorShare > 1) throw badRequest('creatorShare is between 0 and 1');
+    const tiers = config.tiers;
+    if (tiers) {
+      // A config without any tiers (an old or hand-edited one) always gets the stock plan
+      // back — content must always have something to be set to.
+      Object.assign(tiers, withDefaultTiers(tiers));
+      const tierIds = new Set<string>();
+      for (const tier of tiers.tiers ?? []) {
+        if (!tier.id || tierIds.has(tier.id)) throw badRequest('Storage tiers need unique ids');
+        if (tier.externalUrls < 0 || tier.pricePerMiB < 0 || tier.lifecycleDays < 0) throw badRequest('Tier numbers cannot be negative');
+        if (tier.downgradeTo && !(tiers.tiers ?? []).some((other) => other.id === tier.downgradeTo)) {
+          throw badRequest(`Tier ${tier.id} downgrades to a tier that does not exist`);
+        }
+        tierIds.add(tier.id);
+      }
+      if (tiers.tiers?.length && !tierIds.has(tiers.defaultTier)) throw badRequest('The default tier must be one of the tiers');
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -533,14 +576,54 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   /** Tries every accepted link for a cid, keeping the first whose content matches. */
-  private async fetchContentUrl(cid: string): Promise<boolean> {
-    for (const record of Object.values(this.contentUrls.data.items)) {
-      if (record.status !== 'accepted') continue;
+  /** Tries every accepted link for a cid, keeping the first whose content matches.
+   *  `preferAccount` walks one account's links first (the holder that just failed). */
+  private async fetchContentUrl(cid: string, preferAccount?: string): Promise<boolean> {
+    const records = Object.values(this.contentUrls.data.items)
+      .filter((record) => record.status === 'accepted')
+      .sort((a, b) => Number(b.account === preferAccount) - Number(a.account === preferAccount));
+    for (const record of records) {
       const url = record.cid === cid && record.url ? record.url : record.baseUrl ? `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` : undefined;
       if (!url) continue;
       if (await this.pullContentUrl(record, cid, url)) return true;
     }
     return false;
+  }
+
+  /**
+   * Checks that an endpoint really serves a content: downloads it and verifies the
+   * returned bytes against the expected hashes — every chunk of the content must hash
+   * into the stream (or the whole blob must hash to the id). Nothing is kept; this is
+   * a pure availability and integrity check.
+   */
+  async verifyEndpoint(cid: string, url: string): Promise<{ ok: boolean; url: string; bytes: number; error?: string }> {
+    const target = url.startsWith('http') && !url.includes(' ') && url.endsWith(cid) ? url : `${url.replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
+    let data: Buffer;
+    try {
+      const response = await fetch(target, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) return { ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}` };
+      data = Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      return { ok: false, url: target, bytes: 0, error: error instanceof Error ? error.message : String(error) };
+    }
+    const manifest = this.store.getManifest(cid);
+    if (manifest?.chunks.length) {
+      let start = 0;
+      const missing = manifest.chunks.filter((chunk) => {
+        const slice = data.subarray(start, start + chunk.size);
+        start += chunk.size;
+        return chunkIdOf(slice) !== chunk.id;
+      });
+      if (missing.length === 0) return { ok: true, url: target, bytes: data.length };
+      if (!bytesMatchCid(data, cid)) {
+        return { ok: false, url: target, bytes: data.length, error: `${missing.length} of ${manifest.chunks.length} chunks did not match the expected hashes` };
+      }
+      return { ok: true, url: target, bytes: data.length };
+    }
+    if (!bytesMatchCid(data, cid)) {
+      return { ok: false, url: target, bytes: data.length, error: 'The returned data does not match the expected hash' };
+    }
+    return { ok: true, url: target, bytes: data.length };
   }
 
   /**
@@ -828,6 +911,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       }
       items[record.id] = record;
       this.contentUrls.changed();
+      // An accepted URL is an external backup for its content's tier (the domain rule
+      // decides how much it counts for).
+      if (record.status === 'accepted' && record.cid && record.url) this.tiers.recordUrl(record.cid, record.url);
       return { record };
     });
 
@@ -867,7 +953,30 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (!record) throw notFound('No such content URL');
       if (body.status === 'accepted' || body.status === 'rejected') record.status = body.status;
       this.contentUrls.changed();
+      if (record.status === 'accepted' && record.cid && record.url) this.tiers.recordUrl(record.cid, record.url);
       return { record };
+    });
+
+    // Storage tiers: any user can see what tier a content is on and when its lifecycle
+    // ends, and send credits to raise the tier or extend the lifecycle.
+    router.get('/v1/content/:cid/tier', (ctx) => {
+      const cid = String(ctx.params.cid).split('~')[0];
+      // Content not assigned yet still shows its upgrade menu — a user can buy the first
+      // tier with credits through the same route.
+      const state = this.tiers.stateOf(cid) ?? this.tiers.preview(cid, this.store.getContent(cid)?.size ?? 0);
+      return { tier: state };
+    });
+    router.post('/v1/content/:cid/tier', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      const body = await readJson<{ tier?: string; extendDays?: number }>(ctx.req);
+      if (!body.tier && !(body.extendDays && body.extendDays > 0)) throw badRequest('tier or extendDays is required');
+      if (body.tier && !this.tiers.tier(body.tier)) throw badRequest('No such tier on this node');
+      try {
+        return this.tiers.chargeTier(account.id, cid, body);
+      } catch (error) {
+        throw badRequest((error as Error).message);
+      }
     });
 
     // A client that played content from outside the network reports its content id here;
@@ -1279,7 +1388,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const manifest = validateManifest(body.manifest);
       if (!manifest.vvsh) throw badRequest('This manifest carries no vvsh stream');
       await this.store.addContent(manifest, account.id);
-      return { cid: contentIdOf(manifest), status: 'ready' };
+      const cid = contentIdOf(manifest);
+      if (this.config.tiers.auto) this.tiers.assign(cid, this.store.getContent(cid)?.size ?? 0, manifest.meta?.title ?? manifest.name);
+      return { cid, status: 'ready' };
     });
 
     router.get('/v1/catalog', (ctx) => {
@@ -1312,6 +1423,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   private autoJob(cid: string, manifest: Manifest): void {
+    // With automatic tiers on, the content's tier decides the storage job (syncTierJob
+    // below runs when the tier assignment lands) — no second, plan-less job.
+    const assigned = this.config.tiers.auto
+      ? this.tiers.assign(cid, this.store.getContent(cid)?.size ?? 0, manifest.meta?.title ?? manifest.name)
+      : undefined;
+    if (assigned) return;
     const auto = this.config.storageService.auto;
     if (!this.config.storageService.enabled || !auto.enabled) return;
     this.service.createJob({
@@ -1325,12 +1442,54 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     });
   }
 
+  /**
+   * Keeps one storage job per tier-assigned content, shaped by the tier's plan: created
+   * when the content lands on a tier, resized when it changes tier, deleted with it.
+   * The job's replicas are the copies the plan wants (local media + URL backups).
+   */
+  private syncTierJob(cid: string): void {
+    // A tier change replaces the content's job wholesale — the old terms end and the
+    // plan's own job opens (or nothing, when no tier wants copies anymore).
+    for (const job of this.service.jobs()) {
+      if (job.cid === cid) this.service.deleteJob(job.id);
+    }
+    if (!this.config.tiers.enabled || !this.config.storageService.enabled) return;
+    const state = this.tiers.stateOf(cid);
+    const manifest = this.store.getManifest(cid);
+    if (!state || !manifest?.chunks.length) return;
+    const copies =
+      Object.values(state.plan.media).reduce((sum, count) => sum + count, 0) + (state.plan.externalUrls ?? 0);
+    if (copies <= 0) return;
+    this.service.createJob({
+      cid,
+      title: manifest.meta?.title ?? manifest.name,
+      chunks: manifest.chunks,
+      replicas: Math.max(1, copies),
+      durationSeconds: Math.max(86_400, (state.daysLeft ?? 90) * 86_400),
+      rewards: this.config.storageService.auto.rewards,
+      requireIdentity: this.config.storageService.auto.requireIdentity,
+      managed: true,
+    });
+  }
+
   private serviceRoutes(): void {
     const router = this.router;
     const base = '/v1/services/storage';
     router.get(`${base}/offers`, (ctx) => ({ offers: this.service.offers(this.auth.require(ctx)) }));
     router.post(`${base}/offers/:jobId/accept`, (ctx) => this.service.accept(this.auth.require(ctx), ctx.params.jobId));
-    router.get(`${base}/assignments`, (ctx) => ({ assignments: this.service.mine(this.auth.require(ctx)) }));
+    router.get(`${base}/assignments`, (ctx) => {
+      const account = this.auth.require(ctx);
+      return {
+        assignments: this.service.mine(account).map((assignment) => ({
+          ...assignment,
+          // The URL backups this account offers for the job's content (full URLs and
+          // base URLs, which serve any content).
+          links: Object.values(this.contentUrls.data.items)
+            .filter((record) => record.account === account.id && (!record.cid || record.cid === assignment.cid))
+            .map(({ id, url, baseUrl, status }) => ({ id, url, baseUrl, status })),
+        })),
+      };
+    });
     router.get(`${base}/assignments/:id/chunks/:chunkId`, async (ctx) => {
       const data = await this.service.assignmentChunk(this.auth.require(ctx), ctx.params.id, ctx.params.chunkId);
       ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length }).end(data);
@@ -1399,6 +1558,32 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           const stored = this.store.chunkRecord(chunk.id);
           return { id: chunk.id, size: chunk.size, backends: stored ? Object.keys(stored.locations) : [] };
         }),
+        // The storage picture of this content: its tier and lifecycle, every job made for
+        // it (with the accounts holding copies and the links those accounts offer), and
+        // the media its bytes sit on.
+        tier: this.tiers.stateOf(cid),
+        jobs: this.service
+          .jobs()
+          .filter((job) => job.cid === cid)
+          .map(({ chunkIds: _chunkIds, holders: _holders, assignments: _assignments, ...job }) => ({
+            ...job,
+            holders: this.service
+              .assignmentsForAdmin()
+              .filter((assignment) => assignment.jobId === job.id)
+              .map(({ chunkIds: _chunkIds, ...assignment }) => ({
+                ...assignment,
+                links: Object.values(this.contentUrls.data.items)
+                  .filter((record) => record.account === assignment.accountId)
+                  .map(({ id, cid: linkCid, url, baseUrl, status }) => ({ id, cid: linkCid, url, baseUrl, status })),
+              })),
+          })),
+        media: [...new Set((manifest?.chunks ?? []).flatMap((chunk) => Object.keys(this.store.chunkRecord(chunk.id)?.locations ?? {})))].map(
+          (id) => ({
+            id,
+            type: this.config.storage.backends.find((backend) => backend.id === id)?.type ?? 'unknown',
+            medium: this.config.tiers.media?.find((entry) => (entry.backends ?? []).includes(id))?.label,
+          })
+        ),
         suggestions: Object.values(this.suggestions.data.items)
           .filter((s) => s.contentId === cid)
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1590,6 +1775,56 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     router.post('/v1/admin/storage/jobs/:id/close', (ctx) => {
       this.requireAdmin(ctx);
       this.service.closeJob(ctx.params.id);
+      return { ok: true };
+    });
+    router.delete('/v1/admin/storage/jobs/:id', (ctx) => {
+      this.requireAdmin(ctx);
+      if (!this.service.deleteJob(ctx.params.id)) throw notFound('No such job');
+      return { ok: true };
+    });
+    // A live test of one storage job: ask a holder for a real chunk and pay its account
+    // the reward when the bytes hash exactly — a failure takes the holder out of the job.
+    router.post('/v1/admin/storage/jobs/:id/test', async (ctx) => {
+      this.requireAdmin(ctx);
+      const job = this.service.jobs().find((entry) => entry.id === ctx.params.id);
+      if (!job) throw notFound('No such job');
+      const body = await readJson<{ reward?: number }>(ctx.req).catch(() => ({} as { reward?: number }));
+      const reward = Number.isFinite(Number(body.reward)) && body.reward !== undefined ? Math.max(0, Number(body.reward)) : job.rewards.perRetrieval;
+      return { test: await this.service.testJob(job.id, reward) };
+    });
+    // Availability + integrity check: the endpoint must answer with bytes that hash to
+    // the expected id exactly.
+    router.post('/v1/admin/content/:cid/verify', async (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      const body = await readJson<{ url: string }>(ctx.req);
+      if (!body?.url) throw badRequest('Give the endpoint to check');
+      return { verify: await this.verifyEndpoint(cid, body.url) };
+    });
+    // Storage tiers: the assignments and the manual controls (the tier definitions
+    // themselves live in the config, edited through /v1/admin/config).
+    router.get('/v1/admin/tiers', (ctx) => {
+      this.requireAdmin(ctx);
+      return {
+        config: this.config.tiers,
+        assignments: this.tiers.assignments(),
+        backends: this.config.storage.backends.map((backend) => backend.id),
+      };
+    });
+    router.post('/v1/admin/tiers/:cid', async (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      const body = await readJson<{ tier?: string; extendDays?: number; title?: string }>(ctx.req);
+      if (body.tier) {
+        if (!this.tiers.tier(body.tier)) throw badRequest('No such tier on this node');
+        this.tiers.setTier(cid, body.tier, { manual: true });
+      }
+      if (body.extendDays && body.extendDays > 0) this.tiers.extend(cid, body.extendDays);
+      return { tier: this.tiers.stateOf(cid) };
+    });
+    router.delete('/v1/admin/tiers/:cid', async (ctx) => {
+      this.requireAdmin(ctx);
+      if (!(await this.tiers.forget(String(ctx.params.cid).split('~')[0]))) throw notFound('No tier assignment for that content');
       return { ok: true };
     });
     router.get('/v1/admin/storage/assignments', (ctx) => {

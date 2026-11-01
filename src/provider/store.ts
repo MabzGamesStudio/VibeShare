@@ -336,6 +336,28 @@ export class ContentStore {
     return true;
   }
 
+  /**
+   * Frees the local bytes of one content while keeping its manifest and index — the
+   * storage tiers call this when backups elsewhere hold the data. Downloads then come
+   * from external URL backups, client holders or peers.
+   */
+  async releaseContentBytes(cid: string): Promise<boolean> {
+    const manifest = this.getManifest(cid);
+    if (!manifest) return false;
+    const backends = this.options.backends();
+    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) {
+      const record = this.index.data.chunks[id];
+      if (!record) continue;
+      for (const [backendId, locator] of Object.entries(record.locations)) {
+        await backends.find((b) => b.id === backendId)?.delete(id, locator || undefined).catch(() => undefined);
+      }
+      record.locations = {};
+      this.cache.delete(id);
+    }
+    this.index.changed();
+    return true;
+  }
+
   /** Newest first. */
   list(offset: number, limit: number): ContentRecord[] {
     const order = this.index.data.order;

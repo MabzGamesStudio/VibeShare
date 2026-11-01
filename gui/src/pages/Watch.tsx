@@ -39,6 +39,7 @@ import { Markdown } from '../markdown';
 import { DownloadButton } from '../components/Download';
 import { SaveCidButton } from '../components/SaveCid';
 import { ShareButton } from '../components/Share';
+import { StorageTierCard } from '../components/StorageTier';
 import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, timeAgo } from '../util';
@@ -1091,6 +1092,7 @@ export function WatchPage() {
               <dd className="mono tiny">{view.id}</dd>
             </dl>
           </div>
+          <StorageTierCard cid={view.id} preferred={view.provider?.id} />
           {item?.notes && item.notes.length > 0 && (
             <div className="card">
               <h3>Why it is tagged</h3>

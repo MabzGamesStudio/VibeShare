@@ -268,6 +268,9 @@ export type AssignmentStatus = 'downloading' | 'active' | 'completed' | 'failed'
 export interface StorageAssignment {
   id: string;
   jobId: string;
+  /** What the job stores — its content id and title (undefined for nameless jobs). */
+  cid?: string;
+  title?: string;
   chunkIds: string[];
   bytes: number;
   status: AssignmentStatus;
@@ -276,6 +279,10 @@ export interface StorageAssignment {
   challenges: { passed: number; failed: number };
   retrievals: number;
   earned: number;
+  /** The URL backups this account offers for the job's content (provider's records). */
+  links?: { id: string; url?: string; baseUrl?: string; status: string }[];
+  /** What the client itself keeps on disk for this assignment (filled in client-side). */
+  local?: { files: number; chunks: number; bytes: number; complete: boolean };
 }
 
 export interface StorageTask {

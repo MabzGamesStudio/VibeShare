@@ -87,6 +87,41 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   // Downloadable content copies: offer a provider download URLs (with their cid) or base
   // URLs; it pays per download whose bytes hash to the cid exactly.
   on('GET', '/api/nodes/:id/content-urls', (request) => nodes.client(node(request)).json('/v1/content-urls/mine'));
+  // Storage tiers: what tier one content is on, its lifecycle, and paying to raise it.
+  on('GET', '/api/nodes/:id/tier/:cid', (request) => nodes.client(node(request)).json(`/v1/content/${encodeURIComponent(request.params.cid)}/tier`));
+  on('POST', '/api/nodes/:id/tier/:cid', async (request) => {
+    const body = await request.json<{ tier?: string; extendDays?: number }>();
+    return nodes.client(node(request)).json(`/v1/content/${encodeURIComponent(request.params.cid)}/tier`, { method: 'POST', body });
+  });
+  // Open storage jobs of a provider — each names the content id it wants stored. The
+  // Earn → Provider jobs tab fills its content id field from these.
+  on('GET', '/api/nodes/:id/storage-jobs', async (request) => {
+    const client = nodes.client(node(request));
+    const [offers, mine] = await Promise.all([
+      client.json<{ offers: { id: string; cid?: string; title?: string; bytes: number }[] }>('/v1/services/storage/offers'),
+      client.json<{ assignments: { id: string; jobId: string; cid?: string; title?: string; bytes: number; status: string }[] }>(
+        '/v1/services/storage/assignments'
+      ),
+    ]);
+    const cids = new Map<string, { cid: string; title?: string; bytes: number; jobId: string; source: 'open job' | 'your assignment' }>();
+    for (const offer of offers.offers ?? []) {
+      if (offer.cid) cids.set(offer.cid, { cid: offer.cid, title: offer.title, bytes: offer.bytes, jobId: offer.id, source: 'open job' });
+    }
+    // Jobs this account already holds are never in the offers list — they come from the
+    // assignments themselves (each names the content it stores).
+    for (const assignment of mine.assignments ?? []) {
+      if (assignment.cid && !cids.has(assignment.cid)) {
+        cids.set(assignment.cid, {
+          cid: assignment.cid,
+          title: assignment.title,
+          bytes: assignment.bytes,
+          jobId: assignment.jobId,
+          source: 'your assignment',
+        });
+      }
+    }
+    return { items: [...cids.values()] };
+  });
   on('POST', '/api/nodes/:id/content-urls', async (request) => {
     const entry = node(request);
     const body = await request.json<{ items?: { cid?: string; url?: string; baseUrl?: string }[] }>();

@@ -570,6 +570,19 @@ export interface ServiceStatus {
   log: { at: string; message: string }[];
 }
 
+/** The result of testing that the client really holds a job's data on disk. */
+export interface ServiceVerifyReport {
+  assignmentId: string;
+  jobId: string;
+  chunks: number;
+  /** Chunks on disk whose bytes hash to their id exactly. */
+  ok: number;
+  missing: string[];
+  corrupt: string[];
+  bytes: number;
+  complete: boolean;
+}
+
 export interface TopUp {
   invoice: Invoice;
 }

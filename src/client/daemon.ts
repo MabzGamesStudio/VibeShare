@@ -250,8 +250,13 @@ export class ClientNode {
     r.post('/api/tor/check', () => this.checkTor());
     r.get('/api/services', () => this.worker.status());
     r.post('/api/services/sync', async () => {
-      await this.worker.sync();
+      await this.worker.sync({ announce: true });
       return this.worker.status();
+    });
+    // "Test my copy": hash-check the data kept for one job (or all) against its chunk ids.
+    r.post('/api/services/verify', async (ctx) => {
+      const body = await readJson<{ providerId?: string; assignmentId?: string }>(ctx.req);
+      return { reports: await this.worker.verify(body.providerId, body.assignmentId) };
     });
 
     // Streaming and downloads (Range requests from <video>, <audio>, <img>, downloads)

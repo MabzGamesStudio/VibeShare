@@ -1,12 +1,113 @@
 import { HardDrive, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { ServiceStatus } from '../../../src/shared/clientapi';
-import type { ProviderInfo } from '../../../src/shared/protocol';
+import type { ServiceStatus, ServiceVerifyReport } from '../../../src/shared/clientapi';
+import type { ProviderInfo, StorageAssignment } from '../../../src/shared/protocol';
 import { api, IS_STATIC } from '../api';
 import { Chips, Empty, Loading, StatusDot, Switch, toggle } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, timeAgo } from '../util';
+
+const JOB_PAGE_SIZE = 5;
+
+/**
+ * The jobs this client stores for one provider, as paginated cards: what each job
+ * holds, the URL backups offered for it (or the local data when there are none), and
+ * a button that tests the local copy against the job's hashes.
+ */
+function JobList({ providerId, assignments }: { providerId: string; assignments: StorageAssignment[] }) {
+  const [page, setPage] = useState(0);
+  const [reports, setReports] = useState<Record<string, ServiceVerifyReport | 'busy'>>({});
+  const pages = Math.max(1, Math.ceil(assignments.length / JOB_PAGE_SIZE));
+  const current = Math.min(page, pages - 1);
+  return (
+    <div className="form-stack">
+      <div className="row between">
+        <h3 style={{ margin: 0 }}>Stored jobs</h3>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
+            Previous
+          </button>
+          <span className="small muted">
+            {current + 1} / {pages} · {assignments.length} job{assignments.length === 1 ? '' : 's'}
+          </span>
+          <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+            Next
+          </button>
+        </div>
+      </div>
+      {assignments.slice(current * JOB_PAGE_SIZE, current * JOB_PAGE_SIZE + JOB_PAGE_SIZE).map((a) => {
+        const report = reports[a.id];
+        return (
+          <div key={a.id} className="card form-stack">
+            <div className="row between">
+              <div>
+                <strong>{a.title ?? a.jobId.slice(0, 14) + '…'}</strong>
+                {a.cid ? <div className="mono tiny faint">{a.cid}</div> : null}
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <span className={`badge ${a.status === 'active' || a.status === 'completed' ? 'ok' : a.status === 'failed' ? 'danger' : ''}`}>
+                  {a.status}
+                </span>
+                <button
+                  className="small"
+                  disabled={report === 'busy'}
+                  onClick={async () => {
+                    setReports((m) => ({ ...m, [a.id]: 'busy' }));
+                    try {
+                      const answer = await api<{ reports: ServiceVerifyReport[] }>('/api/services/verify', {
+                        method: 'POST',
+                        body: { providerId, assignmentId: a.id },
+                      });
+                      setReports((m) => ({ ...m, [a.id]: answer.reports[0] }));
+                    } catch {
+                      setReports((m) => {
+                        const { [a.id]: _gone, ...rest } = m;
+                        return rest;
+                      });
+                    }
+                  }}
+                >
+                  {report === 'busy' ? 'Testing…' : 'Test my copy'}
+                </button>
+              </div>
+            </div>
+            <div className="small muted">
+              {formatBytes(a.bytes)} · {a.challenges.passed} ✓ / {a.challenges.failed} ✗ challenges · {a.retrievals} retrievals · {a.earned}{' '}
+              credits
+            </div>
+            {a.links && a.links.length > 0 ? (
+              <div>
+                <div className="tiny faint">URL backups offered for this job</div>
+                {a.links.map((link) => (
+                  <div key={link.id} className="tiny mono">
+                    <span className={`badge ${link.status === 'accepted' ? 'ok' : link.status === 'rejected' ? 'danger' : ''}`}>{link.status}</span>{' '}
+                    {link.baseUrl ? `${link.baseUrl} (base URL)` : link.url}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="tiny faint">No URLs offered for this job — the data lives on this machine only.</div>
+            )}
+            <div className="tiny">
+              Local storage:{' '}
+              {a.local
+                ? `${a.local.files}/${a.local.chunks} chunks · ${formatBytes(a.local.bytes)}${a.local.complete ? ' · complete' : ' · incomplete'}`
+                : '…'}
+            </div>
+            {report && report !== 'busy' ? (
+              <div className={`tiny ${report.complete ? '' : 'danger'}`}>
+                {report.complete
+                  ? `✓ tested: all ${report.chunks} chunk${report.chunks === 1 ? '' : 's'} match the job's hashes (${formatBytes(report.bytes)})`
+                  : `✗ tested: ${report.ok} of ${report.chunks} chunks match — ${report.chunks - report.ok} missing or corrupt`}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 /** The web client cannot keep data for providers: it only runs while a page is open. */
 function StorageUnavailable() {
@@ -205,36 +306,7 @@ export function ProviderNodesTab() {
           {!status ? (
             <Loading />
           ) : mine && mine.assignments.length > 0 ? (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Job</th>
-                  <th>Size</th>
-                  <th>Status</th>
-                  <th>Challenges</th>
-                  <th>Retrievals</th>
-                  <th>Earned</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mine.assignments.slice(0, 20).map((a) => (
-                  <tr key={a.id}>
-                    <td className="mono tiny">{a.id}</td>
-                    <td className="small">{formatBytes(a.bytes)}</td>
-                    <td>
-                      <span className={`badge ${a.status === 'active' || a.status === 'completed' ? 'ok' : a.status === 'failed' ? 'danger' : ''}`}>
-                        {a.status}
-                      </span>
-                    </td>
-                    <td className="small">
-                      {a.challenges.passed} ✓ / {a.challenges.failed} ✗
-                    </td>
-                    <td className="small">{a.retrievals}</td>
-                    <td className="small">{a.earned}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <JobList providerId={mine.id} assignments={mine.assignments} />
           ) : null}
 
           {status && status.log.length > 0 && (

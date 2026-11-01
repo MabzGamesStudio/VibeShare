@@ -957,6 +957,7 @@ export function AdminApp() {
       ? ([
           ['content', 'Content'],
           ['storage', 'Storage'],
+          ['tiers', 'Tiers'],
         ] as [string, string][])
       : ([
           [
