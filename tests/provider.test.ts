@@ -95,6 +95,22 @@ describe('provider node', async () => {
     await admin(url, `/v1/admin/content/${cid}`, { method: 'DELETE' });
     assert.equal(provider.store.hasChunk(manifest.chunks[0].id), false);
   });
+
+  it('adds content uploaded from the admin GUI (file picker or drop)', async () => {
+    const body = randomBytesOf(3000);
+    const response = await fetch(`${url}/v1/admin/content/upload?name=dropped.bin`, {
+      method: 'POST',
+      headers: { 'x-admin-token': provider.adminToken },
+      body,
+    });
+    assert.equal(response.status, 200);
+    const { cid: uploaded } = (await response.json()) as { cid: string };
+    const list = await admin<{ items: { cid: string; name: string; size: number }[] }>(url, '/v1/admin/content?limit=50');
+    const row = list.items.find((item) => item.cid === uploaded);
+    assert.ok(row, 'the uploaded file shows up in the content list');
+    assert.equal(row.name, 'dropped.bin');
+    assert.equal(row.size, 3000);
+  });
 });
 
 describe('a provider rewarding content reports', async () => {

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import { CopyButton, Loading, Modal, StatusDot, Switch } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
-import { admin, adminBytes, message } from './api';
+import { admin, adminBytes, adminUpload, message } from './api';
 import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
 import { base64url } from '../../../src/shared/encoding.js';
 import { assembleVvshWebm, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
@@ -24,6 +24,33 @@ interface ContentRow {
   duplicates?: string[];
 }
 
+type UploadItem = { file: Blob; name: string };
+
+/** Files picked in the file/folder picker (a folder's files come with their relative path). */
+function fromInput(list: FileList | null): UploadItem[] {
+  return [...(list ?? [])].map((file) => ({
+    file,
+    name: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+  }));
+}
+
+/** Walks a dropped folder (or takes one dropped file) and collects every file inside. */
+async function collectDropped(entry: FileSystemEntry, out: UploadItem[], prefix = ''): Promise<void> {
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
+    out.push({ file, name: `${prefix}${file.name}` });
+    return;
+  }
+  if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!batch.length) break;
+      for (const child of batch) await collectDropped(child, out, `${prefix}${entry.name}/`);
+    }
+  }
+}
+
 function Content() {
   const [rows, setRows] = useState<ContentRow[] | null>(null);
   const [pageStart, setPageStart] = useState(0);
@@ -31,10 +58,13 @@ function Content() {
   const [nextOffset, setNextOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [search, setSearch] = useState('');
-  const [job, setJob] = useState<ContentRow | null>(null);
   const [details, setDetails] = useState<string | null>(null);
-  const [form, setForm] = useState({ replicas: '2', durationDays: '30', upfront: '5', perRetrieval: '1', perChallenge: '1', completion: '20' });
+  const [menu, setMenu] = useState(false);
+  const [panel, setPanel] = useState<'import' | 'suggestions' | null>(null);
   const [importPath, setImportPath] = useState('');
+  const [uploading, setUploading] = useState('');
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const folderInput = useRef<HTMLInputElement | null>(null);
   const [toast, show] = useToast();
 
   // One page at a time (Newer/Older), or lazy: Load more appends the next page below.
@@ -55,32 +85,40 @@ function Content() {
     load(0, false);
   }, [load]);
 
+  // Files and folders dropped in (or picked by) the import panel, uploaded one by one.
+  const upload = async (items: UploadItem[]) => {
+    if (!items.length) return;
+    try {
+      for (let i = 0; i < items.length; i++) {
+        setUploading(`Uploading ${items[i].name} (${i + 1} of ${items.length})…`);
+        await adminUpload('/v1/admin/content/upload', items[i].file, items[i].name);
+      }
+      show(`Added ${items.length} file${items.length === 1 ? '' : 's'}`);
+      load(pageStart, false);
+    } catch (e) {
+      show(message(e));
+    } finally {
+      setUploading('');
+    }
+  };
+
+  const onDrop = async (event: DragEvent) => {
+    event.preventDefault();
+    const items: UploadItem[] = [];
+    const entries = [...event.dataTransfer.items]
+      .map((item) => item.webkitGetAsEntry?.() ?? null)
+      .filter((entry): entry is FileSystemEntry => Boolean(entry));
+    if (entries.length) {
+      for (const entry of entries) await collectDropped(entry, items);
+    } else {
+      items.push(...fromInput(event.dataTransfer.files));
+    }
+    await upload(items);
+  };
+
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
-      <div className="card form-stack">
-        <h3>Add a file from this machine</h3>
-        <p className="small muted">Path of a file on the computer running the node. Anyone can also upload through a VibeShare client (Publish).</p>
-        <div className="row">
-          <input type="text" value={importPath} onChange={(e) => setImportPath(e.target.value)} placeholder="/srv/media/video.mp4" style={{ flex: 1 }} />
-          <button
-            className="primary"
-            disabled={!importPath.trim()}
-            onClick={async () => {
-              try {
-                const result = await admin<{ cid: string }>('/v1/admin/content/import', { body: { path: importPath.trim() } });
-                show(`Added ${result.cid}`);
-                setImportPath('');
-                load(pageStart, false);
-              } catch (e) {
-                show(message(e));
-              }
-            }}
-          >
-            Import
-          </button>
-        </div>
-      </div>
       <div className="row">
         <input
           type="search"
@@ -92,7 +130,113 @@ function Content() {
             setPageStart(0);
           }}
         />
+        <div style={{ position: 'relative' }}>
+          <button className="primary" onClick={() => setMenu((open) => !open)}>
+            Add ▾
+          </button>
+          {menu && (
+            <div
+              className="card form-stack"
+              style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 20, minWidth: 250, padding: 8, gap: 4 }}
+              onMouseLeave={() => setMenu(false)}
+            >
+              <button
+                className="small"
+                onClick={() => {
+                  setMenu(false);
+                  setPanel('import');
+                }}
+              >
+                Add a file from this machine
+              </button>
+              <button
+                className="small"
+                onClick={() => {
+                  setMenu(false);
+                  setPanel('suggestions');
+                }}
+              >
+                Client suggestions
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+      {panel === 'import' && (
+        <Modal title="Add a file from this machine" onClose={() => setPanel(null)}>
+          <div className="form-stack">
+            <p className="small muted">
+              Path of a file on the computer running the node — or drop files and folders here. Anyone can also upload through a VibeShare
+              client (Publish).
+            </p>
+            <div className="row">
+              <input
+                type="text"
+                value={importPath}
+                onChange={(e) => setImportPath(e.target.value)}
+                placeholder="/srv/media/video.mp4"
+                style={{ flex: 1 }}
+              />
+              <button
+                className="primary"
+                disabled={!importPath.trim()}
+                onClick={async () => {
+                  try {
+                    const result = await admin<{ cid: string }>('/v1/admin/content/import', { body: { path: importPath.trim() } });
+                    show(`Added ${result.cid}`);
+                    setImportPath('');
+                    load(pageStart, false);
+                  } catch (e) {
+                    show(message(e));
+                  }
+                }}
+              >
+                Import
+              </button>
+            </div>
+            <div
+              className="card"
+              style={{ textAlign: 'center', padding: 24, border: '1px dashed var(--border)' }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => void onDrop(e)}
+            >
+              <p className="small muted" style={{ margin: 0 }}>
+                Drop files or folders here
+              </p>
+              <div className="row" style={{ justifyContent: 'center', marginTop: 10 }}>
+                <button onClick={() => fileInput.current?.click()}>Upload files</button>
+                <button onClick={() => folderInput.current?.click()}>Upload folder</button>
+              </div>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  void upload(fromInput(e.target.files));
+                  e.target.value = '';
+                }}
+              />
+              <input
+                ref={folderInput}
+                type="file"
+                hidden
+                {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                onChange={(e) => {
+                  void upload(fromInput(e.target.files));
+                  e.target.value = '';
+                }}
+              />
+            </div>
+            {uploading && <div className="small muted">{uploading}</div>}
+          </div>
+        </Modal>
+      )}
+      {panel === 'suggestions' && (
+        <Modal title="Client suggestions" onClose={() => setPanel(null)} wide>
+          <Suggestions />
+        </Modal>
+      )}
       {!rows ? (
         <Loading />
       ) : (
@@ -123,7 +267,9 @@ function Content() {
                     <div className="tiny faint">
                       {row.mime} · {timeAgo(row.createdAt)}
                     </div>
-                    <div className="mono tiny faint">{row.cid.slice(0, 24)}…</div>
+                    <div className="mono tiny faint" title={row.cid}>
+                      {row.cid.slice(-8)}
+                    </div>
                     {(row.sources?.length ?? 0) + (row.duplicates?.length ?? 0) > 0 && (
                       <div className="tiny faint">
                         {row.sources?.length ? `${row.sources.length} suggested source${row.sources.length === 1 ? '' : 's'}` : ''}
@@ -142,22 +288,6 @@ function Content() {
                   <td>
                     <div className="row">
                       <CopyButton text={row.cid} label="Id" />
-                      <button className="small" onClick={() => setJob(row)}>
-                        Storage job
-                      </button>
-                      <button
-                        className="small"
-                        onClick={async () => {
-                          const value = window.prompt('Credits per MiB for this content (empty = node default)');
-                          if (value === null) return;
-                          await admin(`/v1/admin/content/${row.cid}/price`, { body: { perMiB: value === '' ? null : Number(value) } }).catch((e) =>
-                            show(message(e))
-                          );
-                          show('Price updated');
-                        }}
-                      >
-                        Price
-                      </button>
                       <button
                         className="small danger"
                         onClick={async () => {
@@ -211,63 +341,7 @@ function Content() {
           Load more
         </button>
       </div>
-      {job && (
-        <Modal
-          title="Pay clients to store this"
-          onClose={() => setJob(null)}
-          actions={
-            <button
-              className="primary"
-              onClick={async () => {
-                try {
-                  await admin('/v1/admin/storage/jobs', {
-                    body: {
-                      cid: job.cid,
-                      replicas: Number(form.replicas),
-                      durationDays: Number(form.durationDays),
-                      rewards: {
-                        upfront: Number(form.upfront),
-                        perRetrieval: Number(form.perRetrieval),
-                        perChallenge: Number(form.perChallenge),
-                        completion: Number(form.completion),
-                      },
-                    },
-                  });
-                  show('Storage job created');
-                  setJob(null);
-                } catch (e) {
-                  show(message(e));
-                }
-              }}
-            >
-              Create job
-            </button>
-          }
-        >
-          <p className="small muted" style={{ marginBottom: 12 }}>
-            Client nodes with the storage service on keep copies of {job.title ?? job.name} ({formatBytes(job.size)}) and earn these credits.
-          </p>
-          <div className="form-grid">
-            {(
-              [
-                ['replicas', 'Copies'],
-                ['durationDays', 'Days'],
-                ['upfront', 'Upfront (after first proof)'],
-                ['perRetrieval', 'Per retrieval'],
-                ['perChallenge', 'Per passed challenge'],
-                ['completion', 'At the end of the term'],
-              ] as const
-            ).map(([key, label]) => (
-              <label key={key} className="field">
-                {label}
-                <input type="number" min={0} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
-              </label>
-            ))}
-          </div>
-        </Modal>
-      )}
       {details && <ContentDetails cid={details} onClose={() => setDetails(null)} />}
-      <Suggestions />
     </div>
   );
 }
@@ -360,7 +434,8 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
       ) : !data ? (
         <Loading />
       ) : (
-        <div className="form-stack">
+        <div className="form-stack" style={{ paddingBottom: 28 }}>
+          {toast && <div className="banner info small">{toast}</div>}
           <div>
             <h3>{data.record.title ?? meta.title ?? data.record.name}</h3>
             <div className="mono tiny faint">{data.record.cid}</div>
@@ -390,7 +465,9 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             <dt>Uploader</dt>
             <dd className="mono tiny">{data.record.uploader}</dd>
             <dt>Added</dt>
-            <dd>{timeAgo(data.record.createdAt)}</dd>
+            <dd>
+              {new Date(data.record.createdAt).toLocaleString()} <span className="faint">({timeAgo(data.record.createdAt)})</span>
+            </dd>
             <dt>Downloads</dt>
             <dd>
               {data.record.downloads} ({formatBytes(data.record.bytesServed)} served, {data.record.creditsEarned} credits earned)
@@ -399,26 +476,24 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
               <>
                 <dt>Creator</dt>
                 <dd>
-                  {data.manifest.creator.name ?? data.manifest.creator.id} ({data.manifest.creator.kind ?? 'unknown'})
-                </dd>
-              </>
-            )}
-            {meta.format && (
-              <>
-                <dt>Metadata</dt>
-                <dd>
-                  {meta.format}
-                  {meta.rating ? ` · ${meta.rating}` : ''}
-                  {meta.durationSeconds ? ` · ${Math.round(meta.durationSeconds)}s` : ''}
-                  {meta.topics?.length ? ` · ${meta.topics.join(', ')}` : ''}
-                  {meta.tags?.length ? ` · ${meta.tags.map((tag) => `#${tag}`).join(' ')}` : ''}
+                  {data.manifest.creator.name ?? data.manifest.creator.id}
+                  {data.manifest.creator.name ? <span className="mono tiny faint"> · {data.manifest.creator.id}</span> : null}
                 </dd>
               </>
             )}
             <dt>Sources</dt>
             <dd>{sources.length ? sources.join(' · ') : 'None'}</dd>
             <dt>Duplicates</dt>
-            <dd>{data.record.duplicates?.length ? data.record.duplicates.join(' · ') : 'None reported'}</dd>
+            <dd>
+              <textarea
+                readOnly
+                rows={3}
+                className="mono tiny"
+                style={{ width: '100%', resize: 'vertical' }}
+                value={(data.record.duplicates ?? []).join('\n')}
+                placeholder="None reported"
+              />
+            </dd>
           </dl>
           {meta.description && <p className="small">{meta.description}</p>}
           {showVvsh && data.manifest?.vvsh && <VvshModal vvsh={data.manifest.vvsh} onClose={() => setShowVvsh(false)} />}
@@ -451,34 +526,32 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             >
               Send content to peers
             </button>
-            {toast && <span className="small">{toast}</span>}
           </div>
           <div>
             <h3>Storage tier</h3>
             {tier && tier.tier ? (
               <>
-                <div className="row between small" style={{ marginTop: 6 }}>
+                <div className="small" style={{ marginTop: 6 }}>
                   <strong>{tier.label}</strong>
-                  <span className="muted">
+                  <div className="muted">
                     {[
                       ...Object.entries(tier.plan.media)
                         .filter(([, count]) => count > 0)
                         .map(([medium, count]) => `${count}× ${medium}`),
                       ...(tier.plan.externalUrls > 0 ? [`${tier.plan.externalUrls} URL backups`] : []),
                     ].join(' · ') || 'no copies planned'}
-                  </span>
+                  </div>
                 </div>
                 <div className="small muted">
-                  Lifecycle: {tier.expiresAt ? `ends ${new Date(tier.expiresAt).toLocaleDateString()}` : 'no expiry'}
+                  Lifecycle: {tier.expiresAt ? `${new Date(tier.expiresAt).toLocaleString()} (${timeAgo(tier.expiresAt)})` : 'no expiry'}
                   {tier.daysLeft !== undefined ? ` · ${tier.daysLeft} day${tier.daysLeft === 1 ? '' : 's'} left` : ''}
-                  {tier.manual ? ' · set by hand' : ''}
                 </div>
                 <div className="small muted">
                   URL backups: {tier.backups.urls} on {tier.backups.domains.length} domain
                   {tier.backups.domains.length === 1 ? '' : 's'} {tier.backups.satisfied ? '· satisfied' : '· still wanted'}
                   {tier.backups.note ? ` — ${tier.backups.note}` : ''}
                 </div>
-                <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                   <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
                     Tier
                     <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
@@ -488,10 +561,6 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
                         </option>
                       ))}
                     </select>
-                  </label>
-                  <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
-                    Extend (days)
-                    <input type="number" min={0} value={extendDays} onChange={(e) => setExtendDays(e.target.value)} />
                   </label>
                   <button
                     className="small"
@@ -503,6 +572,10 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
                   >
                     {tier.tier ? 'Set tier' : 'Add to tier'}
                   </button>
+                  <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                    Extend (days)
+                    <input type="number" min={0} value={extendDays} onChange={(e) => setExtendDays(e.target.value)} />
+                  </label>
                   <button
                     className="small"
                     disabled={!(Number(extendDays) > 0)}
@@ -518,11 +591,12 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
                   <button
                     className="small danger"
                     onClick={async () => {
+                      if (!window.confirm('Delete this content and its tier assignment?')) return;
                       await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
                       load();
                     }}
                   >
-                    Forget
+                    Delete
                   </button>
                 </div>
               </>
@@ -589,13 +663,15 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
             ) : (
               (data.jobs ?? []).map((job) => (
                 <div key={job.id} style={{ marginTop: 8 }}>
-                  <div className="row between small">
+                  <div className="small">
                     <strong>{job.title ?? job.id.slice(0, 12) + '…'}</strong>
-                    <span className="muted">
+                    {job.managed ? <span className="badge ok" style={{ marginLeft: 8 }}>automatic</span> : null}
+                    <div className="muted">
                       {formatBytes(job.bytes)} · {job.replicas} cop{job.replicas === 1 ? 'y' : 'ies'} · {Math.round(job.durationSeconds / 86400)} days ·{' '}
                       {job.status}
-                    </span>
-                    {job.managed ? <span className="badge ok">automatic</span> : null}
+                    </div>
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 4 }}>
                     <button
                       className="small"
                       title="Ask a holder for a real chunk and pay its account the reward when the bytes match"

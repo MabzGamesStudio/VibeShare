@@ -1,4 +1,8 @@
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { createWriteStream } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { pipeline } from 'node:stream/promises';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import { defaultCryptoPaymentConfigs } from '../commerce/payments.js';
 import type { Account } from '../commerce/ledger.js';
@@ -1721,6 +1725,19 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const body = await readJson<{ path?: string; name?: string; mime?: string; meta?: Manifest['meta']; sources?: string[] }>(ctx.req);
       if (!body.path) throw badRequest('path is required');
       return this.importFile(body.path, body);
+    });
+    // A file dropped into (or picked by) the admin GUI: streamed to this machine's temp
+    // directory and imported exactly like a local path.
+    router.post('/v1/admin/content/upload', async (ctx) => {
+      this.requireAdmin(ctx);
+      const name = String(ctx.query.get('name') ?? '').trim() || 'upload.bin';
+      const tmp = join(tmpdir(), `vibeshare-upload-${randomId('up', 12)}`);
+      try {
+        await pipeline(ctx.req, createWriteStream(tmp));
+        return await this.importFile(tmp, { name });
+      } finally {
+        await rm(tmp, { force: true }).catch(() => undefined);
+      }
     });
     router.post('/v1/admin/content/:cid/price', async (ctx) => {
       this.requireAdmin(ctx);

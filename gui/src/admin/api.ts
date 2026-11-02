@@ -45,6 +45,19 @@ export async function adminBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+/** Uploads raw bytes to the node (a file picked or dropped in the admin GUI). */
+export async function adminUpload<T>(path: string, file: Blob, name: string): Promise<T> {
+  const response = await fetch(`${path}${path.includes('?') ? '&' : '?'}name=${encodeURIComponent(name)}`, {
+    method: 'POST',
+    headers: { 'x-admin-token': current },
+    body: file,
+  });
+  const text = await response.text();
+  const parsed = text ? JSON.parse(text) : undefined;
+  if (!response.ok) throw new Error(parsed?.error?.message ?? `${response.status} ${response.statusText}`);
+  return parsed as T;
+}
+
 export function message(error: unknown): string {
   return (error as Error)?.message ?? String(error);
 }
