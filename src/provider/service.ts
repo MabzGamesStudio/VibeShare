@@ -16,6 +16,8 @@ export interface StorageServiceConfig {
   enabled: boolean;
   /** Seconds between proof-of-storage challenges per assignment. */
   challengeIntervalSeconds: number;
+  /** Seconds between automatic test retrievals per assignment (0 = only on demand). */
+  retrievalIntervalSeconds: number;
   /** Share of challenges an assignment must pass to earn the completion reward. */
   minPassRatio: number;
   /** A client that has not polled for this long counts as offline (its challenges fail). */
@@ -28,6 +30,9 @@ export interface StorageServiceConfig {
     replicas: number;
     durationDays: number;
     rewards: StorageRewards;
+    /** Challenge and retrieval schedule of the jobs this node opens by itself. */
+    challengeIntervalSeconds: number;
+    retrievalIntervalSeconds: number;
     requireIdentity: boolean;
   };
 }
@@ -45,15 +50,21 @@ export interface StorageJob {
   createdAt: string;
   /** No new assignments after this time (undefined = open until closed). */
   openUntil?: string;
-  status: 'open' | 'closed';
+  status: 'open' | 'closed' | 'failed';
   /** True for the tier-driven job the node opens and resizes by itself. */
   managed?: boolean;
+  /** Seconds between proof-of-storage challenges (defaults to the service setting). */
+  challengeIntervalSeconds?: number;
+  /** Seconds between automatic test retrievals (0 or undefined = only on demand). */
+  retrievalIntervalSeconds?: number;
 }
 
 interface Assignment extends StorageAssignment {
   accountId: string;
   upfrontPaid: boolean;
   lastChallengeAt?: number;
+  /** When the last automatic test retrieval went out (schedule: job.retrievalIntervalSeconds). */
+  lastRetrievalAt?: number;
 }
 
 interface ServiceData {
@@ -124,6 +135,8 @@ export class StorageService {
     requireIdentity?: boolean;
     openUntil?: string;
     managed?: boolean;
+    challengeIntervalSeconds?: number;
+    retrievalIntervalSeconds?: number;
   }): StorageJob {
     if (!input.chunks.length) throw badRequest('A job needs at least one chunk');
     const unique = new Map(input.chunks.map((chunk) => [chunk.id, chunk.size]));
@@ -145,10 +158,22 @@ export class StorageService {
       openUntil: input.openUntil,
       status: 'open',
       managed: input.managed,
+      challengeIntervalSeconds: input.challengeIntervalSeconds,
+      retrievalIntervalSeconds: input.retrievalIntervalSeconds,
     };
     this.data.jobs[job.id] = job;
     this.store.changed();
     return job;
+  }
+
+  /** Updates one job's rewards and its challenge / retrieval schedule. */
+  updateJob(id: string, patch: { rewards?: Partial<StorageRewards>; challengeIntervalSeconds?: number; retrievalIntervalSeconds?: number }): void {
+    const job = this.data.jobs[id];
+    if (!job) throw notFound('No such job');
+    if (patch.rewards) job.rewards = { ...job.rewards, ...patch.rewards };
+    if (patch.challengeIntervalSeconds !== undefined) job.challengeIntervalSeconds = Math.max(30, Math.round(patch.challengeIntervalSeconds));
+    if (patch.retrievalIntervalSeconds !== undefined) job.retrievalIntervalSeconds = Math.max(0, Math.round(patch.retrievalIntervalSeconds));
+    this.store.changed();
   }
 
   closeJob(id: string): void {
@@ -180,12 +205,17 @@ export class StorageService {
    * id exactly. A passed test pays the holder `reward` credits; a failed one takes them
    * out of the job like any retrieval that does not answer.
    */
-  async testJob(jobId: string, reward: number): Promise<{ ok: boolean; account?: string; chunkId: string; credited: number; error?: string }> {
+  async testJob(
+    jobId: string,
+    reward: number
+  ): Promise<{ ok: boolean; account?: string; chunkId: string; chunkIndex: number; chunkCount: number; credited: number; error?: string }> {
     const job = this.data.jobs[jobId];
     if (!job) throw notFound('No such job');
-    const chunkId = job.chunkIds[Math.floor(Math.random() * job.chunkIds.length)];
+    const chunkIndex = Math.floor(Math.random() * job.chunkIds.length);
+    const chunkId = job.chunkIds[chunkIndex];
+    const chunkCount = job.chunkIds.length;
     const holders = Object.values(this.data.assignments).filter((a) => a.jobId === jobId && a.status === 'active');
-    if (!holders.length) return { ok: false, chunkId, credited: 0, error: 'No client holds this job yet' };
+    if (!holders.length) return { ok: false, chunkId, chunkIndex, chunkCount, credited: 0, error: 'No client holds this job yet' };
     const holder = holders[Math.floor(Math.random() * holders.length)];
     const data = await new Promise<Buffer | null>((resolve) => {
       const task = this.addTask({ type: 'retrieve', assignmentId: holder.id, accountId: holder.accountId, chunkId });
@@ -194,11 +224,19 @@ export class StorageService {
     });
     if (!data) {
       this.eliminate(holder);
-      return { ok: false, account: holder.accountId, chunkId, credited: 0, error: 'No answer in time — the holder is out of the job' };
+      return { ok: false, account: holder.accountId, chunkId, chunkIndex, chunkCount, credited: 0, error: 'No answer in time — the holder is out of the job' };
     }
     if (chunkIdOf(data) !== chunkId) {
       this.eliminate(holder);
-      return { ok: false, account: holder.accountId, chunkId, credited: 0, error: 'The bytes did not match the chunk — the holder is out of the job' };
+      return {
+        ok: false,
+        account: holder.accountId,
+        chunkId,
+        chunkIndex,
+        chunkCount,
+        credited: 0,
+        error: 'The bytes did not match the chunk — the holder is out of the job',
+      };
     }
     const credited = Math.max(0, Math.round(reward));
     if (credited > 0) {
@@ -206,7 +244,15 @@ export class StorageService {
       this.ledger.credit(holder.accountId, credited, 'storage test', holder.id);
       this.store.changed();
     }
-    return { ok: true, account: holder.accountId, chunkId, credited };
+    return { ok: true, account: holder.accountId, chunkId, chunkIndex, chunkCount, credited };
+  }
+
+  /** Marks a job failed: no endpoint and no holder could serve its data any more. */
+  failJob(id: string): void {
+    const job = this.data.jobs[id];
+    if (!job || job.status === 'failed') return;
+    job.status = 'failed';
+    this.store.changed();
   }
 
   jobs(): (StorageJob & { holders: number; assignments: number })[] {
@@ -526,7 +572,25 @@ export class StorageService {
         continue;
       }
       if (assignment.status !== 'active') continue;
-      const due = (assignment.lastChallengeAt ?? 0) + config.challengeIntervalSeconds * 1000 <= now;
+      const job = this.data.jobs[assignment.jobId];
+      // Automatic test retrievals: the holder hands the data back on a schedule, paid
+      // per retrieval like any other — and out of the job when it cannot.
+      const retrievalEvery = (job?.retrievalIntervalSeconds ?? 0) * 1000;
+      const outstandingRetrieval = [...this.tasks.values()].some(
+        (task) => task.assignmentId === assignment.id && task.type === 'retrieve'
+      );
+      if (
+        retrievalEvery > 0 &&
+        !outstandingRetrieval &&
+        now - (assignment.lastRetrievalAt ?? Date.parse(assignment.acceptedAt)) >= retrievalEvery
+      ) {
+        assignment.lastRetrievalAt = now;
+        this.store.changed();
+        const chunkId = assignment.chunkIds[Math.floor(Math.random() * assignment.chunkIds.length)];
+        this.addTask({ type: 'retrieve', assignmentId: assignment.id, accountId: assignment.accountId, chunkId });
+      }
+      const challengeEvery = (job?.challengeIntervalSeconds ?? config.challengeIntervalSeconds) * 1000;
+      const due = (assignment.lastChallengeAt ?? 0) + challengeEvery <= now;
       if (!due) continue;
       const outstanding = [...this.tasks.values()].some((task) => task.assignmentId === assignment.id && task.type === 'challenge');
       if (outstanding) continue;

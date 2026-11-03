@@ -31,6 +31,8 @@ export interface ContentRecord {
   sources?: string[];
   /** Content ids clients reported as duplicates of this one (helps dedupe/compression). */
   duplicates?: string[];
+  /** The creator shown in the dashboard (the signed manifest's creator is immutable). */
+  creatorEdit?: { id: string; name?: string };
 }
 
 interface IndexData {
@@ -393,6 +395,32 @@ export class ContentStore {
       bytes: contents.reduce((sum, record) => sum + record.size, 0),
       chunks: Object.keys(this.index.data.chunks).length,
     };
+  }
+
+  /** Chunks and bytes kept on each configured backend. */
+  backendStats(): Record<string, { items: number; bytes: number }> {
+    const stats: Record<string, { items: number; bytes: number }> = {};
+    for (const record of Object.values(this.index.data.chunks)) {
+      for (const backend of Object.keys(record.locations)) {
+        const entry = (stats[backend] ??= { items: 0, bytes: 0 });
+        entry.items++;
+        entry.bytes += record.size;
+      }
+    }
+    return stats;
+  }
+
+  /** Updates the editable display details of one content: creator, sources, duplicates. */
+  updateDetails(
+    cid: string,
+    patch: { creatorEdit?: { id: string; name?: string }; sources?: string[]; duplicates?: string[] }
+  ): void {
+    const record = this.index.data.contents[cid];
+    if (!record) return;
+    if (patch.creatorEdit !== undefined) record.creatorEdit = patch.creatorEdit;
+    if (patch.sources !== undefined) record.sources = patch.sources;
+    if (patch.duplicates !== undefined) record.duplicates = patch.duplicates;
+    this.index.changed();
   }
 
   flush(): void {

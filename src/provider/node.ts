@@ -167,6 +167,7 @@ export function providerDefaults(): ProviderConfig {
     storageService: {
       enabled: true,
       challengeIntervalSeconds: 900,
+      retrievalIntervalSeconds: 0,
       minPassRatio: 0.8,
       offlineGraceSeconds: 120,
       taskTimeoutSeconds: 30,
@@ -175,6 +176,8 @@ export function providerDefaults(): ProviderConfig {
         replicas: 2,
         durationDays: 30,
         rewards: { upfront: 5, perRetrieval: 1, perChallenge: 1, completion: 20 },
+        challengeIntervalSeconds: 900,
+        retrievalIntervalSeconds: 0,
         requireIdentity: false,
       },
     },
@@ -232,7 +235,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       // A holder that failed a retrieval is out of the job — the job's data is pulled from
       // the URLs that account offered (its base URL endpoint or its full URL) instead.
       (accountId, job) => {
-        if (job?.cid) void this.fetchContentUrl(job.cid, accountId).catch(() => undefined);
+        if (job?.cid) {
+          void this.fetchContentUrl(job.cid, accountId)
+            .then((ok) => {
+              // No endpoint worked and no holder is left: the job has nowhere to get its data.
+              if (!ok && this.service.holdersOf(job.cid!) === 0) this.service.failJob(job.id);
+            })
+            .catch(() => undefined);
+        }
       }
     );
     this.store = new ContentStore({
@@ -584,15 +594,37 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   /** Tries every accepted link for a cid, keeping the first whose content matches.
    *  `preferAccount` walks one account's links first (the holder that just failed). */
   private async fetchContentUrl(cid: string, preferAccount?: string): Promise<boolean> {
+    // Working endpoints are tried first: one that fails drops to the bottom of the list
+    // until it starts answering again. When none of them works, the caller fails the job.
     const records = Object.values(this.contentUrls.data.items)
       .filter((record) => record.status === 'accepted')
-      .sort((a, b) => Number(b.account === preferAccount) - Number(a.account === preferAccount));
+      .sort(
+        (a, b) =>
+          Number(b.account === preferAccount) - Number(a.account === preferAccount) ||
+          (a.fails ?? 0) - (b.fails ?? 0) ||
+          b.createdAt.localeCompare(a.createdAt)
+      );
     for (const record of records) {
       const url = record.cid === cid && record.url ? record.url : record.baseUrl ? `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` : undefined;
       if (!url) continue;
-      if (await this.pullContentUrl(record, cid, url)) return true;
+      if (await this.pullContentUrl(record, cid, url)) {
+        record.fails = 0;
+        this.contentUrls.changed();
+        return true;
+      }
+      record.fails = (record.fails ?? 0) + 1;
+      this.contentUrls.changed();
     }
     return false;
+  }
+
+  /** Where a backend keeps its bytes: a directory on disk, a bucket URL, an API URL. */
+  private backendLocation(id: string): string {
+    const backend = this.config.storage.backends.find((entry) => entry.id === id);
+    if (!backend) return id;
+    if (backend.type === 'local') return isAbsolute(backend.path) ? backend.path : (this.path(backend.path) ?? backend.path);
+    const remote = backend as { endpoint?: string; url?: string };
+    return String(remote.endpoint ?? remote.url ?? id);
   }
 
   /**
@@ -1472,6 +1504,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       replicas: Math.max(1, copies),
       durationSeconds: Math.max(86_400, (state.daysLeft ?? 90) * 86_400),
       rewards: this.config.storageService.auto.rewards,
+      challengeIntervalSeconds: this.config.storageService.auto.challengeIntervalSeconds,
+      retrievalIntervalSeconds: this.config.storageService.auto.retrievalIntervalSeconds,
       requireIdentity: this.config.storageService.auto.requireIdentity,
       managed: true,
     });
@@ -1521,7 +1555,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const offset = Math.max(0, Number(ctx.query.get('offset') ?? 0));
       const limit = Math.min(500, Math.max(1, Number(ctx.query.get('limit') ?? 100)));
       const q = (ctx.query.get('q') ?? '').trim().toLowerCase();
-      if (!q) return { items: this.store.list(offset, limit), stats: this.store.stats() };
+      if (!q) return { items: this.store.list(offset, limit), total: this.store.stats().contents, stats: this.store.stats() };
       // A search looks through the catalog (up to a sane cap) for the content id, the
       // file or title name, and the account that uploaded it.
       const matched = this.store
@@ -1533,7 +1567,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             (record.title ?? '').toLowerCase().includes(q) ||
             record.uploader.toLowerCase().includes(q)
         );
-      return { items: matched.slice(offset, offset + limit), stats: this.store.stats() };
+      return { items: matched.slice(offset, offset + limit), total: matched.length, stats: this.store.stats() };
     });
     // Everything the node knows about one content, for the dashboard's details modal.
     router.get('/v1/admin/content/:cid', (ctx) => {
@@ -1567,6 +1601,21 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         // it (with the accounts holding copies and the links those accounts offer), and
         // the media its bytes sit on.
         tier: this.tiers.stateOf(cid),
+        // Every URL backup offered for this content (or by base URL for any content),
+        // working endpoints first.
+        urls: Object.values(this.contentUrls.data.items)
+          .filter((record) => record.status === 'accepted' && (!record.cid || record.cid === cid))
+          .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0))
+          .map((record) => ({
+            id: record.id,
+            cid: record.cid,
+            url: record.url,
+            baseUrl: record.baseUrl,
+            status: record.status,
+            account: record.account,
+            fails: record.fails ?? 0,
+            location: record.url ?? `${record.baseUrl ?? ''}/${encodeURIComponent(cid)}`,
+          })),
         jobs: this.service
           .jobs()
           .filter((job) => job.cid === cid)
@@ -1579,7 +1628,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
                 ...assignment,
                 links: Object.values(this.contentUrls.data.items)
                   .filter((record) => record.account === assignment.accountId)
-                  .map(({ id, cid: linkCid, url, baseUrl, status }) => ({ id, cid: linkCid, url, baseUrl, status })),
+                  .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0))
+                  .map(({ id, cid: linkCid, url, baseUrl, status, fails }) => ({
+                    id,
+                    cid: linkCid,
+                    url,
+                    baseUrl,
+                    status,
+                    fails: fails ?? 0,
+                  })),
               })),
           })),
         media: [...new Set((manifest?.chunks ?? []).flatMap((chunk) => Object.keys(this.store.chunkRecord(chunk.id)?.locations ?? {})))].map(
@@ -1587,6 +1644,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             id,
             type: this.config.storage.backends.find((backend) => backend.id === id)?.type ?? 'unknown',
             medium: this.config.tiers.media?.find((entry) => (entry.backends ?? []).includes(id))?.label,
+            location: this.backendLocation(id),
           })
         ),
         suggestions: Object.values(this.suggestions.data.items)
@@ -1752,6 +1810,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     router.get('/v1/admin/storage/backends', async (ctx) => {
       this.requireAdmin(ctx);
       const priorities = Object.fromEntries(this.config.storage.backends.map((b) => [b.id, b.priority ?? 10]));
+      const stats = this.store.backendStats();
       const backends = await Promise.all(
         this.backends().map(async (backend) => ({
           id: backend.id,
@@ -1759,9 +1818,32 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           writable: backend.writable,
           priority: priorities[backend.id] ?? 10,
           status: await backend.check(),
+          items: stats[backend.id]?.items ?? 0,
+          bytes: stats[backend.id]?.bytes ?? 0,
         }))
       );
-      return { backends, replication: this.config.storage.replication };
+      // The URL backups ("user job urls") keep copies outside every backend.
+      const urls = Object.values(this.contentUrls.data.items).filter((record) => record.status === 'accepted');
+      const urlCids = new Set(urls.map((record) => record.cid).filter(Boolean) as string[]);
+      let urlBytes = 0;
+      for (const cid of urlCids) urlBytes += this.store.getContent(cid)?.size ?? 0;
+      return {
+        backends,
+        replication: this.config.storage.replication,
+        media: this.config.tiers.media,
+        urls: { items: urls.length, bytes: urlBytes },
+      };
+    });
+    // Update one job's rewards and its challenge / retrieval schedule.
+    router.post('/v1/admin/storage/jobs/:id', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{
+        rewards?: Partial<StorageRewards>;
+        challengeIntervalSeconds?: number;
+        retrievalIntervalSeconds?: number;
+      }>(ctx.req);
+      this.service.updateJob(ctx.params.id, body);
+      return { job: this.service.jobs().find((entry) => entry.id === ctx.params.id) };
     });
     router.get('/v1/admin/storage/jobs', (ctx) => {
       this.requireAdmin(ctx);
@@ -1811,13 +1893,34 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       return { test: await this.service.testJob(job.id, reward) };
     });
     // Availability + integrity check: the endpoint must answer with bytes that hash to
-    // the expected id exactly.
+    // the expected id exactly. A failing endpoint drops to the bottom of the try order.
     router.post('/v1/admin/content/:cid/verify', async (ctx) => {
       this.requireAdmin(ctx);
       const cid = String(ctx.params.cid).split('~')[0];
-      const body = await readJson<{ url: string }>(ctx.req);
+      const body = await readJson<{ url: string; linkId?: string }>(ctx.req);
       if (!body?.url) throw badRequest('Give the endpoint to check');
-      return { verify: await this.verifyEndpoint(cid, body.url) };
+      const verify = await this.verifyEndpoint(cid, body.url);
+      const record = body.linkId ? this.contentUrls.data.items[String(body.linkId)] : undefined;
+      if (record) {
+        record.fails = verify.ok ? 0 : (record.fails ?? 0) + 1;
+        this.contentUrls.changed();
+      }
+      return { verify };
+    });
+    // Edit the display details of one content: creator, sources and duplicates.
+    router.post('/v1/admin/content/:cid/details', async (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      if (!this.store.getContent(cid)) throw notFound('No such content');
+      const body = await readJson<{ creator?: { id?: string; name?: string }; sources?: string[]; duplicates?: string[] }>(ctx.req);
+      this.store.updateDetails(cid, {
+        creatorEdit: body.creator
+          ? { id: String(body.creator.id ?? '').slice(0, 300), name: String(body.creator.name ?? '').slice(0, 300) || undefined }
+          : undefined,
+        sources: Array.isArray(body.sources) ? body.sources.map((entry) => String(entry).slice(0, 500)).slice(0, 100) : undefined,
+        duplicates: Array.isArray(body.duplicates) ? body.duplicates.map((entry) => String(entry).slice(0, 500)).slice(0, 100) : undefined,
+      });
+      return { record: this.store.getContent(cid) };
     });
     // Storage tiers: the assignments and the manual controls (the tier definitions
     // themselves live in the config, edited through /v1/admin/config).

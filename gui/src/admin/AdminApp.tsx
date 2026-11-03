@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from
 import type { NodeInfo } from '../../../src/shared/protocol';
 import { CodeBox, Loading, Modal, Spinner } from '../components/ui';
 import { CryptoSafetyNotice } from '../components/CryptoSafetyNotice';
+import { postToast, ToastArea } from './toasts';
 import { formatBytes, timeAgo } from '../util';
 import { admin, loadToken, message, setToken } from './api';
 import { AlgorithmTabs } from './AlgorithmTabs';
@@ -20,12 +21,9 @@ export interface Status {
 }
 
 export function useToast(): [string | null, (text: string) => void] {
-  const [text, setText] = useState<string | null>(null);
-  const show = useCallback((value: string) => {
-    setText(value);
-    setTimeout(() => setText(null), 4000);
-  }, []);
-  return [text, show];
+  // Every message pops up at the bottom right (and stays in the Messages history)
+  // instead of being rendered inline — see admin/toasts.tsx.
+  return [null, postToast];
 }
 
 function Login({ onLogin }: { onLogin: () => void }) {
@@ -1133,6 +1131,7 @@ export function AdminApp() {
   const [status, setStatus] = useState<Status | null>(null);
   const [needsLogin, setNeedsLogin] = useState(!loadToken());
   const [tab, setTab] = useState('overview');
+  const [tabMenu, setTabMenu] = useState<{ top: number; left: number } | null>(null);
 
   const load = useCallback(() => {
     admin<Status>('/v1/admin/status')
@@ -1200,11 +1199,40 @@ export function AdminApp() {
         </button>
       </div>
       <div className="tabs">
-        {tabs.map(([id, label]) => (
-          <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => (setTab(id), load())}>
-            {label}
-          </button>
-        ))}
+        {tabs.map(([id, label]) =>
+          id === 'content' && provider ? (
+            // The Content tab still goes to the content list; hovering it shows the
+            // shortcuts to the "Add locally" and "Client suggestion" pages below.
+            // The menu is fixed-positioned so the scrolling tabs bar cannot clip it —
+            // it opens over the content at the top of the page.
+            <div
+              key={id}
+              className="tab-menu"
+              onMouseEnter={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setTabMenu({ top: rect.bottom, left: rect.left });
+              }}
+              onMouseLeave={() => setTabMenu(null)}
+            >
+              <button
+                className={`tab ${tab === id || tab === 'add-local' || tab === 'suggestions' ? 'on' : ''}`}
+                onClick={() => (setTabMenu(null), setTab(id), load())}
+              >
+                {label}
+              </button>
+              {tabMenu && (
+                <div className="tab-menu-items" style={{ position: 'fixed', top: tabMenu.top, left: tabMenu.left }}>
+                  <button onClick={() => (setTabMenu(null), setTab('add-local'), load())}>Add locally</button>
+                  <button onClick={() => (setTabMenu(null), setTab('suggestions'), load())}>Client suggestion</button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => (setTab(id), load())}>
+              {label}
+            </button>
+          )
+        )}
       </div>
       {tab === 'overview' && <Overview status={status} />}
       {tab === 'accounts' && (
@@ -1216,6 +1244,7 @@ export function AdminApp() {
       {tab === 'payments' && <Payments />}
       {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} />}
       {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}
+      <ToastArea />
     </div>
   );
 }

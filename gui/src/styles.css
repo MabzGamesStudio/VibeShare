@@ -926,6 +926,42 @@ table.table {
   border-bottom-color: var(--accent);
 }
 
+/* A tab that also has a hover menu with shortcuts (Content: Add locally / Client suggestion). */
+.tab-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.tab-menu-items {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 6px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.tab-menu-items button {
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tab-menu-items button:hover {
+  background: var(--bg-elev-2);
+}
+
 .progress {
   height: 8px;
   border-radius: 999px;

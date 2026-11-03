@@ -816,6 +816,8 @@ export interface ContentUrlRecord {
   downloads: number;
   earned: number;
   createdAt: string;
+  /** How many times in a row this endpoint failed to serve — working ones are tried first. */
+  fails?: number;
 }
 
 /** A place a client can fetch a cid from, offered when this node does not hold the bytes. */

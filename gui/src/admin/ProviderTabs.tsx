@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { UploadCloud } from 'lucide-react';
 import { CopyButton, Loading, Modal, StatusDot, Switch } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
 import { admin, adminBytes, adminUpload, message } from './api';
+import { ListControls, Pager, Sentinel, useConsoleList } from './paging';
 import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared/vvsh.js';
 import { base64url } from '../../../src/shared/encoding.js';
 import { assembleVvshWebm, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
@@ -51,41 +53,16 @@ async function collectDropped(entry: FileSystemEntry, out: UploadItem[], prefix 
   }
 }
 
-function Content() {
-  const [rows, setRows] = useState<ContentRow[] | null>(null);
-  const [pageStart, setPageStart] = useState(0);
-  const [pageSize, setPageSize] = useState(100);
-  const [nextOffset, setNextOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [search, setSearch] = useState('');
-  const [details, setDetails] = useState<string | null>(null);
-  const [menu, setMenu] = useState(false);
-  const [panel, setPanel] = useState<'import' | 'suggestions' | null>(null);
+/** Adding a file from this machine: drop or pick files and folders, or type a path. */
+function AddLocal() {
   const [importPath, setImportPath] = useState('');
   const [uploading, setUploading] = useState('');
+  const [over, setOver] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const folderInput = useRef<HTMLInputElement | null>(null);
   const [toast, show] = useToast();
 
-  // One page at a time (Newer/Older), or lazy: Load more appends the next page below.
-  const load = useCallback(
-    (offset: number, append: boolean) => {
-      admin<{ items: ContentRow[] }>(`/v1/admin/content?offset=${offset}&limit=${pageSize}${search ? `&q=${encodeURIComponent(search)}` : ''}`)
-        .then((r) => {
-          setRows((current) => (append && current ? [...current, ...r.items] : r.items));
-          setNextOffset(offset + r.items.length);
-          setHasMore(r.items.length >= pageSize);
-        })
-        .catch((e) => show(message(e)));
-    },
-    [pageSize, search, show]
-  );
-  useEffect(() => {
-    setPageStart(0);
-    load(0, false);
-  }, [load]);
-
-  // Files and folders dropped in (or picked by) the import panel, uploaded one by one.
+  // Files and folders dropped in (or picked), uploaded to the node one by one.
   const upload = async (items: UploadItem[]) => {
     if (!items.length) return;
     try {
@@ -94,7 +71,6 @@ function Content() {
         await adminUpload('/v1/admin/content/upload', items[i].file, items[i].name);
       }
       show(`Added ${items.length} file${items.length === 1 ? '' : 's'}`);
-      load(pageStart, false);
     } catch (e) {
       show(message(e));
     } finally {
@@ -104,6 +80,7 @@ function Content() {
 
   const onDrop = async (event: DragEvent) => {
     event.preventDefault();
+    setOver(false);
     const items: UploadItem[] = [];
     const entries = [...event.dataTransfer.items]
       .map((item) => item.webkitGetAsEntry?.() ?? null)
@@ -119,6 +96,115 @@ function Content() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
+      <div
+        className={`dropzone ${over ? 'over' : ''}`}
+        onClick={() => fileInput.current?.click()}
+        onDragOver={(e) => (e.preventDefault(), setOver(true))}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => void onDrop(e)}
+      >
+        <UploadCloud size={44} />
+        <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>Drop a file or folder, or click to choose</h2>
+        <p>Each file becomes its own content on this node. Anyone can also upload through a VibeShare client (Publish).</p>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            void upload(fromInput(e.target.files));
+            e.target.value = '';
+          }}
+        />
+        <input
+          ref={folderInput}
+          type="file"
+          hidden
+          {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+          onChange={(e) => {
+            void upload(fromInput(e.target.files));
+            e.target.value = '';
+          }}
+        />
+      </div>
+      {uploading && <div className="small muted">{uploading}</div>}
+      <div className="card form-stack">
+        <h3>Or set a path on this machine</h3>
+        <p className="small muted">Path of a file on the computer running the node.</p>
+        <div className="row">
+          <input type="text" value={importPath} onChange={(e) => setImportPath(e.target.value)} placeholder="/srv/media/video.mp4" style={{ flex: 1 }} />
+          <button
+            className="primary"
+            disabled={!importPath.trim()}
+            onClick={async () => {
+              try {
+                const result = await admin<{ cid: string }>('/v1/admin/content/import', { body: { path: importPath.trim() } });
+                show(`Added ${result.cid}`);
+                setImportPath('');
+              } catch (e) {
+                show(message(e));
+              }
+            }}
+          >
+            Import
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+/** The content list: search, lazy loading or pagination, and the details modal. */
+function Content() {
+  const [items, setItems] = useState<ContentRow[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [details, setDetails] = useState<string | null>(null);
+  const [toast, show] = useToast();
+  const { prefs, save: savePaging } = useConsoleList('content');
+
+  // Lazy loading appends the next page as you scroll; pagination takes one page at a time.
+  const fetchAt = useCallback(
+    async (offset: number, append: boolean) => {
+      setLoading(true);
+      try {
+        const r = await admin<{ items: ContentRow[]; total: number }>(
+          `/v1/admin/content?offset=${offset}&limit=${prefs.perPage}${search ? `&q=${encodeURIComponent(search)}` : ''}`
+        );
+        setItems((current) => (append && current ? [...current, ...r.items] : r.items));
+        setTotal(r.total ?? 0);
+      } catch (e) {
+        show(message(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [prefs.perPage, search, show]
+  );
+  useEffect(() => {
+    setPage(0);
+    void fetchAt(0, false);
+  }, [fetchAt]);
+
+  const pager =
+    items &&
+    prefs.paging === 'pages' && (
+      <Pager
+        page={page}
+        perPage={prefs.perPage}
+        total={total}
+        loading={loading}
+        go={(next) => {
+          setPage(next);
+          void fetchAt(next * prefs.perPage, false);
+        }}
+      />
+    );
+
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
       <div className="row">
         <input
           type="search"
@@ -127,117 +213,13 @@ function Content() {
           style={{ flex: 1 }}
           onChange={(e) => {
             setSearch(e.target.value);
-            setPageStart(0);
+            setPage(0);
           }}
         />
-        <div style={{ position: 'relative' }}>
-          <button className="primary" onClick={() => setMenu((open) => !open)}>
-            Add ▾
-          </button>
-          {menu && (
-            <div
-              className="card form-stack"
-              style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 20, minWidth: 250, padding: 8, gap: 4 }}
-              onMouseLeave={() => setMenu(false)}
-            >
-              <button
-                className="small"
-                onClick={() => {
-                  setMenu(false);
-                  setPanel('import');
-                }}
-              >
-                Add a file from this machine
-              </button>
-              <button
-                className="small"
-                onClick={() => {
-                  setMenu(false);
-                  setPanel('suggestions');
-                }}
-              >
-                Client suggestions
-              </button>
-            </div>
-          )}
-        </div>
+        <ListControls prefs={prefs} save={savePaging} />
       </div>
-      {panel === 'import' && (
-        <Modal title="Add a file from this machine" onClose={() => setPanel(null)}>
-          <div className="form-stack">
-            <p className="small muted">
-              Path of a file on the computer running the node — or drop files and folders here. Anyone can also upload through a VibeShare
-              client (Publish).
-            </p>
-            <div className="row">
-              <input
-                type="text"
-                value={importPath}
-                onChange={(e) => setImportPath(e.target.value)}
-                placeholder="/srv/media/video.mp4"
-                style={{ flex: 1 }}
-              />
-              <button
-                className="primary"
-                disabled={!importPath.trim()}
-                onClick={async () => {
-                  try {
-                    const result = await admin<{ cid: string }>('/v1/admin/content/import', { body: { path: importPath.trim() } });
-                    show(`Added ${result.cid}`);
-                    setImportPath('');
-                    load(pageStart, false);
-                  } catch (e) {
-                    show(message(e));
-                  }
-                }}
-              >
-                Import
-              </button>
-            </div>
-            <div
-              className="card"
-              style={{ textAlign: 'center', padding: 24, border: '1px dashed var(--border)' }}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => void onDrop(e)}
-            >
-              <p className="small muted" style={{ margin: 0 }}>
-                Drop files or folders here
-              </p>
-              <div className="row" style={{ justifyContent: 'center', marginTop: 10 }}>
-                <button onClick={() => fileInput.current?.click()}>Upload files</button>
-                <button onClick={() => folderInput.current?.click()}>Upload folder</button>
-              </div>
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => {
-                  void upload(fromInput(e.target.files));
-                  e.target.value = '';
-                }}
-              />
-              <input
-                ref={folderInput}
-                type="file"
-                hidden
-                {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-                onChange={(e) => {
-                  void upload(fromInput(e.target.files));
-                  e.target.value = '';
-                }}
-              />
-            </div>
-            {uploading && <div className="small muted">{uploading}</div>}
-          </div>
-        </Modal>
-      )}
-      {panel === 'suggestions' && (
-        <Modal title="Client suggestions" onClose={() => setPanel(null)} wide>
-          <Suggestions />
-        </Modal>
-      )}
-      {!rows ? (
+      {pager}
+      {!items ? (
         <Loading />
       ) : (
         <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -253,14 +235,14 @@ function Content() {
               </tr>
             </thead>
             <tbody>
-              {rows.length === 0 && (
+              {items.length === 0 && (
                 <tr>
                   <td colSpan={6} className="small muted">
                     No content matches.
                   </td>
                 </tr>
               )}
-              {rows.map((row) => (
+              {items.map((row) => (
                 <tr key={row.cid}>
                   <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(row.cid)}>
                     <strong>{row.title ?? row.name}</strong>
@@ -293,7 +275,7 @@ function Content() {
                         onClick={async () => {
                           if (!window.confirm(`Delete ${row.title ?? row.name} and its chunks from every backend?`)) return;
                           await admin(`/v1/admin/content/${row.cid}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                          load(pageStart, false);
+                          void fetchAt(prefs.paging === 'pages' ? page * prefs.perPage : 0, false);
                         }}
                       >
                         Delete
@@ -306,48 +288,24 @@ function Content() {
           </table>
         </div>
       )}
-      <div className="row">
-        <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
-          Per page
-          <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
-            {[25, 50, 100, 200, 500].map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          disabled={pageStart === 0}
-          onClick={() => {
-            const start = Math.max(0, pageStart - pageSize);
-            setPageStart(start);
-            load(start, false);
-          }}
-        >
-          Newer
-        </button>
-        <button
-          disabled={!hasMore}
-          onClick={() => {
-            const start = pageStart + pageSize;
-            setPageStart(start);
-            load(start, false);
-          }}
-        >
-          Older
-        </button>
-        <button disabled={!hasMore} onClick={() => load(nextOffset, true)}>
-          Load more
-        </button>
-      </div>
+      {items && prefs.paging === 'lazy' && (
+        <>
+          <Sentinel onMore={() => !loading && void fetchAt(items.length, true)} done={items.length >= total} />
+          {items.length < total && (
+            <p className="hint">
+              Scroll for more ({items.length} of {total})
+            </p>
+          )}
+        </>
+      )}
+      {pager}
       {details && <ContentDetails cid={details} onClose={() => setDetails(null)} />}
     </div>
   );
 }
 
 interface ContentDetailsData {
-  record: ContentRow & { chunks: number };
+  record: ContentRow & { chunks: number; creatorEdit?: { id: string; name?: string } };
   manifest?: {
     name: string;
     mime: string;
@@ -381,6 +339,8 @@ interface ContentDetailsData {
     status: string;
     createdAt: string;
     managed?: boolean;
+    challengeIntervalSeconds?: number;
+    retrievalIntervalSeconds?: number;
     rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
     holders: {
       id: string;
@@ -388,26 +348,435 @@ interface ContentDetailsData {
       status: string;
       acceptedAt: string;
       earned: number;
-      links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string }[];
+      links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string; fails?: number; location?: string }[];
     }[];
   }[];
-  media?: { id: string; type: string; medium?: string }[];
+  media?: { id: string; type: string; medium?: string; location?: string }[];
+  /** Accepted URL backups offered for this content (or by base URL for any content). */
+  urls?: { id: string; cid?: string; url?: string; baseUrl?: string; status: string; account: string; fails?: number; location?: string }[];
   suggestions?: SuggestionRow[];
+}
+
+/** Where each copy of one content should live by its tier plan: media and URL slots. */
+function StorageMediaRows({ data }: { data: ContentDetailsData }) {
+  const plan = data.tier?.plan;
+  const wanted: { kind: string; label: string }[] = [];
+  for (const [medium, count] of Object.entries(plan?.media ?? {})) {
+    for (let i = 0; i < (count ?? 0); i++) wanted.push({ kind: 'medium', label: medium });
+  }
+  for (let i = 0; i < (plan?.externalUrls ?? 0); i++) wanted.push({ kind: 'url', label: 'url' });
+  const media = data.media ?? [];
+  // Accepted URL backups (and links holders of the job offer) fill the url slots.
+  const links = [
+    ...(data.urls ?? []).filter((entry) => entry.status === 'accepted'),
+    ...(data.jobs ?? []).flatMap((job) => job.holders.flatMap((holder) => holder.links.filter((link) => link.status === 'accepted'))),
+  ];
+  let urlSlot = 0;
+  const rows: { name: string; active: boolean; location: string }[] = wanted.map((slot) => {
+    if (slot.kind === 'url') {
+      const link = links[urlSlot++];
+      const location = link?.location ?? (link ? (link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(data.record.cid)}`) : '');
+      return { name: 'url', active: Boolean(link), location };
+    }
+    const backend = media.find((entry) => (entry.medium ?? '').toLowerCase() === slot.label.toLowerCase() || entry.id === slot.label);
+    return { name: slot.label, active: Boolean(backend), location: backend?.location ?? backend?.id ?? '' };
+  });
+  // Anything actually stored outside the plan still shows up.
+  for (const entry of media) {
+    if (!rows.some((row) => row.location === (entry.location ?? entry.id))) {
+      rows.push({ name: entry.medium ?? entry.id, active: true, location: entry.location ?? entry.id });
+    }
+  }
+  if (!rows.length) {
+    return (
+      <p className="small muted" style={{ marginTop: 6 }}>
+        No local bytes — downloads come from URL backups, holders or peers.
+      </p>
+    );
+  }
+  return (
+    <table className="table" style={{ marginTop: 6 }}>
+      <tbody>
+        {rows.map((row, index) => (
+          <tr key={`${row.name}-${index}`}>
+            <td className="small">
+              <strong>{row.name}</strong>
+            </td>
+            <td>
+              <span className={`badge ${row.active ? 'ok' : ''}`}>{row.active ? 'active' : 'not stored'}</span>
+            </td>
+            <td className="mono tiny" style={{ overflowWrap: 'anywhere' }}>
+              {row.location || '—'}
+            </td>
+            <td>{row.location ? <CopyButton text={row.location} label="Location" /> : null}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** The storage jobs tab: one row per job (active or not), holders and their ordered endpoints. */
+function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
+  const [jobTests, setJobTests] = useState<Record<string, string>>({});
+  const [linkTests, setLinkTests] = useState<Record<string, string>>({});
+  const [toast, show] = useToast();
+
+  const testJob = async (job: NonNullable<ContentDetailsData['jobs']>[number]) => {
+    setJobTests((m) => ({ ...m, [job.id]: 'Testing…' }));
+    try {
+      const result = await admin<{
+        test: { ok: boolean; account?: string; chunkId: string; chunkIndex: number; chunkCount: number; credited: number; error?: string };
+      }>(`/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: {} });
+      const t = result.test;
+      setJobTests((m) => ({
+        ...m,
+        [job.id]: t.ok
+          ? `✓ holder ${t.account?.slice(0, 16)}… returned chunk ${t.chunkIndex + 1} of ${t.chunkCount} — hash matches (chunks have their own hashes, not the content id) — paid ${t.credited} credits`
+          : `✗ ${t.error ?? 'no answer'}`,
+      }));
+    } catch (e) {
+      setJobTests((m) => ({ ...m, [job.id]: `✗ ${message(e)}` }));
+    }
+  };
+
+  if (!(data.jobs ?? []).length) {
+    return (
+      <p className="small muted" style={{ marginTop: 6 }}>
+        No storage jobs for this content yet.
+      </p>
+    );
+  }
+  return (
+    <table className="table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Opened</th>
+          <th>Copies</th>
+          <th>Term</th>
+          <th>Rewards &amp; schedule</th>
+          <th />
+        </tr>
+      </thead>
+      <tbody>
+        {(data.jobs ?? []).map((job) => (
+          <Fragment key={job.id}>
+            <tr>
+              <td>
+                <span className={`badge ${job.status === 'failed' ? 'warn' : job.status === 'open' ? 'accent' : ''}`}>{job.status}</span>
+                {job.managed ? (
+                  <span className="badge ok" style={{ marginLeft: 6 }}>
+                    automatic
+                  </span>
+                ) : null}
+              </td>
+              <td className="small">{timeAgo(job.createdAt)}</td>
+              <td className="small">{job.replicas}</td>
+              <td className="small">{Math.round(job.durationSeconds / 86400)} days</td>
+              <td className="tiny faint">
+                {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/challenge ·{' '}
+                {job.rewards.completion} end · challenge every {Math.round((job.challengeIntervalSeconds ?? 900) / 60)}m · test retrieval every{' '}
+                {Math.round((job.retrievalIntervalSeconds ?? 0) / 60)}m
+              </td>
+              <td>
+                <div className="row">
+                  {job.holders.some((holder) => holder.status === 'active') && (
+                    <button
+                      className="small"
+                      title="Ask a holder for a real chunk and pay its account the reward when the bytes match"
+                      onClick={() => void testJob(job)}
+                    >
+                      Test job
+                    </button>
+                  )}
+                  <button
+                    className="small danger"
+                    onClick={async () => {
+                      if (!window.confirm('Delete this storage job and every assignment under it?')) return;
+                      await admin(`/v1/admin/storage/jobs/${job.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                      reload();
+                    }}
+                  >
+                    Delete job
+                  </button>
+                </div>
+                {jobTests[job.id] ? (
+                  <div className="tiny" style={{ marginTop: 4 }}>
+                    {jobTests[job.id]}
+                  </div>
+                ) : null}
+              </td>
+            </tr>
+
+            {job.holders.map((holder) => {
+              const links = [...holder.links].sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0));
+              const allFailed = links.length > 0 && links.every((link) => (link.fails ?? 0) > 0);
+              const failed = holder.status === 'failed' || allFailed;
+              return (
+                <tr key={holder.id}>
+                  <td colSpan={6}>
+                    <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span className={`badge ${failed ? 'warn' : holder.status === 'active' ? 'ok' : ''}`}>
+                        {failed ? 'failed' : holder.status}
+                      </span>
+                      <span className="mono tiny">{holder.accountId}</span>
+                      <span className="tiny faint">{holder.earned} credits earned</span>
+                    </div>
+                    <div style={{ marginTop: 4 }}>
+                      {links.map((link, index) => {
+                        const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(cid)}`;
+                        const bad = (link.fails ?? 0) > 0;
+                        return (
+                          <div key={link.id} className="tiny" style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span className="faint">#{index + 1}</span>
+                            <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'accepted'}</span>
+                            <span className="mono" style={{ overflowWrap: 'anywhere' }}>
+                              {location}
+                            </span>
+                            <button
+                              className="small"
+                              onClick={async () => {
+                                setLinkTests((m) => ({ ...m, [link.id]: 'Checking…' }));
+                                try {
+                                  const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
+                                    `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
+                                    { method: 'POST', body: { url: location, linkId: link.id } }
+                                  );
+                                  setLinkTests((m) => ({
+                                    ...m,
+                                    [link.id]: result.verify.ok ? `✓ ${result.verify.url} serves the content` : `✗ ${result.verify.error ?? 'does not match'}`,
+                                  }));
+                                  reload();
+                                } catch (e) {
+                                  setLinkTests((m) => ({ ...m, [link.id]: `✗ ${message(e)}` }));
+                                }
+                              }}
+                            >
+                              Test
+                            </button>
+                            <CopyButton text={location} label="Location" />
+                            {linkTests[link.id] ? <span className="faint">{linkTests[link.id]}</span> : null}
+                          </div>
+                        );
+                      })}
+                      {links.length === 0 ? <div className="tiny faint">No endpoints offered by this account.</div> : null}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </Fragment>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** The content details tab: what the content is, with editable creator, sources, duplicates. */
+function ContentDetailsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
+  const meta = (data.manifest?.meta ?? {}) as {
+    title?: string;
+    description?: string;
+    tags?: string[];
+    topics?: string[];
+    format?: string;
+    rating?: string;
+    durationSeconds?: number;
+  };
+  const sources = [...new Set([...(data.manifest?.sources ?? []), ...(data.record.sources ?? [])])];
+  const creator = data.record.creatorEdit ?? data.manifest?.creator;
+  const [editing, setEditing] = useState(false);
+  const [creatorName, setCreatorName] = useState('');
+  const [creatorId, setCreatorId] = useState('');
+  const [editSources, setEditSources] = useState('');
+  const [editDuplicates, setEditDuplicates] = useState('');
+  const [showVvsh, setShowVvsh] = useState(false);
+  const [toast, show] = useToast();
+
+  const startEdit = () => {
+    setCreatorName(creator?.name ?? '');
+    setCreatorId(creator?.id ?? '');
+    setEditSources(sources.join('\n'));
+    setEditDuplicates((data.record.duplicates ?? []).join('\n'));
+    setEditing(true);
+  };
+  const save = async () => {
+    try {
+      await admin(`/v1/admin/content/${encodeURIComponent(cid)}/details`, {
+        body: {
+          creator: creatorId.trim() || creatorName.trim() ? { id: creatorId.trim(), name: creatorName.trim() || undefined } : undefined,
+          sources: editSources
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean),
+          duplicates: editDuplicates
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean),
+        },
+      });
+      setEditing(false);
+      reload();
+    } catch (e) {
+      show(message(e));
+    }
+  };
+
+  return (
+    <div className="form-stack">
+      <div className="row between">
+        <strong>Content details</strong>
+        {editing ? (
+          <div className="row">
+            <button className="small primary" onClick={() => void save()}>
+              Save
+            </button>
+            <button className="small" onClick={() => setEditing(false)}>
+              Discard
+            </button>
+          </div>
+        ) : (
+          <button className="small" onClick={startEdit}>
+            Edit
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="form-stack">
+          <div className="form-grid">
+            <label className="field">
+              Creator name
+              <input value={creatorName} onChange={(e) => setCreatorName(e.target.value)} />
+            </label>
+            <label className="field">
+              Creator id
+              <input className="mono" value={creatorId} onChange={(e) => setCreatorId(e.target.value)} />
+            </label>
+          </div>
+          <label className="field">
+            Sources (one per line)
+            <textarea rows={3} style={{ resize: 'vertical' }} value={editSources} onChange={(e) => setEditSources(e.target.value)} />
+          </label>
+          <label className="field">
+            Duplicates (one per line)
+            <textarea rows={3} style={{ resize: 'vertical' }} value={editDuplicates} onChange={(e) => setEditDuplicates(e.target.value)} />
+          </label>
+          <p className="hint">Clear a field to delete it — an empty creator shows none, empty lists show “None reported”.</p>
+        </div>
+
+      ) : (
+        <dl className="kv">
+          <dt>File</dt>
+          <dd>
+            {data.record.name} · {data.record.mime} · {formatBytes(data.record.size)}
+          </dd>
+          <dt>Chunks</dt>
+          <dd>
+            {data.manifest?.vvsh ? (
+              <>
+                {data.manifest.vvsh.meta.chunkCount} chunks × {data.manifest.vvsh.meta.bitrates.length} encodings, each stored as its own object
+                under the tree root — the .vvsh file is metadata and the root, so it lists no byte chunks.{' '}
+                <button className="small" onClick={() => setShowVvsh(true)}>
+                  View .vvsh
+                </button>
+              </>
+            ) : (
+              <>
+                {data.record.chunks} × {formatBytes(data.manifest?.chunkSize ?? 0)} on{' '}
+                {[...new Set((data.chunks ?? []).flatMap((chunk) => chunk.backends))].join(', ') || 'no backend'}
+              </>
+            )}
+          </dd>
+          <dt>Uploader</dt>
+          <dd className="mono tiny">{data.record.uploader}</dd>
+          <dt>Added</dt>
+          <dd>
+            {new Date(data.record.createdAt).toLocaleString()} <span className="faint">({timeAgo(data.record.createdAt)})</span>
+          </dd>
+          <dt>Downloads</dt>
+          <dd>
+            {data.record.downloads} ({formatBytes(data.record.bytesServed)} served, {data.record.creditsEarned} credits earned)
+          </dd>
+          <dt>Creator</dt>
+          <dd>
+            {creator?.id || creator?.name ? (
+              <>
+                {creator.name ?? creator.id}
+                {creator.name ? <span className="mono tiny faint"> · {creator.id}</span> : null}
+              </>
+            ) : (
+              <span className="muted">None</span>
+            )}
+          </dd>
+          <dt>Sources</dt>
+          <dd>{sources.length ? sources.join(' · ') : 'None'}</dd>
+          <dt>Duplicates</dt>
+          <dd>
+            {(data.record.duplicates ?? []).length === 0 ? (
+              <span className="muted">None reported</span>
+            ) : (
+              <textarea
+                readOnly
+                className="mono tiny"
+                style={{
+                  width: '100%',
+                  resize: 'vertical',
+                  height: `${((data.record.duplicates ?? []).length >= 3 ? 2.5 : (data.record.duplicates ?? []).length) * 1.5}em`,
+                }}
+                value={(data.record.duplicates ?? []).join('\n')}
+              />
+            )}
+          </dd>
+        </dl>
+      )}
+      {meta.description && <p className="small">{meta.description}</p>}
+      {showVvsh && data.manifest?.vvsh && <VvshModal vvsh={data.manifest.vvsh} onClose={() => setShowVvsh(false)} />}
+      <div className="row">
+        <button
+          className="small"
+          onClick={async () => {
+            try {
+              const result = await admin<{ fetched: number; missing: number }>('/v1/admin/peers/fetch', { body: { cid } });
+              show(
+                `Pulled ${result.fetched} missing chunk${result.fetched === 1 ? '' : 's'} from peers${result.missing ? ` (${result.missing} still missing)` : ''}`
+              );
+            } catch (e) {
+              show(message(e));
+            }
+          }}
+        >
+          Fetch missing chunks from peers
+        </button>
+        <button
+          className="small"
+          onClick={async () => {
+            try {
+              const result = await admin<{ results: { peer: string; sent: number; error?: string }[] }>('/v1/admin/peers/push', {
+                body: { cid },
+              });
+              show(result.results.map((r) => `${r.peer.slice(0, 24)}: ${r.sent} sent${r.error ? ` (${r.error})` : ''}`).join(' · ') || 'No peer sent to');
+            } catch (e) {
+              show(message(e));
+            }
+          }}
+        >
+          Send content to peers
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /** Everything the node knows about one content, shown when its row is clicked. */
 function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) {
   const [data, setData] = useState<ContentDetailsData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showVvsh, setShowVvsh] = useState(false);
+  const [tab, setTab] = useState<'details' | 'tier' | 'media' | 'suggestions' | 'jobs'>('details');
   const [tierPick, setTierPick] = useState('');
   const [extendDays, setExtendDays] = useState('30');
   const [configTiers, setConfigTiers] = useState<{ id: string; label: string }[]>([]);
-  const [jobTests, setJobTests] = useState<Record<string, string>>({});
-  const [linkTests, setLinkTests] = useState<Record<string, string>>({});
-  const [endpoint, setEndpoint] = useState('');
-  const [endpointResult, setEndpointResult] = useState('');
-  const [toast, show] = useToast();
+  const [, show] = useToast();
   const load = useCallback(() => {
     admin<ContentDetailsData>(`/v1/admin/content/${encodeURIComponent(cid)}`)
       .then((answer) => {
@@ -420,13 +789,12 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
       .catch(() => undefined);
   }, [cid]);
   useEffect(load, [load]);
-  const meta = (data?.manifest?.meta ?? {}) as { title?: string; description?: string; tags?: string[]; topics?: string[]; format?: string; rating?: string; durationSeconds?: number };
-  const sources = [...new Set([...(data?.manifest?.sources ?? []), ...(data?.record.sources ?? [])])];
   const tier = data?.tier;
   // The picker always has something to offer: the content's upgrade menu, or the node's
   // configured tiers — so a tier can be set even for content not on one yet.
   const tierOptions: { id: string; label: string }[] =
     tier?.upgrades?.length ? tier.upgrades : configTiers.length ? configTiers : [{ id: 'default', label: 'default' }];
+
   return (
     <Modal title="Content details" onClose={onClose} wide>
       {error ? (
@@ -435,123 +803,113 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
         <Loading />
       ) : (
         <div className="form-stack" style={{ paddingBottom: 28 }}>
-          {toast && <div className="banner info small">{toast}</div>}
           <div>
-            <h3>{data.record.title ?? meta.title ?? data.record.name}</h3>
+            <h3>{data.record.title ?? (data.manifest?.meta as { title?: string } | undefined)?.title ?? data.record.name}</h3>
             <div className="mono tiny faint">{data.record.cid}</div>
           </div>
-          <dl className="kv">
-            <dt>File</dt>
-            <dd>
-              {data.record.name} · {data.record.mime} · {formatBytes(data.record.size)}
-            </dd>
-            <dt>Chunks</dt>
-            <dd>
-              {data.manifest?.vvsh ? (
+          <div className="tabs">
+            {(
+              [
+                ['details', 'Content details'],
+                ['tier', 'Storage tier'],
+                ['media', 'Storage media'],
+                ['suggestions', 'Client suggestions'],
+                ['jobs', 'Storage jobs'],
+              ] as const
+            ).map(([id, label]) => (
+              <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {tab === 'details' && <ContentDetailsTab data={data} cid={cid} reload={load} />}
+          {tab === 'media' && (
+            <div>
+              <h3>Storage media</h3>
+              <StorageMediaRows data={data} />
+            </div>
+          )}
+          {tab === 'jobs' && <StorageJobsTab data={data} cid={cid} reload={load} />}
+          {tab === 'tier' && (
+            <div>
+              <h3>Storage tier</h3>
+              {tier && tier.tier ? (
                 <>
-                  {data.manifest.vvsh.meta.chunkCount} chunks × {data.manifest.vvsh.meta.bitrates.length} encodings, each stored as its own object under
-                  the tree root — the .vvsh file is metadata and the root, so it lists no byte chunks.{' '}
-                  <button className="small" onClick={() => setShowVvsh(true)}>
-                    View .vvsh
-                  </button>
+                  <div className="small" style={{ marginTop: 6 }}>
+                    <strong>{tier.label}</strong>
+                    <div className="muted">
+                      {[
+                        ...Object.entries(tier.plan.media)
+                          .filter(([, count]) => count > 0)
+                          .map(([medium, count]) => `${count}× ${medium}`),
+                        ...(tier.plan.externalUrls > 0 ? [`${tier.plan.externalUrls} URL backups`] : []),
+                      ].join(' · ') || 'no copies planned'}
+                    </div>
+                  </div>
+                  <div className="small muted">
+                    Lifecycle: {tier.expiresAt ? `${new Date(tier.expiresAt).toLocaleString()} (${timeAgo(tier.expiresAt)})` : 'no expiry'}
+                    {tier.daysLeft !== undefined ? ` · ${tier.daysLeft} day${tier.daysLeft === 1 ? '' : 's'} left` : ''}
+                  </div>
+                  <div className="small muted">
+                    URL backups: {tier.backups.urls} on {tier.backups.domains.length} domain
+                    {tier.backups.domains.length === 1 ? '' : 's'} {tier.backups.satisfied ? '· satisfied' : '· still wanted'}
+                    {tier.backups.note ? ` — ${tier.backups.note}` : ''}
+                  </div>
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                    <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
+                      Tier
+                      <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
+                        {tierOptions.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="small"
+                      disabled={!tierPick}
+                      onClick={async () => {
+                        await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { tier: tierPick } }).catch((e) => show(message(e)));
+                        load();
+                      }}
+                    >
+                      {tier.tier ? 'Set tier' : 'Add to tier'}
+                    </button>
+                    <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                      Extend (days)
+                      <input type="number" min={0} value={extendDays} onChange={(e) => setExtendDays(e.target.value)} />
+                    </label>
+                    <button
+                      className="small"
+                      disabled={!(Number(extendDays) > 0)}
+                      onClick={async () => {
+                        await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { extendDays: Number(extendDays) } }).catch((e) =>
+                          show(message(e))
+                        );
+                        load();
+                      }}
+                    >
+                      Extend lifecycle
+                    </button>
+                    <button
+                      className="small danger"
+                      onClick={async () => {
+                        if (!window.confirm('Delete this content and its tier assignment?')) return;
+                        await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                        load();
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </>
               ) : (
-                <>
-                  {data.record.chunks} × {formatBytes(data.manifest?.chunkSize ?? 0)} on{' '}
-                  {[...new Set((data.chunks ?? []).flatMap((chunk) => chunk.backends))].join(', ') || 'no backend'}
-                </>
-              )}
-            </dd>
-            <dt>Uploader</dt>
-            <dd className="mono tiny">{data.record.uploader}</dd>
-            <dt>Added</dt>
-            <dd>
-              {new Date(data.record.createdAt).toLocaleString()} <span className="faint">({timeAgo(data.record.createdAt)})</span>
-            </dd>
-            <dt>Downloads</dt>
-            <dd>
-              {data.record.downloads} ({formatBytes(data.record.bytesServed)} served, {data.record.creditsEarned} credits earned)
-            </dd>
-            {data.manifest?.creator && (
-              <>
-                <dt>Creator</dt>
-                <dd>
-                  {data.manifest.creator.name ?? data.manifest.creator.id}
-                  {data.manifest.creator.name ? <span className="mono tiny faint"> · {data.manifest.creator.id}</span> : null}
-                </dd>
-              </>
-            )}
-            <dt>Sources</dt>
-            <dd>{sources.length ? sources.join(' · ') : 'None'}</dd>
-            <dt>Duplicates</dt>
-            <dd>
-              <textarea
-                readOnly
-                rows={3}
-                className="mono tiny"
-                style={{ width: '100%', resize: 'vertical' }}
-                value={(data.record.duplicates ?? []).join('\n')}
-                placeholder="None reported"
-              />
-            </dd>
-          </dl>
-          {meta.description && <p className="small">{meta.description}</p>}
-          {showVvsh && data.manifest?.vvsh && <VvshModal vvsh={data.manifest.vvsh} onClose={() => setShowVvsh(false)} />}
-          <div className="row">
-            <button
-              className="small"
-              onClick={async () => {
-                try {
-                  const result = await admin<{ fetched: number; missing: number }>('/v1/admin/peers/fetch', { body: { cid: data.record.cid } });
-                  show(`Pulled ${result.fetched} missing chunk${result.fetched === 1 ? '' : 's'} from peers${result.missing ? ` (${result.missing} still missing)` : ''}`);
-                } catch (e) {
-                  show(message(e));
-                }
-              }}
-            >
-              Fetch missing chunks from peers
-            </button>
-            <button
-              className="small"
-              onClick={async () => {
-                try {
-                  const result = await admin<{ results: { peer: string; sent: number; error?: string }[] }>('/v1/admin/peers/push', {
-                    body: { cid: data.record.cid },
-                  });
-                  show(result.results.map((r) => `${r.peer.slice(0, 24)}: ${r.sent} sent${r.error ? ` (${r.error})` : ''}`).join(' · ') || 'No peer sent to');
-                } catch (e) {
-                  show(message(e));
-                }
-              }}
-            >
-              Send content to peers
-            </button>
-          </div>
-          <div>
-            <h3>Storage tier</h3>
-            {tier && tier.tier ? (
-              <>
-                <div className="small" style={{ marginTop: 6 }}>
-                  <strong>{tier.label}</strong>
-                  <div className="muted">
-                    {[
-                      ...Object.entries(tier.plan.media)
-                        .filter(([, count]) => count > 0)
-                        .map(([medium, count]) => `${count}× ${medium}`),
-                      ...(tier.plan.externalUrls > 0 ? [`${tier.plan.externalUrls} URL backups`] : []),
-                    ].join(' · ') || 'no copies planned'}
-                  </div>
-                </div>
-                <div className="small muted">
-                  Lifecycle: {tier.expiresAt ? `${new Date(tier.expiresAt).toLocaleString()} (${timeAgo(tier.expiresAt)})` : 'no expiry'}
-                  {tier.daysLeft !== undefined ? ` · ${tier.daysLeft} day${tier.daysLeft === 1 ? '' : 's'} left` : ''}
-                </div>
-                <div className="small muted">
-                  URL backups: {tier.backups.urls} on {tier.backups.domains.length} domain
-                  {tier.backups.domains.length === 1 ? '' : 's'} {tier.backups.satisfied ? '· satisfied' : '· still wanted'}
-                  {tier.backups.note ? ` — ${tier.backups.note}` : ''}
-                </div>
-                <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+                  <p className="small muted" style={{ width: '100%', margin: 0 }}>
+                    This content is not on any tier yet — pick one and add it. The tier's plan decides the copies to keep and the content's
+                    storage job.
+                  </p>
                   <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
                     Tier
                     <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
@@ -570,248 +928,29 @@ function ContentDetails({ cid, onClose }: { cid: string; onClose: () => void }) 
                       load();
                     }}
                   >
-                    {tier.tier ? 'Set tier' : 'Add to tier'}
-                  </button>
-                  <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
-                    Extend (days)
-                    <input type="number" min={0} value={extendDays} onChange={(e) => setExtendDays(e.target.value)} />
-                  </label>
-                  <button
-                    className="small"
-                    disabled={!(Number(extendDays) > 0)}
-                    onClick={async () => {
-                      await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { extendDays: Number(extendDays) } }).catch((e) =>
-                        show(message(e))
-                      );
-                      load();
-                    }}
-                  >
-                    Extend lifecycle
-                  </button>
-                  <button
-                    className="small danger"
-                    onClick={async () => {
-                      if (!window.confirm('Delete this content and its tier assignment?')) return;
-                      await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                      load();
-                    }}
-                  >
-                    Delete
+                    Add to tier
                   </button>
                 </div>
-              </>
-            ) : (
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
-                <p className="small muted" style={{ width: '100%', margin: 0 }}>
-                  This content is not on any tier yet — pick one and add it. The tier's plan decides the copies to keep and the content's
-                  storage job.
-                </p>
-                <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
-                  Tier
-                  <select value={tierPick} onChange={(e) => setTierPick(e.target.value)}>
-                    {tierOptions.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className="small"
-                  disabled={!tierPick}
-                  onClick={async () => {
-                    await admin(`/v1/admin/tiers/${encodeURIComponent(cid)}`, { body: { tier: tierPick } }).catch((e) => show(message(e)));
-                    load();
-                  }}
-                >
-                  Add to tier
-                </button>
-              </div>
-            )}
-          </div>
-          <div>
-            <h3>Storage media</h3>
-            {(data.media ?? []).length === 0 ? (
-              <p className="small muted" style={{ marginTop: 6 }}>
-                No local bytes — downloads come from URL backups, holders or peers.
-              </p>
-            ) : (
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                {(data.media ?? []).map((entry) => (
-                  <span key={entry.id} className="badge">
-                    {entry.medium ? `${entry.medium} · ` : ''}
-                    {entry.id} ({entry.type})
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-          <div>
-            <h3>Storage jobs</h3>
-            <p className="small muted" style={{ marginTop: 6 }}>
-              A storage job offers client nodes credits to keep copies of this content for its term. <strong>Retrieval</strong>: when a
-              download needs a chunk this node does not have, a holder is asked for it and paid the per-retrieval reward — the bytes must
-              hash to the chunk id exactly. <strong>Challenge</strong>: every so often a holder must prove it still keeps its copy (its own
-              chunk bytes behind a random nonce) and is paid per passed challenge. Upfront pay follows the first pass and completion pay
-              the end of the term; a holder that fails a retrieval or challenge is out of the job and the data is pulled from the other
-              holders or their URLs. <strong>Test job</strong> runs one real retrieval against a holder and pays its account the reward.
-            </p>
-            {(data.jobs ?? []).length === 0 ? (
-              <p className="small muted" style={{ marginTop: 6 }}>
-                No storage jobs for this content yet.
-              </p>
-            ) : (
-              (data.jobs ?? []).map((job) => (
-                <div key={job.id} style={{ marginTop: 8 }}>
-                  <div className="small">
-                    <strong>{job.title ?? job.id.slice(0, 12) + '…'}</strong>
-                    {job.managed ? <span className="badge ok" style={{ marginLeft: 8 }}>automatic</span> : null}
-                    <div className="muted">
-                      {formatBytes(job.bytes)} · {job.replicas} cop{job.replicas === 1 ? 'y' : 'ies'} · {Math.round(job.durationSeconds / 86400)} days ·{' '}
-                      {job.status}
-                    </div>
-                  </div>
-                  <div className="row" style={{ gap: 8, marginTop: 4 }}>
-                    <button
-                      className="small"
-                      title="Ask a holder for a real chunk and pay its account the reward when the bytes match"
-                      onClick={async () => {
-                        setJobTests((m) => ({ ...m, [job.id]: 'Testing…' }));
-                        try {
-                          const result = await admin<{ test: { ok: boolean; account?: string; chunkId: string; credited: number; error?: string } }>(
-                            `/v1/admin/storage/jobs/${job.id}/test`,
-                            { method: 'POST', body: {} }
-                          );
-                          const t = result.test;
-                          setJobTests((m) => ({
-                            ...m,
-                            [job.id]: t.ok
-                              ? `✓ holder ${t.account?.slice(0, 16)}… answered chunk ${t.chunkId.slice(0, 12)}… — paid ${t.credited} credits`
-                              : `✗ ${t.error ?? 'no answer'}`,
-                          }));
-                        } catch (e) {
-                          setJobTests((m) => ({ ...m, [job.id]: `✗ ${message(e)}` }));
-                        }
-                      }}
-                    >
-                      Test job
-                    </button>
-                    <button
-                      className="small danger"
-                      onClick={async () => {
-                        if (!window.confirm('Delete this storage job and every assignment under it?')) return;
-                        await admin(`/v1/admin/storage/jobs/${job.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                        load();
-                      }}
-                    >
-                      Delete job
-                    </button>
-                  </div>
-                  <div className="tiny faint">
-                    {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/challenge ·{' '}
-                    {job.rewards.completion} at completion · opened {timeAgo(job.createdAt)}
-                  </div>
-                  {jobTests[job.id] ? <div className="tiny" style={{ marginTop: 4 }}>{jobTests[job.id]}</div> : null}
-                  {job.holders.length === 0 ? (
-                    <div className="tiny faint" style={{ marginTop: 4 }}>
-                      No client accepted this job yet.
-                    </div>
-                  ) : (
-                    job.holders.map((holder) => (
-                      <div key={holder.id} style={{ marginTop: 6, paddingLeft: 10, borderLeft: '2px solid var(--border)' }}>
-                        <div className="small">
-                          <span className="mono tiny">{holder.accountId}</span>{' '}
-                          <span className={`badge ${holder.status === 'active' ? 'ok' : holder.status === 'failed' ? 'danger' : ''}`}>{holder.status}</span>{' '}
-                          <span className="tiny faint">
-                            accepted {timeAgo(holder.acceptedAt)} · {holder.earned} credits earned
-                          </span>
-                        </div>
-                        {holder.links.length === 0 ? (
-                          <div className="tiny faint">No URLs or base URLs offered by this account.</div>
-                        ) : (
-                          holder.links.map((link) => (
-                            <div key={link.id} className="tiny">
-                              <span className={`badge ${link.status === 'accepted' ? 'ok' : link.status === 'rejected' ? 'danger' : ''}`}>{link.status}</span>{' '}
-                              <span className="mono">{link.baseUrl ? `${link.baseUrl} (base URL)` : link.url}</span>
-                              {link.cid ? <span className="faint"> · {link.cid.slice(0, 14)}…</span> : null}{' '}
-                              <button
-                                className="small"
-                                onClick={async () => {
-                                  const target = link.baseUrl ? `${link.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}` : link.url ?? '';
-                                  setLinkTests((m) => ({ ...m, [link.id]: 'Checking…' }));
-                                  try {
-                                    const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
-                                      `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
-                                      { method: 'POST', body: { url: target } }
-                                    );
-                                    setLinkTests((m) => ({
-                                      ...m,
-                                      [link.id]: result.verify.ok
-                                        ? `✓ ${result.verify.url} serves ${formatBytes(result.verify.bytes)} matching the expected hash`
-                                        : `✗ ${result.verify.url} — ${result.verify.error ?? 'does not match'}`,
-                                    }));
-                                  } catch (e) {
-                                    setLinkTests((m) => ({ ...m, [link.id]: `✗ ${message(e)}` }));
-                                  }
-                                }}
-                              >
-                                Test
-                              </button>
-                              {linkTests[link.id] ? <div className="tiny faint">{linkTests[link.id]}</div> : null}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              ))
-            )}
-            <div className="row" style={{ gap: 8, marginTop: 10 }}>
-              <input
-                type="text"
-                className="mono"
-                style={{ flex: 1 }}
-                placeholder="Check any endpoint for this content (https://host/… or a base URL)"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-              />
-              <button
-                className="small"
-                disabled={!endpoint.trim()}
-                onClick={async () => {
-                  setEndpointResult('Checking…');
-                  try {
-                    const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
-                      `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
-                      { method: 'POST', body: { url: endpoint.trim() } }
-                    );
-                    setEndpointResult(
-                      result.verify.ok
-                        ? `✓ ${result.verify.url} is available and serves ${formatBytes(result.verify.bytes)} matching the expected hash`
-                        : `✗ ${result.verify.url} — ${result.verify.error ?? 'does not match the expected hash'}`
-                    );
-                  } catch (e) {
-                    setEndpointResult(`✗ ${message(e)}`);
-                  }
-                }}
-              >
-                Check endpoint
-              </button>
+              )}
             </div>
-            {endpointResult ? <div className="tiny" style={{ marginTop: 4 }}>{endpointResult}</div> : null}
-          </div>
-          {data.suggestions && data.suggestions.length > 0 && (
+          )}
+          {tab === 'suggestions' && (
             <div>
               <h3>Client suggestions</h3>
-              {data.suggestions.map((suggestion) => (
-                <div key={suggestion.id} className="small" style={{ marginTop: 6 }}>
-                  <span className="badge">{suggestion.status}</span>{' '}
-                  <strong>{suggestion.kind}</strong>{' '}
-                  {suggestion.sources?.map((source) => `${source.platform}: ${source.url}`).join(', ') ?? suggestion.duplicateOf ?? suggestion.note ?? ''}
-                  <div className="tiny faint">{timeAgo(suggestion.createdAt)}</div>
-                </div>
-              ))}
+              {data.suggestions && data.suggestions.length > 0 ? (
+                data.suggestions.map((suggestion) => (
+                  <div key={suggestion.id} className="small" style={{ marginTop: 6 }}>
+                    <span className="badge">{suggestion.status}</span>{' '}
+                    <strong>{suggestion.kind}</strong>{' '}
+                    {suggestion.sources?.map((source) => `${source.platform}: ${source.url}`).join(', ') ?? suggestion.duplicateOf ?? suggestion.note ?? ''}
+                    <div className="tiny faint">{timeAgo(suggestion.createdAt)}</div>
+                  </div>
+                ))
+              ) : (
+                <p className="small muted" style={{ marginTop: 6 }}>
+                  None.
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -914,46 +1053,100 @@ interface Backend {
   writable: boolean;
   priority: number;
   status: { ok: boolean; detail: string };
+  items: number;
+  bytes: number;
 }
 
+/**
+ * The storage page's backend section: the groups a node stores things in — the media
+ * the tiers plan counts (HDD, SSD), local storage, cloud storage, IPFS and the URL
+ * backups of user jobs — each with its total capacity and item count.
+ */
 function Storage() {
-  const [backends, setBackends] = useState<Backend[] | null>(null);
+  const [data, setData] = useState<{
+    backends: Backend[];
+    media: { id: string; label: string; backends: string[] }[];
+    urls: { items: number; bytes: number };
+  } | null>(null);
   const [toast, show] = useToast();
   const load = useCallback(() => {
-    admin<{ backends: Backend[] }>('/v1/admin/storage/backends')
-      .then((r) => setBackends(r.backends))
+    admin<{ backends: Backend[]; media: { id: string; label: string; backends: string[] }[]; urls: { items: number; bytes: number } }>(
+      '/v1/admin/storage/backends'
+    )
+      .then(setData)
       .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
 
+  if (!data) return <Loading />;
+  const claimed = new Set(data.media.flatMap((medium) => medium.backends ?? []));
+  const unclaimed = (types: string[]) => data.backends.filter((backend) => !claimed.has(backend.id) && types.includes(backend.type));
+  const groups: { label: string; rows: Backend[] }[] = [
+    ...data.media.map((medium) => ({
+      label: medium.label,
+      rows: data.backends.filter((backend) => (medium.backends ?? []).includes(backend.id)),
+    })),
+    { label: 'Local storage', rows: unclaimed(['local', 'memory']) },
+    { label: 'Cloud storage', rows: unclaimed(['s3', 'webdav', 'http', 'provider']) },
+    { label: 'IPFS', rows: unclaimed(['ipfs']) },
+    {
+      label: 'User job urls',
+      rows: [],
+    },
+  ];
+  // Anything the sections above did not claim still gets a home.
+  const leftover = data.backends.filter((backend) => !groups.some((group) => group.rows.includes(backend)));
+  if (leftover.length) groups[1].rows.push(...leftover);
+
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
-      <div className="card">
+      <div className="card form-stack">
         <h3>Storage backends</h3>
-        <p className="small muted" style={{ marginBottom: 10 }}>
-          Where chunks are kept, tried in priority order. Add S3-compatible buckets, WebDAV, IPFS, mirrors or other providers under Settings →
-          storage.backends.
+        <p className="small muted">
+          Where chunks are kept, tried in priority order. Add S3-compatible buckets, WebDAV, IPFS, mirrors or other providers under
+          Settings → storage.backends.
         </p>
-        {!backends ? (
-          <Loading />
-        ) : (
-          <table className="table">
-            <tbody>
-              {backends.map((backend) => (
-                <tr key={backend.id}>
-                  <td>
-                    <StatusDot online={backend.status.ok} /> <strong>{backend.id}</strong>
-                  </td>
-                  <td className="small">{backend.type}</td>
-                  <td className="small">priority {backend.priority}</td>
-                  <td className="small">{backend.writable ? 'read/write' : 'read only'}</td>
-                  <td className="small muted">{backend.status.detail}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        {groups.map((group) => {
+          const bytes = group.rows.reduce((sum, row) => sum + row.bytes, 0) + (group.label === 'User job urls' ? data.urls.bytes : 0);
+          const items = group.rows.reduce((sum, row) => sum + row.items, 0) + (group.label === 'User job urls' ? data.urls.items : 0);
+          return (
+            <div key={group.label}>
+              <div className="row between small" style={{ marginBottom: 4 }}>
+                <strong>{group.label}</strong>
+                <span className="muted">
+                  {formatBytes(bytes)} · {items} item{items === 1 ? '' : 's'}
+                </span>
+              </div>
+              {group.rows.length === 0 ? (
+                <div className="tiny faint" style={{ marginBottom: 6 }}>
+                  {group.label === 'User job urls'
+                    ? 'Accepted content URLs and base URLs offered by accounts — copies kept outside any backend.'
+                    : 'Nothing here yet.'}
+                </div>
+              ) : (
+                <table className="table">
+                  <tbody>
+                    {group.rows.map((backend) => (
+                      <tr key={backend.id}>
+                        <td>
+                          <StatusDot online={backend.status.ok} /> <strong>{backend.id}</strong>
+                        </td>
+                        <td className="small">{backend.type}</td>
+                        <td className="small">
+                          {formatBytes(backend.bytes)} · {backend.items} item{backend.items === 1 ? '' : 's'}
+                        </td>
+                        <td className="small">priority {backend.priority}</td>
+                        <td className="small">{backend.writable ? 'read/write' : 'read only'}</td>
+                        <td className="small muted">{backend.status.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1168,6 +1361,41 @@ function Tiers() {
       .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
+
+  // The rewards and schedule of the storage jobs this node opens for tiered content.
+  const [jobDefaults, setJobDefaults] = useState<{
+    rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
+    challengeIntervalSeconds: number;
+    retrievalIntervalSeconds: number;
+  } | null>(null);
+  useEffect(() => {
+    admin<{
+      storageService: {
+        auto: {
+          rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
+          challengeIntervalSeconds?: number;
+          retrievalIntervalSeconds?: number;
+        };
+      };
+    }>('/v1/admin/config')
+      .then((c) =>
+        setJobDefaults({
+          rewards: c.storageService.auto.rewards,
+          challengeIntervalSeconds: c.storageService.auto.challengeIntervalSeconds ?? 900,
+          retrievalIntervalSeconds: c.storageService.auto.retrievalIntervalSeconds ?? 0,
+        })
+      )
+      .catch(() => undefined);
+  }, []);
+  const saveJobDefaults = async (patch: Partial<NonNullable<typeof jobDefaults>>) => {
+    const next = { ...(jobDefaults as NonNullable<typeof jobDefaults>), ...patch };
+    setJobDefaults(next);
+    try {
+      await admin('/v1/admin/config', { method: 'PUT', body: { storageService: { auto: next } } });
+    } catch (e) {
+      show(message(e));
+    }
+  };
 
   const save = async (next: TiersConfigRow) => {
     setConfig(next);
@@ -1448,6 +1676,77 @@ function Tiers() {
           </table>
         )}
       </div>
+      <div className="card form-stack">
+        <h3>Storage job defaults</h3>
+        <p className="small muted">
+          The rewards and the challenge / retrieval schedule of the storage jobs this node opens for content on a tier. Individual jobs can
+          still set their own in the content details.
+        </p>
+        {jobDefaults && (
+          <div className="form-grid">
+            <label className="field">
+              Upfront credits
+              <input
+                type="number"
+                min={0}
+                key="jd-upfront"
+                defaultValue={jobDefaults.rewards.upfront}
+                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, upfront: Number(e.target.value) } })}
+              />
+            </label>
+            <label className="field">
+              Per retrieval
+              <input
+                type="number"
+                min={0}
+                key="jd-perRetrieval"
+                defaultValue={jobDefaults.rewards.perRetrieval}
+                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, perRetrieval: Number(e.target.value) } })}
+              />
+            </label>
+            <label className="field">
+              Per challenge
+              <input
+                type="number"
+                min={0}
+                key="jd-perChallenge"
+                defaultValue={jobDefaults.rewards.perChallenge}
+                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, perChallenge: Number(e.target.value) } })}
+              />
+            </label>
+            <label className="field">
+              End of term
+              <input
+                type="number"
+                min={0}
+                key="jd-completion"
+                defaultValue={jobDefaults.rewards.completion}
+                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, completion: Number(e.target.value) } })}
+              />
+            </label>
+            <label className="field">
+              Challenge every (minutes)
+              <input
+                type="number"
+                min={1}
+                key="jd-challenge"
+                defaultValue={Math.max(1, Math.round(jobDefaults.challengeIntervalSeconds / 60))}
+                onBlur={(e) => void saveJobDefaults({ challengeIntervalSeconds: Math.round(Number(e.target.value) * 60) })}
+              />
+            </label>
+            <label className="field">
+              Retrieval test every (minutes, 0 = off)
+              <input
+                type="number"
+                min={0}
+                key="jd-retrieval"
+                defaultValue={Math.round(jobDefaults.retrievalIntervalSeconds / 60)}
+                onBlur={(e) => void saveJobDefaults({ retrievalIntervalSeconds: Math.round(Number(e.target.value) * 60) })}
+              />
+            </label>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1455,13 +1754,15 @@ function Tiers() {
 export function ProviderTabs({ tab }: { tab: string }) {
 
   if (tab === 'content') return <Content />;
+  if (tab === 'add-local') return <AddLocal />;
+  if (tab === 'suggestions') return <Suggestions />;
   if (tab === 'storage')
     return (
-      <>
+      <div className="form-stack">
         <Storage />
         <Peering />
         <SyncJob />
-      </>
+      </div>
     );
   if (tab === 'tiers') return <Tiers />;
   return null;

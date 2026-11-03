@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { ServiceStatus, ServiceVerifyReport } from '../src/shared/clientapi.js';
 import { MiB } from '../src/shared/content.js';
-import { clientFor, randomBytesOf, startClient, startProvider, tempDir, waitFor } from './helpers.js';
+import { admin, clientFor, randomBytesOf, startClient, startProvider, tempDir, waitFor } from './helpers.js';
 
 describe('storage service', async () => {
   const { dir, cleanup } = tempDir();
@@ -120,5 +120,19 @@ describe('storage service', async () => {
     assert.equal(after.complete, false);
     assert.equal(after.missing.length, 1);
     assert.equal(after.missing[0], manifest.chunks[0].id);
+  });
+
+  it('updates one job’s rewards and its challenge / retrieval schedule', async () => {
+    const { cid, manifest } = await provider.importBuffer(randomBytesOf(MiB, 17), { name: 'sched.bin' });
+    const job = provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 1, durationSeconds: 3600 });
+    await admin(provider.url(), `/v1/admin/storage/jobs/${job.id}`, {
+      method: 'POST',
+      body: { rewards: { upfront: 9, perRetrieval: 4 }, challengeIntervalSeconds: 120, retrievalIntervalSeconds: 300 },
+    });
+    const updated = provider.service.jobs().find((entry) => entry.id === job.id)!;
+    assert.equal(updated.rewards.upfront, 9);
+    assert.equal(updated.rewards.perRetrieval, 4);
+    assert.equal(updated.challengeIntervalSeconds, 120);
+    assert.equal(updated.retrievalIntervalSeconds, 300);
   });
 });
