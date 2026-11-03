@@ -149,7 +149,7 @@ All backends take `id`, `priority` (default 10) and `write: false` to make them 
 
 ### Storage service: paying clients to store data
 
-Client nodes that turn on *Earn → Store data for providers* accept your **jobs**, download the chunks, and keep a long poll open through which you send **tasks**. You choose what to store, for how long, and what it pays:
+Client nodes that turn on *Earn → Store data for providers* accept your **jobs**, download the chunks, and keep a long poll open through which you send **tasks** (proof challenges only — stored data is never pulled through the client's poll). You choose what to store, for how long, and what it pays:
 
 ```jsonc
 "storageService": {
@@ -168,7 +168,7 @@ Client nodes that turn on *Earn → Store data for providers* accept your **jobs
 }
 ```
 
-Create jobs for particular content from *Content → Storage job* (copies, days, rewards). Challenges ask for `sha256(nonce ‖ chunk)` when the provider has its own copy, or for the chunk itself when it does not. When your backends miss a chunk, the provider asks online holders for it and pays `perRetrieval`.
+Jobs for tiered content are opened by the tier plan itself — every tier row in *Tiers* carries its own job settings: upfront credits, per-MiB retrieval and challenge rewards (scaled to the content's size), end-of-term reward, maximum latency in ms, challenge and retrieval-test cadence in minutes (0 = off) and the failed requests before an endpoint counts as failed. Manual jobs come from *Content → Storage job*. Challenges ask for `sha256(nonce ‖ chunk)` when the provider has its own copy, or for the chunk itself when it does not. When your backends miss a chunk, the provider asks online holders for it and pays `perRetrieval`. Stored data is only ever verified at the users' **endpoints**: *Test storage job* walks each user's endpoint list in order — the first endpoint whose chunks match the content id wins and moves to the top of that user's list, failing endpoints count failed requests (yellow `failed`), and a user whose endpoints all fail is red `failed` and out of the job. Jobs with a *Retrieval test every* setting run the same walk automatically.
 
 ## Search algorithm node
 

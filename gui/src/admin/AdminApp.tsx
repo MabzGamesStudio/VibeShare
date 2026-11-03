@@ -572,8 +572,38 @@ const CRYPTO_METHODS: {
  * The built-in crypto payments: one card per coin with the shortest possible setup
  * (an address, maybe an endpoint), a quick on/off switch, and the safety notice.
  */
+/**
+ * Checks the format of what the admin typed before it is ever saved: a wrong public
+ * address is caught here first, with a toast in the bottom right and the field marked.
+ */
+function addressProblem(type: string, key: string, value: string): string | null {
+  const text = value.trim();
+  if (!text) return null; // empty is fine here — the card asks for one when the method is on
+  if (key === 'lnbitsUrl' || key === 'apiUrl' || key === 'rpcUrl') {
+    return /^https?:\/\/\S+$/.test(text) ? null : 'That is not a valid http(s) URL';
+  }
+  if (key !== 'address') return null;
+  switch (type) {
+    case 'bitcoin':
+      return /^(bc1[a-z0-9]{20,55}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(text)
+        ? null
+        : 'That does not look like a Bitcoin address (bc1…, 1… or 3…)';
+    case 'lightning':
+      return /^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(text) ? null : 'A lightning address looks like name@wallet.example';
+    case 'evm':
+      return /^0x[a-fA-F0-9]{40}$/.test(text) ? null : 'That does not look like an EVM address (0x + 40 hex characters)';
+    case 'monero':
+      return /^[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}$/.test(text) ? null : 'That does not look like a Monero address (95 characters, starting with 4 or 8)';
+    default:
+      return null;
+  }
+}
+
 function CryptoPayments() {
   const [methods, setMethods] = useState<Record<string, unknown>[] | null>(null);
+  // Field edits live in a per-method draft until Save — Discard throws them away.
+  const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
+  const [problems, setProblems] = useState<Record<string, string>>({});
   const [toast, show] = useToast();
 
   const load = useCallback(() => {
@@ -585,8 +615,14 @@ function CryptoPayments() {
 
   if (!methods) return null;
   const find = (id: string) => methods.find((method) => method.id === id);
+  const merged = (method: (typeof CRYPTO_METHODS)[number]) => ({
+    ...method.stub,
+    ...(find(method.id) ?? {}),
+    ...(drafts[method.id] ?? {}),
+  });
+  // The on/off switch saves right away; everything typed into the fields waits for Save.
   const put = async (method: (typeof CRYPTO_METHODS)[number], patch: Record<string, unknown>) => {
-    const next = { ...method.stub, ...(find(method.id) ?? {}), id: method.id, ...patch };
+    const next = { ...merged(method), id: method.id, ...patch };
     const list = [...methods.filter((entry) => entry.id !== method.id), next];
     setMethods(list);
     try {
@@ -597,6 +633,45 @@ function CryptoPayments() {
       show(message(e));
       load();
     }
+  };
+  const editField = (method: (typeof CRYPTO_METHODS)[number], key: string, value: unknown) =>
+    setDrafts((d) => ({ ...d, [method.id]: { ...(d[method.id] ?? {}), [key]: value } }));
+  const saveDraft = async (method: (typeof CRYPTO_METHODS)[number]) => {
+    const next = merged(method);
+    const bad: Record<string, string> = {};
+    for (const field of method.fields) {
+      const problem = addressProblem(method.type, field.key, String(next[field.key] ?? ''));
+      if (problem) bad[`${method.id}.${field.key}`] = problem;
+    }
+    setProblems((old) => ({
+      ...Object.fromEntries(Object.entries(old).filter(([key]) => !key.startsWith(`${method.id}.`))),
+      ...bad,
+    }));
+    if (Object.keys(bad).length) {
+      show('That does not look right — check the highlighted fields before saving');
+      return;
+    }
+    const list = [...methods.filter((entry) => entry.id !== method.id), { ...next, id: method.id }];
+    setMethods(list);
+    setDrafts((d) => {
+      const { [method.id]: _drop, ...rest } = d;
+      return rest;
+    });
+    try {
+      await admin('/v1/admin/config', { method: 'PUT', body: { payments: list } });
+      show(`Saved ${method.label}`);
+      load();
+    } catch (e) {
+      show(message(e));
+      load();
+    }
+  };
+  const discardDraft = (method: (typeof CRYPTO_METHODS)[number]) => {
+    setDrafts((d) => {
+      const { [method.id]: _drop, ...rest } = d;
+      return rest;
+    });
+    setProblems((old) => Object.fromEntries(Object.entries(old).filter(([key]) => !key.startsWith(`${method.id}.`))));
   };
 
   return (
@@ -610,10 +685,11 @@ function CryptoPayments() {
       {toast && <div className="banner info small">{toast}</div>}
       <div className="form-stack">
         {CRYPTO_METHODS.map((method) => {
-          const config = { ...method.stub, ...(find(method.id) ?? {}) };
+          const config = merged(method);
           const enabled = config.enabled === true;
           const address = String(config.address ?? '').trim();
           const wallet = String(config.lnbitsUrl ?? '').trim();
+          const dirty = Boolean(drafts[method.id]);
           return (
             <div key={method.id} className="card form-stack">
               <div className="row between">
@@ -627,32 +703,45 @@ function CryptoPayments() {
                 </label>
               </div>
               <div className="form-grid">
-                {method.fields.map((field) => (
-                  <label className="field" key={field.key}>
-                    {field.label}
-                    {field.hint ? <span className="hint">{field.hint}</span> : null}
-                    {field.kind === 'select' ? (
-                      <select
-                        value={String(config[field.key] ?? field.options?.[0] ?? '')}
-                        onChange={(e) => void put(method, { [field.key]: e.target.value })}
-                      >
-                        {(field.options ?? []).map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type={field.kind === 'number' ? 'number' : 'text'}
-                        className={field.key === 'address' ? 'mono' : undefined}
-                        value={String(config[field.key] ?? '')}
-                        placeholder={field.placeholder}
-                        onChange={(e) => void put(method, { [field.key]: field.kind === 'number' ? Number(e.target.value) : e.target.value })}
-                      />
-                    )}
-                  </label>
-                ))}
+                {method.fields.map((field) => {
+                  const problem = problems[`${method.id}.${field.key}`];
+                  return (
+                    <label className="field" key={field.key}>
+                      {field.label}
+                      {field.hint ? <span className="hint">{field.hint}</span> : null}
+                      {field.kind === 'select' ? (
+                        <select
+                          value={String(config[field.key] ?? field.options?.[0] ?? '')}
+                          onChange={(e) => editField(method, field.key, e.target.value)}
+                        >
+                          {(field.options ?? []).map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={field.kind === 'number' ? 'number' : 'text'}
+                          className={`${field.key === 'address' ? 'mono' : ''} ${problem ? 'invalid' : ''}`}
+                          value={String(config[field.key] ?? '')}
+                          placeholder={field.placeholder}
+                          onChange={(e) => editField(method, field.key, field.kind === 'number' ? Number(e.target.value) : e.target.value)}
+                        />
+                      )}
+                      {problem ? <span className="tiny field-problem">{problem}</span> : null}
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="row">
+                <button className="primary small" disabled={!dirty} onClick={() => void saveDraft(method)}>
+                  Save
+                </button>
+                <button className="small" disabled={!dirty} onClick={() => discardDraft(method)}>
+                  Discard
+                </button>
+                {dirty ? <span className="tiny faint">Unsaved changes</span> : null}
               </div>
               <p className="small muted">{method.note}</p>
               {enabled && !address && !wallet ? (
@@ -835,8 +924,7 @@ function patchFor(path: string, value: unknown): Record<string, unknown> {
     .reduce<unknown>((inner, key) => ({ [key]: inner }), value) as Record<string, unknown>;
 }
 
-function SettingsTab({ groups }: { groups: FieldGroup[] }) {
-  const [group, setGroup] = useState(() => groups[0]?.id ?? '');
+function SettingsTab({ groups, only }: { groups: FieldGroup[]; only?: string }) {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [json, setJson] = useState('');
   const [toast, show] = useToast();
@@ -867,20 +955,17 @@ function SettingsTab({ groups }: { groups: FieldGroup[] }) {
   };
 
   if (!config) return <Loading />;
-  const active = groups.find((g) => g.id === group) ?? groups[0];
+  // No menu item picked: the full configuration card is the default view. A picked
+  // group shows just its own card (and its extra panel), nothing else.
+  const active = only ? groups.find((g) => g.id === only) : undefined;
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
-      <div className="tabs">
-        {groups.map((g) => (
-          <button key={g.id} className={`tab ${active.id === g.id ? 'on' : ''}`} onClick={() => setGroup(g.id)}>
-            {g.label}
-          </button>
-        ))}
-      </div>
-      <div className="card form-stack">
-        <h3>{active.label}</h3>
-        <div className="form-grid">
+      {active ? (
+        <>
+        <div className="card form-stack">
+          <h3>{active.label}</h3>
+          <div className="form-grid">
           {active.fields.map((field) => {
             const value = get(config, field.path);
             const commit = (next: unknown) => void save(patchFor(field.path, next));
@@ -924,8 +1009,10 @@ function SettingsTab({ groups }: { groups: FieldGroup[] }) {
         </div>
       </div>
       {active.extra?.(config, save)}
-      <div className="card form-stack">
-        <h3>Full configuration</h3>
+        </>
+      ) : (
+        <div className="card form-stack">
+          <h3>Full configuration</h3>
         <p className="small muted">
           Everything, including payment methods and storage backends. See docs/OPERATORS.md for every option. Saving replaces the whole
           configuration.
@@ -948,6 +1035,7 @@ function SettingsTab({ groups }: { groups: FieldGroup[] }) {
           <button onClick={load}>Revert</button>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -1131,7 +1219,8 @@ export function AdminApp() {
   const [status, setStatus] = useState<Status | null>(null);
   const [needsLogin, setNeedsLogin] = useState(!loadToken());
   const [tab, setTab] = useState('overview');
-  const [tabMenu, setTabMenu] = useState<{ top: number; left: number } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  const [settingsOnly, setSettingsOnly] = useState<string | undefined>(undefined);
 
   const load = useCallback(() => {
     admin<Status>('/v1/admin/status')
@@ -1157,9 +1246,17 @@ export function AdminApp() {
           ['tiers', 'Tiers'],
         ] as [string, string][])
       : ([
+          // Review opens the submissions queue; its menu below jumps to the other
+          // review pages. A dot (not a count) marks that something is waiting.
           [
             'review',
-            `Review${status.pending ? ` (${status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0) + (status.pending.iconSuggestions ?? 0) + (status.pending.accountLinks ?? 0)})` : ''}`,
+            `Review${
+              status.pending &&
+              status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0) + (status.pending.iconSuggestions ?? 0) + (status.pending.accountLinks ?? 0) >
+                0
+                ? ' •'
+                : ''
+            }`,
           ],
           ['catalog', 'Catalog'],
           ['claims', 'Claims'],
@@ -1200,30 +1297,62 @@ export function AdminApp() {
       </div>
       <div className="tabs">
         {tabs.map(([id, label]) =>
-          id === 'content' && provider ? (
-            // The Content tab still goes to the content list; hovering it shows the
-            // shortcuts to the "Add locally" and "Client suggestion" pages below.
-            // The menu is fixed-positioned so the scrolling tabs bar cannot clip it —
-            // it opens over the content at the top of the page.
+          // Tabs with a hover menu below them: Review (the review pages), Content (add
+          // pages), Accounts (moderation) and Settings (the configuration groups). The
+          // menu is fixed-positioned so the scrolling tabs bar cannot clip it — it opens
+          // over the content at the top.
+          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' ? (
             <div
               key={id}
               className="tab-menu"
               onMouseEnter={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
-                setTabMenu({ top: rect.bottom, left: rect.left });
+                setTabMenu({ id, top: rect.bottom, left: rect.left });
               }}
               onMouseLeave={() => setTabMenu(null)}
             >
               <button
-                className={`tab ${tab === id || tab === 'add-local' || tab === 'suggestions' ? 'on' : ''}`}
-                onClick={() => (setTabMenu(null), setTab(id), load())}
+                className={`tab ${
+                  tab === id ||
+                  (id === 'content' && (tab === 'add-local' || tab === 'suggestions')) ||
+                  (id === 'accounts' && tab === 'moderation') ||
+                  (id === 'review' && tab.startsWith('review'))
+                    ? 'on'
+                    : ''
+                }`}
+                onClick={() => (
+                  setTabMenu(null),
+                  id === 'settings' && setSettingsOnly(undefined),
+                  setTab(id),
+                  load()
+                )}
               >
                 {label}
               </button>
-              {tabMenu && (
+              {tabMenu?.id === id && (
                 <div className="tab-menu-items" style={{ position: 'fixed', top: tabMenu.top, left: tabMenu.left }}>
-                  <button onClick={() => (setTabMenu(null), setTab('add-local'), load())}>Add locally</button>
-                  <button onClick={() => (setTabMenu(null), setTab('suggestions'), load())}>Client suggestion</button>
+                  {id === 'content' && (
+                    <>
+                      <button onClick={() => (setTabMenu(null), setTab('add-local'), load())}>Add locally</button>
+                      <button onClick={() => (setTabMenu(null), setTab('suggestions'), load())}>Client suggestion</button>
+                    </>
+                  )}
+                  {id === 'review' && (
+                    <>
+                      <button onClick={() => (setTabMenu(null), setTab('review'), load())}>Submissions</button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-suggestions'), load())}>Suggestions</button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-content'), load())}>Content for creators</button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-icons'), load())}>Creator icons</button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-links'), load())}>Account links without the creator key</button>
+                    </>
+                  )}
+                  {id === 'accounts' && <button onClick={() => (setTabMenu(null), setTab('moderation'), load())}>Moderation</button>}
+                  {id === 'settings' &&
+                    (provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS).map((group) => (
+                      <button key={group.id} onClick={() => (setTabMenu(null), setSettingsOnly(group.id), setTab('settings'), load())}>
+                        {group.label}
+                      </button>
+                    ))}
                 </div>
               )}
             </div>
@@ -1235,14 +1364,10 @@ export function AdminApp() {
         )}
       </div>
       {tab === 'overview' && <Overview status={status} />}
-      {tab === 'accounts' && (
-        <>
-          <Accounts />
-          <ModerationPanel />
-        </>
-      )}
+      {tab === 'accounts' && <Accounts />}
+      {tab === 'moderation' && <ModerationPanel />}
       {tab === 'payments' && <Payments />}
-      {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} />}
+      {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} only={settingsOnly} />}
       {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}
       <ToastArea />
     </div>
@@ -1437,6 +1562,8 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
       { path: 'console.catalog.perPage', label: 'Catalog: items per page', type: 'number', hint: '5–500' },
       { path: 'console.creators.paging', label: 'Creators: lazy loading or pagination', type: 'select', options: ['lazy', 'pages'] },
       { path: 'console.creators.perPage', label: 'Creators: items per page', type: 'number', hint: '5–500' },
+      { path: 'console.comments.paging', label: 'Comments: lazy loading or pagination', type: 'select', options: ['lazy', 'pages'] },
+      { path: 'console.comments.perPage', label: 'Comments: items per page', type: 'number', hint: '5–500' },
     ],
   },
 ];

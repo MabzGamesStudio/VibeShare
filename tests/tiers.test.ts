@@ -126,7 +126,7 @@ describe('content storage tiers', () => {
     const provider = await startProvider();
     try {
       const data = randomBytesOf(MiB);
-      const { cid, manifest } = await provider.importBuffer(data, { name: 'job.bin' });
+      const { cid } = await provider.importBuffer(data, { name: 'job.bin' });
       const jobsFor = () => provider.service.jobs().filter((job) => job.cid === cid);
 
       // Content created → its storage job exists, shaped by the default (bronze) plan.
@@ -138,26 +138,16 @@ describe('content storage tiers', () => {
       assert.equal(jobsFor().length, 1);
       assert.equal(jobsFor()[0].replicas, 5, 'gold wants two media copies and three URL backups');
 
-      // A live test asks a holder for a real chunk and pays its account the reward.
+      // The live test goes through the user's endpoints — never a poll at the client.
+      // Each endpoint is tried in turn; the first whose chunks match the content id
+      // wins and moves to the top of that user's list.
       const job = jobsFor()[0];
       const user = clientFor(provider.url(), 'identity');
       await user.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
       const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
       await user.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
       const account = (await user.json<{ account: { id: string } }>('/v1/account')).account;
-      const fake = { id: account.id } as never;
-      const testing = provider.service.testJob(job.id, 3);
-      const task = (await provider.service.poll(fake, 0)).find((entry) => entry.type === 'retrieve');
-      assert.ok(task, 'the test asks a holder for a chunk');
-      const index = manifest.chunks.findIndex((chunk) => chunk.id === task.chunkId);
-      const start = manifest.chunks.slice(0, index).reduce((sum, chunk) => sum + chunk.size, 0);
-      await provider.service.answer(fake, task.id, data.subarray(start, start + manifest.chunks[index].size));
-      const result = await testing;
-      assert.equal(result.ok, true);
-      assert.equal(result.account, account.id);
-      assert.equal(result.credited, 3, 'the test pays the holder’s account');
 
-      // Any endpoint can be checked: available, hash-matching bytes pass — the rest fail.
       const server = createServer((req, res) => {
         if (req.url?.includes('/gone/')) {
           res.writeHead(404).end();
@@ -168,6 +158,43 @@ describe('content storage tiers', () => {
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       try {
         const port = (server.address() as AddressInfo).port;
+        const deadUrl = `http://127.0.0.1:${port}/gone/${cid}`;
+        const goodUrl = `http://127.0.0.1:${port}/files/${cid}`;
+        // The dead endpoint is offered first: the test must skip past it to the good one.
+        await user.json('/v1/content-urls', { body: { cid, url: deadUrl } });
+        await user.json('/v1/content-urls', { body: { cid, url: goodUrl } });
+        const testing = await admin<{
+          test: { ok: boolean; account?: string; endpoint?: string; chunks?: { matched: number; total: number }; checked: number; total: number };
+        }>(provider.url(), `/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: { account: account.id } });
+        assert.equal(testing.test.ok, true, 'the first working endpoint serves the content');
+        assert.equal(testing.test.account, account.id);
+        assert.equal(testing.test.endpoint, goodUrl);
+        assert.equal(testing.test.checked, 2, 'the dead endpoint was tried first');
+        assert.equal(testing.test.chunks?.matched, testing.test.chunks?.total, 'every chunk matches the content id');
+
+        // The working endpoint moved to the top of that user's list.
+        const items = (provider as unknown as { contentUrls: { data: { items: Record<string, { account: string; url?: string; fails?: number; lastOkAt?: number }> } } })
+          .contentUrls.data.items;
+        const links = Object.values(items)
+          .filter((record) => record.account === account.id)
+          .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0) || (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0));
+        assert.equal(links[0].url, goodUrl, 'the working endpoint moved to the top');
+
+        // A user whose every endpoint fails goes red failed and out of the job.
+        const poor = clientFor(provider.url(), 'identity');
+        await poor.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+        const poorAssignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id && entry.accountId !== account.id)!;
+        await poor.json(`/v1/services/storage/assignments/${poorAssignment.id}/ready`, { method: 'POST' });
+        await poor.json('/v1/content-urls', { body: { cid, url: deadUrl } });
+        const allUsers = await admin<{ test: { ok: boolean } }>(provider.url(), `/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: {} });
+        assert.equal(allUsers.test.ok, true, 'the first user still serves the content');
+        assert.equal(
+          provider.service.assignmentsForAdmin().find((entry) => entry.id === poorAssignment.id)?.status,
+          'failed',
+          'a user whose endpoints all fail is red failed and out of the job'
+        );
+
+        // Any endpoint can be checked: available, hash-matching bytes pass — the rest fail.
         const good = await admin<{ verify: { ok: boolean; bytes: number } }>(provider.url(), `/v1/admin/content/${cid}/verify`, {
           method: 'POST',
           body: { url: `http://127.0.0.1:${port}/files/${cid}` },

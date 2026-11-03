@@ -164,7 +164,7 @@ function SubmissionCard({ submission, done }: { submission: Submission; done: ()
   );
 }
 
-function Review() {
+function Review({ section }: { section: 'submissions' | 'suggestions' | 'creators' | 'icons' | 'links' }) {
   const [submissions, setSubmissions] = useState<Submission[] | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [creatorIdeas, setCreatorIdeas] = useState<CreatorSuggestion[]>([]);
@@ -189,6 +189,7 @@ function Review() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
+      {section === 'submissions' && (<>
       <h2>Submissions</h2>
       {!submissions ? (
         <Loading />
@@ -197,6 +198,9 @@ function Review() {
       ) : (
         submissions.map((submission) => <SubmissionCard key={submission.id} submission={submission} done={load} />)
       )}
+      </>
+      )}
+      {section === 'suggestions' && (<>
       <h2 style={{ marginTop: 20 }}>Suggestions</h2>
       {suggestions.length === 0 ? (
         <p className="muted small">Nothing waiting.</p>
@@ -246,6 +250,9 @@ function Review() {
           </table>
         </div>
       )}
+      </>
+      )}
+      {section === 'creators' && (<>
       <h2 style={{ marginTop: 20 }}>Content for creators</h2>
       {creatorIdeas.length === 0 ? (
         <p className="muted small">Nothing waiting.</p>
@@ -288,6 +295,9 @@ function Review() {
           </table>
         </div>
       )}
+      </>
+      )}
+      {section === 'icons' && (<>
       <h2 style={{ marginTop: 20 }}>Creator icons</h2>
       {icons.length === 0 ? (
         <p className="muted small">Nothing waiting.</p>
@@ -329,6 +339,9 @@ function Review() {
           </table>
         </div>
       )}
+      </>
+      )}
+      {section === 'links' && (<>
       <h2 style={{ marginTop: 20 }}>Account links without the creator key</h2>
       {accountLinks.length === 0 ? (
         <p className="muted small">Nothing waiting.</p>
@@ -372,6 +385,8 @@ function Review() {
           </table>
         </div>
       )}
+      </>
+      )}
     </div>
   );
 }
@@ -407,6 +422,38 @@ interface Entry {
   platformStats?: Record<string, number>;
 }
 
+/** Where an entry was found, in operator words (kept separate from its status). */
+function originLabel(entry: Entry): string {
+  switch (entry.origin) {
+    case 'crawler':
+      return `crawler${entry.adapter ? ` (${entry.adapter})` : ''}`;
+    case 'submission':
+      return 'user upload';
+    case 'report':
+      return 'user suggestion';
+    case 'peer':
+      return 'peer node';
+    case 'operator':
+      return 'the operator';
+    default:
+      return 'unknown';
+  }
+}
+
+/** The preset reason tags of an age rating; “other” carries a custom description. */
+const RATING_REASONS = ['violence', 'language', 'sexual content', 'nudity', 'drugs', 'fear', 'gambling', 'hate speech'];
+
+/** The age-rating reason note of an entry, when one is tagged. */
+function ratingReasonOf(entry: { notes?: { kind: string; value: string; reason: string }[] }): { value: string; reason: string } | null {
+  return entry.notes?.find((note) => note.kind === 'rating') ?? null;
+}
+
+/** A timestamp first, then how long ago it was (2 weeks ago, 5 mins ago). */
+function stampWithAgo(value?: string): string {
+  if (!value) return '—';
+  return `${new Date(value).toLocaleString()} (${timeAgo(value) || 'just now'})`;
+}
+
 /** Everything the node knows about one entry, opened by clicking it in the catalog. */
 function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () => void; onEdit: () => void }) {
   const fullId = [entry.id, ...entry.sources].join('~');
@@ -434,14 +481,23 @@ function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () =>
           <dt>Status</dt>
           <dd>
             <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
-            {entry.origin && <span className="tiny faint"> · from {entry.origin}{entry.adapter ? ` (${entry.adapter})` : ''}</span>}
             {entry.reason && <div className="tiny" style={{ color: 'var(--danger)' }}>{entry.reason}</div>}
           </dd>
+          <dt>Found via</dt>
+          <dd>{originLabel(entry)}</dd>
           <dt>Format</dt>
           <dd>
-            {FORMAT_LABELS[entry.format]} · {RATING_LABELS[entry.rating]}
+            {FORMAT_LABELS[entry.format]}
             {entry.durationSeconds ? ` · ${formatDuration(entry.durationSeconds)}` : ''}
             {entry.language ? ` · ${entry.language}` : ''}
+          </dd>
+          <dt>Age rating</dt>
+          <dd>
+            <span className="badge">{RATING_LABELS[entry.rating]}</span>
+            {(() => {
+              const reason = ratingReasonOf(entry);
+              return reason ? <span className="badge">{reason.value === 'other' ? reason.reason : reason.value}</span> : null;
+            })()}
           </dd>
           <dt>Topics</dt>
           <dd>{entry.topics.length ? entry.topics.join(', ') : '—'}</dd>
@@ -450,7 +506,7 @@ function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () =>
           <dt>Creator</dt>
           <dd className="mono tiny">{entry.creatorId ?? '—'}</dd>
           <dt>Published</dt>
-          <dd>{timeAgo(entry.publishedAt) || '—'}</dd>
+          <dd>{stampWithAgo(entry.publishedAt)}</dd>
           <dt>Votes</dt>
           <dd>
             👍 {entry.likes} · 👎 {entry.dislikes}
@@ -477,15 +533,17 @@ function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () =>
           )}
           <dt>Added</dt>
           <dd>
-            {timeAgo(entry.addedAt) || '—'}
-            {entry.updatedAt ? ` · updated ${timeAgo(entry.updatedAt)}` : ''}
+            {stampWithAgo(entry.addedAt)}
+            {entry.updatedAt ? ` · updated ${stampWithAgo(entry.updatedAt)}` : ''}
           </dd>
         </dl>
         {entry.description && <p className="small">{entry.description}</p>}
-        {entry.notes && entry.notes.length > 0 && (
+        {entry.notes && entry.notes.filter((note) => note.kind !== 'rating').length > 0 && (
           <div>
             <h3>Why it is tagged</h3>
-            {entry.notes.map((note) => (
+            {entry.notes
+              .filter((note) => note.kind !== 'rating')
+              .map((note) => (
               <div key={note.kind + note.value} className="note small">
                 <strong>
                   {note.kind}: {note.value}
@@ -504,6 +562,13 @@ const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', 
 
 function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClose: () => void; onSaved: () => void }) {
   const [draft, setDraft] = useState(entry);
+  const ratingNote = (draft.notes ?? []).find((note) => note.kind === 'rating') ?? null;
+  // The age-rating reason: a preset tag from the dropdown, or “other” with a custom text.
+  const setRatingNote = (value: string, reason: string) => {
+    const notes = (draft.notes ?? []).filter((note) => note.kind !== 'rating');
+    if (value) notes.push({ kind: 'rating', value, reason });
+    setDraft({ ...draft, notes });
+  };
   const [idText, setIdText] = useState(entry.id ? [entry.id, ...(entry.sources ?? [])].join('~') : '');
   const [error, setError] = useState<string | null>(null);
   const resolvedId = (() => {
@@ -588,6 +653,27 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
               ))}
             </select>
           </label>
+          <label className="field">
+            Age rating reason
+            <select
+              value={ratingNote ? (RATING_REASONS.includes(ratingNote.value) ? ratingNote.value : 'other') : ''}
+              onChange={(e) => setRatingNote(e.target.value, e.target.value === 'other' ? (ratingNote?.reason ?? '') : '')}
+            >
+              <option value="">No reason tagged</option>
+              {RATING_REASONS.map((reason) => (
+                <option key={reason} value={reason}>
+                  {reason}
+                </option>
+              ))}
+              <option value="other">Other (custom description)</option>
+            </select>
+          </label>
+          {ratingNote && !RATING_REASONS.includes(ratingNote.value) && (
+            <label className="field">
+              Custom description
+              <input type="text" value={ratingNote.reason} onChange={(e) => setRatingNote('other', e.target.value)} />
+            </label>
+          )}
           <label className="field">
             Language
             <input type="text" value={draft.language ?? ''} onChange={(e) => setDraft({ ...draft, language: e.target.value || undefined })} />
@@ -794,43 +880,16 @@ function Catalog() {
                       <div>
                         <strong>{entry.title}</strong>
                         <div className="mono tiny faint">{entry.id}</div>
-                        {entry.platformStats && Object.keys(entry.platformStats).length > 0 && (
-                          <div className="tiny faint" title="Platform numbers clients reported">
-                            {Object.entries(entry.platformStats)
-                              .map(([key, value]) => `${key} ${value}`)
-                              .join(' · ')}
-                          </div>
-                        )}
-                        {entry.reason && (
-                          <div className="tiny" style={{ color: 'var(--danger)' }}>
-                            {entry.reason}
-                          </div>
-                        )}
                       </div>
                     </div>
                   </td>
                   <td>
                     <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
-                    {entry.origin === 'crawler' && (
-                      <div className="tiny faint" style={{ marginTop: 4 }}>
-                        found on {entry.adapter}
-                        {entry.pageUrl && (
-                          <>
-                            {' '}
-                            ·{' '}
-                            <a className="link" href={entry.pageUrl} target="_blank" rel="noreferrer">
-                              open
-                            </a>
-                          </>
-                        )}
-                      </div>
-                    )}
                   </td>
+                  <td className="small">{FORMAT_LABELS[entry.format]}</td>
                   <td className="small">
-                    {FORMAT_LABELS[entry.format]} · {RATING_LABELS[entry.rating]}
-                  </td>
-                  <td className="small">
-                    👍 {entry.likes} · 👎 {entry.dislikes}
+                    <div>👍 {entry.likes}</div>
+                    <div>👎 {entry.dislikes}</div>
                   </td>
                   <td>
                     <div className="row">
@@ -1275,7 +1334,11 @@ function Crawler() {
                     {adapter.api?.pausedUntil && <span className="badge warn">rate limited</span>}
                   </label>
                   <div className="tiny faint">{adapter.description}</div>
-                  {adapter.stats.lastError && <div className="tiny" style={{ color: 'var(--warn)' }}>{adapter.stats.lastError}</div>}
+                  {adapter.stats.lastError && (
+                    <div className="tiny ellipsis" style={{ color: 'var(--warn)', maxWidth: 280 }} title={adapter.stats.lastError}>
+                      {adapter.stats.lastError}
+                    </div>
+                  )}
                 </td>
                 <td className="small">{adapter.stats.found}</td>
                 <td className="small">{adapter.stats.added}</td>
@@ -1402,7 +1465,11 @@ export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'sources') return <Sources />;
   if (tab === 'claims') return <Claims />;
   if (tab === 'peers') return <Peers />;
-  if (tab === 'review') return <Review />;
+  if (tab === 'review') return <Review section="submissions" />;
+  if (tab === 'review-suggestions') return <Review section="suggestions" />;
+  if (tab === 'review-content') return <Review section="creators" />;
+  if (tab === 'review-icons') return <Review section="icons" />;
+  if (tab === 'review-links') return <Review section="links" />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;
   if (tab === 'comments') return <CommentsTab />;
@@ -1444,7 +1511,10 @@ function CommentsTab() {
   const [sections, setSections] = useState<CommentSectionSummary[] | null>(null);
   const [open, setOpen] = useState<AdminCommentsView | null>(null);
   const [pick, setPick] = useState('');
+  const [page, setPage] = useState(0);
+  const [count, setCount] = useState(50);
   const [toast, show] = useToast();
+  const { prefs, save: savePaging } = useConsoleList('comments');
 
   const load = useCallback(() => {
     admin<{ sections: CommentSectionSummary[] }>('/v1/admin/comments')
@@ -1452,6 +1522,14 @@ function CommentsTab() {
       .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
+
+  // The same pagination and lazy loading as the catalog and creators lists.
+  const total = sections?.length ?? 0;
+  const visible = sections
+    ? prefs.paging === 'pages'
+      ? sections.slice(page * prefs.perPage, (page + 1) * prefs.perPage)
+      : sections.slice(0, count)
+    : [];
 
   const openSection = async (id: string) => {
     try {
@@ -1483,7 +1561,18 @@ function CommentsTab() {
         <button className="primary" disabled={!pick.trim()} onClick={() => void openSection(pick.trim())}>
           Open
         </button>
+        <ListControls
+          prefs={prefs}
+          save={(patch) => {
+            savePaging(patch);
+            setPage(0);
+            setCount(patch.perPage ?? prefs.perPage);
+          }}
+        />
       </div>
+      {sections && prefs.paging === 'pages' && (
+        <Pager page={page} perPage={prefs.perPage} total={total} loading={false} go={setPage} />
+      )}
       {!sections ? (
         <Loading />
       ) : sections.length === 0 ? (
@@ -1492,7 +1581,7 @@ function CommentsTab() {
         <div className="card" style={{ padding: 0 }}>
           <table className="table">
             <tbody>
-              {sections.map((section) => (
+              {visible.map((section) => (
                 <tr key={section.content} style={{ cursor: 'pointer' }} title="Open details" onClick={() => void openSection(section.content)}>
                   <td className="mono small">{section.content}</td>
                   <td className="small">
@@ -1506,6 +1595,19 @@ function CommentsTab() {
             </tbody>
           </table>
         </div>
+      )}
+      {sections && prefs.paging === 'lazy' && (
+        <>
+          <Sentinel onMore={() => setCount((n) => n + prefs.perPage)} done={count >= total} />
+          {count < total && (
+            <p className="hint">
+              Scroll for more ({Math.min(count, total)} of {total})
+            </p>
+          )}
+        </>
+      )}
+      {sections && prefs.paging === 'pages' && (
+        <Pager page={page} perPage={prefs.perPage} total={total} loading={false} go={setPage} />
       )}
       {open && (
         <div className="card form-stack">

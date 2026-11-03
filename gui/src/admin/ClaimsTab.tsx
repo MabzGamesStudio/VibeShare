@@ -167,9 +167,6 @@ export function Claims() {
             <span className="hint">The age at which the recency factor is halfway down.</span>
           </label>
         </div>
-        <p className="hint">
-          Example: a YouTube claim with 0.001 × views + 0.001 × comments + 0.01 × subscribers + 0.01 × likes, times the recency decay.
-        </p>
       </div>
     </div>
   );

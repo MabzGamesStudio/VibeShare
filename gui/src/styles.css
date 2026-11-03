@@ -3474,3 +3474,57 @@ button.layout-option.on {
     padding-left: 10px;
   }
 }
+
+/* Provider admin: storage job rows, endpoint rows and the tier job settings. */
+.jobs-stack {
+  gap: 20px;
+}
+.job-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.skeleton-row {
+  opacity: 0.75;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+.endpoint-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 6px 8px 6px 28px;
+}
+.endpoint-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+.media-rows td {
+  padding: 10px 8px;
+}
+.tier-block {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.tier-block .job-settings {
+  opacity: 0.95;
+}
+input.invalid {
+  border-color: var(--danger) !important;
+}
+.field-problem {
+  color: var(--danger);
+}
+
+/* Long crawler error lines truncate instead of wrapping. */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -55,7 +55,7 @@ import {
 } from './storage/backends.js';
 import { basename } from 'node:path';
 import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
-import { defaultTiersConfig, TierManager, withDefaultTiers, type TierState, type TiersConfig } from './tiers.js';
+import { defaultTiersConfig, TierManager, tierJob, withDefaultTiers, type TierState, type TiersConfig } from './tiers.js';
 import { vvshEncoderBackend } from './transcode.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { decodeVvshChunk, decodeVvshFrames } from '../shared/vvsh-encode.js';
@@ -218,6 +218,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private backendCache: { key: string; list: BlobBackend[] } = { key: '', list: [] };
   private gcTimer: NodeJS.Timeout;
   private tierTimer: NodeJS.Timeout;
+  private endpointTimer: NodeJS.Timeout;
   private syncTimer: NodeJS.Timeout | null = null;
 
   constructor(options: NodeOptions<ProviderConfig>) {
@@ -272,6 +273,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     // Tier lifecycles: expired assignments downgrade along their chain or are forgotten.
     this.tierTimer = setInterval(() => void this.tiers.tick().catch((error) => log.warn('tier tick:', error)), 3_600_000);
     this.tierTimer.unref();
+    // Periodic endpoint tests for the jobs that want them (never client polling).
+    this.endpointTimer = setInterval(() => void this.runEndpointTests().catch((error) => log.warn('endpoint tests:', error)), 30_000);
+    this.endpointTimer.unref();
   }
 
   backends(): BlobBackend[] {
@@ -602,6 +606,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         (a, b) =>
           Number(b.account === preferAccount) - Number(a.account === preferAccount) ||
           (a.fails ?? 0) - (b.fails ?? 0) ||
+          (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0) ||
           b.createdAt.localeCompare(a.createdAt)
       );
     for (const record of records) {
@@ -631,13 +636,18 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    * Checks that an endpoint really serves a content: downloads it and verifies the
    * returned bytes against the expected hashes — every chunk of the content must hash
    * into the stream (or the whole blob must hash to the id). Nothing is kept; this is
-   * a pure availability and integrity check.
+   * a pure availability and integrity check. A test is only ever correct when the
+   * returned chunks match the content id.
    */
-  async verifyEndpoint(cid: string, url: string): Promise<{ ok: boolean; url: string; bytes: number; error?: string }> {
+  async verifyEndpoint(
+    cid: string,
+    url: string,
+    timeoutMs = 30_000
+  ): Promise<{ ok: boolean; url: string; bytes: number; chunks?: { matched: number; total: number }; error?: string }> {
     const target = url.startsWith('http') && !url.includes(' ') && url.endsWith(cid) ? url : `${url.replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
     let data: Buffer;
     try {
-      const response = await fetch(target, { signal: AbortSignal.timeout(30_000) });
+      const response = await fetch(target, { signal: AbortSignal.timeout(Math.max(50, timeoutMs)) });
       if (!response.ok) return { ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}` };
       data = Buffer.from(await response.arrayBuffer());
     } catch (error) {
@@ -646,21 +656,104 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const manifest = this.store.getManifest(cid);
     if (manifest?.chunks.length) {
       let start = 0;
-      const missing = manifest.chunks.filter((chunk) => {
+      let matched = 0;
+      for (const chunk of manifest.chunks) {
         const slice = data.subarray(start, start + chunk.size);
         start += chunk.size;
-        return chunkIdOf(slice) !== chunk.id;
-      });
-      if (missing.length === 0) return { ok: true, url: target, bytes: data.length };
-      if (!bytesMatchCid(data, cid)) {
-        return { ok: false, url: target, bytes: data.length, error: `${missing.length} of ${manifest.chunks.length} chunks did not match the expected hashes` };
+        if (chunkIdOf(slice) === chunk.id) matched++;
       }
-      return { ok: true, url: target, bytes: data.length };
+      const chunks = { matched, total: manifest.chunks.length };
+      if (matched === manifest.chunks.length) return { ok: true, url: target, bytes: data.length, chunks };
+      if (bytesMatchCid(data, cid)) return { ok: true, url: target, bytes: data.length, chunks };
+      return {
+        ok: false,
+        url: target,
+        bytes: data.length,
+        chunks,
+        error: `${chunks.total - chunks.matched} of ${chunks.total} chunks did not match the expected hashes`,
+      };
     }
     if (!bytesMatchCid(data, cid)) {
       return { ok: false, url: target, bytes: data.length, error: 'The returned data does not match the expected hash' };
     }
-    return { ok: true, url: target, bytes: data.length };
+    return { ok: true, url: target, bytes: data.length, chunks: { matched: 1, total: 1 } };
+  }
+
+  /**
+   * Tests one storage job at its users' endpoints — never through the client's poll.
+   * For each user the endpoint list is tried in order (best record first): the first
+   * endpoint whose chunks match the content id wins and moves to the top of that user's
+   * list. A failing endpoint counts a failed request (yellow once it reaches the job's
+   * failure threshold); when every endpoint of a user fails, that user is red failed
+   * and out of the job.
+   */
+  async testStorageJob(
+    jobId: string,
+    onlyAccount?: string
+  ): Promise<{
+    ok: boolean;
+    account?: string;
+    endpoint?: string;
+    chunks?: { matched: number; total: number };
+    checked: number;
+    total: number;
+    error?: string;
+  }> {
+    const job = this.service.jobs().find((entry) => entry.id === jobId);
+    if (!job) throw notFound('No such job');
+    const cid = job.cid;
+    if (!cid) return { ok: false, checked: 0, total: 0, error: 'This job has no content id — there is nothing to fetch from its endpoints' };
+    const holders = this.service
+      .assignmentsForAdmin()
+      .filter(
+        (assignment) =>
+          assignment.jobId === job.id &&
+          (assignment.status === 'active' || assignment.status === 'downloading') &&
+          (!onlyAccount || assignment.accountId === onlyAccount)
+      );
+    if (!holders.length) {
+      return { ok: false, checked: 0, total: 0, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' };
+    }
+    const threshold = job.failedRequestsBeforeFailure ?? 3;
+    let checked = 0;
+    let total = 0;
+    let servedCount = 0;
+    for (const holder of holders) {
+      const records = Object.values(this.contentUrls.data.items)
+        .filter((record) => record.account === holder.accountId && Boolean(record.url ?? record.baseUrl))
+        .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0) || (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0));
+      total += records.length;
+      let served: { url: string; chunks?: { matched: number; total: number } } | null = null;
+      for (const record of records) {
+        checked++;
+        const target = record.url ?? `${String(record.baseUrl).replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
+        const verify = await this.verifyEndpoint(cid, target, job.maxLatencyMs ?? 30_000);
+        if (verify.ok) {
+          record.fails = 0;
+          record.lastOkAt = Date.now();
+          this.contentUrls.changed();
+          served = { url: verify.url, chunks: verify.chunks };
+          break;
+        }
+        record.fails = (record.fails ?? 0) + 1;
+        this.contentUrls.changed();
+      }
+      if (served) {
+        servedCount++;
+        if (onlyAccount) return { ok: true, account: holder.accountId, endpoint: served.url, chunks: served.chunks, checked, total };
+        continue;
+      }
+      // No endpoint of this user served the content: red failed for the user.
+      if (records.length) {
+        this.service.failHolder(holder.id);
+      }
+      if (onlyAccount) {
+        return { ok: false, account: holder.accountId, checked, total, error: `No endpoint of ${holder.accountId} served the content (${records.length} tried)` };
+      }
+    }
+    return servedCount
+      ? { ok: true, checked, total }
+      : { ok: false, checked, total, error: 'No endpoint served the content' };
   }
 
   /**
@@ -1497,18 +1590,49 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const copies =
       Object.values(state.plan.media).reduce((sum, count) => sum + count, 0) + (state.plan.externalUrls ?? 0);
     if (copies <= 0) return;
+    // The tier's own storage job settings: per-MiB retrieval and challenge rewards are
+    // scaled to the content's size, the rest is taken as-is.
+    const settings = tierJob(state.plan);
+    const mib = Math.max(1, Math.round((manifest.size ?? 0) / MiB));
     this.service.createJob({
       cid,
       title: manifest.meta?.title ?? manifest.name,
       chunks: manifest.chunks,
       replicas: Math.max(1, copies),
       durationSeconds: Math.max(86_400, (state.daysLeft ?? 90) * 86_400),
-      rewards: this.config.storageService.auto.rewards,
-      challengeIntervalSeconds: this.config.storageService.auto.challengeIntervalSeconds,
-      retrievalIntervalSeconds: this.config.storageService.auto.retrievalIntervalSeconds,
+      rewards: {
+        upfront: settings.upfrontCredits,
+        perRetrieval: Math.round(settings.perMbRetrieval * mib),
+        perChallenge: Math.round(settings.perMbChallenge * mib),
+        completion: settings.endOfTerm,
+      },
+      challengeIntervalSeconds: Math.max(1, settings.challengeEveryMinutes) * 60,
+      retrievalIntervalSeconds: Math.max(0, settings.retrievalTestEveryMinutes) * 60,
+      maxLatencyMs: settings.maxLatencyMs,
+      failedRequestsBeforeFailure: settings.failedRequestsBeforeFailure,
       requireIdentity: this.config.storageService.auto.requireIdentity,
       managed: true,
     });
+  }
+
+  /**
+   * Periodic endpoint tests: each job's users' endpoints are fetched on the job's own
+   * schedule ("retrieval test every"). The data is only ever checked at the endpoints —
+   * never by polling a client for it.
+   */
+  private async runEndpointTests(): Promise<void> {
+    const now = Date.now();
+    for (const job of this.service.jobs()) {
+      const every = (job.retrievalIntervalSeconds ?? 0) * 1000;
+      if (every <= 0 || job.status !== 'open') continue;
+      if (now - (job.lastEndpointTestAt ?? Date.parse(job.createdAt)) < every) continue;
+      job.lastEndpointTestAt = now;
+      try {
+        await this.testStorageJob(job.id);
+      } catch (error) {
+        log.debug('endpoint tests:', (error as Error).message);
+      }
+    }
   }
 
   private serviceRoutes(): void {
@@ -1882,15 +2006,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (!this.service.deleteJob(ctx.params.id)) throw notFound('No such job');
       return { ok: true };
     });
-    // A live test of one storage job: ask a holder for a real chunk and pay its account
-    // the reward when the bytes hash exactly — a failure takes the holder out of the job.
+    // A live test of one storage job: it goes through the users' endpoints (never the
+    // client's poll) and is only ever correct when the served chunks match the content
+    // id. The first working endpoint of a user wins and moves to the top of that user's
+    // list; when every endpoint of a user fails, that user is red failed and out.
     router.post('/v1/admin/storage/jobs/:id/test', async (ctx) => {
       this.requireAdmin(ctx);
-      const job = this.service.jobs().find((entry) => entry.id === ctx.params.id);
-      if (!job) throw notFound('No such job');
-      const body = await readJson<{ reward?: number }>(ctx.req).catch(() => ({} as { reward?: number }));
-      const reward = Number.isFinite(Number(body.reward)) && body.reward !== undefined ? Math.max(0, Number(body.reward)) : job.rewards.perRetrieval;
-      return { test: await this.service.testJob(job.id, reward) };
+      const body = await readJson<{ account?: string }>(ctx.req).catch(() => ({} as { account?: string }));
+      return { test: await this.testStorageJob(ctx.params.id, body.account ? String(body.account) : undefined) };
     });
     // Availability + integrity check: the endpoint must answer with bytes that hash to
     // the expected id exactly. A failing endpoint drops to the bottom of the try order.

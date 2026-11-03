@@ -16,6 +16,37 @@ export interface TierMedium {
   backends: string[];
 }
 
+/**
+ * The storage job a tier opens for its content: what it pays and how often it is
+ * checked. Retrieval and challenge pay per MiB of the content, so big jobs pay more.
+ */
+export interface TierJobSettings {
+  upfrontCredits: number;
+  perMbRetrieval: number;
+  perMbChallenge: number;
+  endOfTerm: number;
+  /** Endpoints slower than this count as failed checks. */
+  maxLatencyMs: number;
+  challengeEveryMinutes: number;
+  /** 0 = no periodic retrieval tests. */
+  retrievalTestEveryMinutes: number;
+  /** Consecutive failed requests before an endpoint counts as failed. */
+  failedRequestsBeforeFailure: number;
+}
+
+export function defaultTierJobSettings(): TierJobSettings {
+  return {
+    upfrontCredits: 20,
+    perMbRetrieval: 5,
+    perMbChallenge: 1,
+    endOfTerm: 20,
+    maxLatencyMs: 2000,
+    challengeEveryMinutes: 10,
+    retrievalTestEveryMinutes: 60,
+    failedRequestsBeforeFailure: 3,
+  };
+}
+
 /** One tier: the copy plan, its price and its lifecycle. */
 export interface TierConfig {
   id: string;
@@ -30,6 +61,8 @@ export interface TierConfig {
   lifecycleDays: number;
   /** Where expired assignments go (null = completely forgotten). */
   downgradeTo: string | null;
+  /** The storage job this tier opens for its content. */
+  job?: TierJobSettings;
 }
 
 export interface TiersConfig {
@@ -65,7 +98,7 @@ export interface TierState {
   expiresAt?: string;
   daysLeft?: number;
   manual?: boolean;
-  plan: { media: Record<string, number>; externalUrls: number };
+  plan: { media: Record<string, number>; externalUrls: number; job?: TierJobSettings };
   backups: { urls: number; domains: string[]; satisfied: boolean; note?: string };
   /** The tiers this content can be raised to, with the price for its size. */
   upgrades: { id: string; label: string; price: number; lifecycleDays: number; downgradeTo: string | null }[];
@@ -86,11 +119,16 @@ export function defaultTiersConfig(): TiersConfig {
       { id: 'ssd', label: 'SSD', backends: [] },
     ],
     tiers: [
-      { id: 'bronze', label: 'Bronze', media: {}, externalUrls: 2, pricePerMiB: 0, lifecycleDays: 90, downgradeTo: null },
-      { id: 'silver', label: 'Silver', media: { hdd: 1 }, externalUrls: 2, pricePerMiB: 1, lifecycleDays: 180, downgradeTo: 'bronze' },
-      { id: 'gold', label: 'Gold', media: { hdd: 1, ssd: 1 }, externalUrls: 3, pricePerMiB: 3, lifecycleDays: 365, downgradeTo: 'silver' },
+      { id: 'bronze', label: 'Bronze', media: {}, externalUrls: 2, pricePerMiB: 0, lifecycleDays: 90, downgradeTo: null, job: defaultTierJobSettings() },
+      { id: 'silver', label: 'Silver', media: { hdd: 1 }, externalUrls: 2, pricePerMiB: 1, lifecycleDays: 180, downgradeTo: 'bronze', job: defaultTierJobSettings() },
+      { id: 'gold', label: 'Gold', media: { hdd: 1, ssd: 1 }, externalUrls: 3, pricePerMiB: 3, lifecycleDays: 365, downgradeTo: 'silver', job: defaultTierJobSettings() },
     ],
   };
+}
+
+/** The job settings of one tier, with defaults for tiers saved before they existed. */
+export function tierJob(tier: { job?: TierJobSettings } | undefined): TierJobSettings {
+  return { ...defaultTierJobSettings(), ...(tier?.job ?? {}) };
 }
 
 const MiB = 1024 * 1024;
@@ -186,7 +224,7 @@ export class TierManager {
       tier: '',
       label: 'Not assigned yet',
       assignedAt: '',
-      plan: { media: tier?.media ?? {}, externalUrls: tier?.externalUrls ?? 0 },
+      plan: { media: tier?.media ?? {}, externalUrls: tier?.externalUrls ?? 0, job: tierJob(tier) },
       backups: { urls: 0, domains: [], satisfied: false },
       upgrades: (settings.tiers ?? []).map((entry) => ({
         id: entry.id,
@@ -215,7 +253,7 @@ export class TierManager {
       expiresAt: assignment.expiresAt,
       daysLeft: assignment.expiresAt ? Math.max(0, Math.round((Date.parse(assignment.expiresAt) - Date.now()) / 86_400_000)) : undefined,
       manual: assignment.manual,
-      plan: { media: tier?.media ?? {}, externalUrls: tier?.externalUrls ?? 0 },
+      plan: { media: tier?.media ?? {}, externalUrls: tier?.externalUrls ?? 0, job: tierJob(tier) },
       backups: {
         urls: counted,
         domains,

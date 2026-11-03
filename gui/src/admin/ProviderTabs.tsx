@@ -366,25 +366,34 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
   }
   for (let i = 0; i < (plan?.externalUrls ?? 0); i++) wanted.push({ kind: 'url', label: 'url' });
   const media = data.media ?? [];
-  // Accepted URL backups (and links holders of the job offer) fill the url slots.
+  // Accepted URL backups — deduplicated: the same endpoint must never fill two slots.
+  const seen = new Set<string>();
   const links = [
     ...(data.urls ?? []).filter((entry) => entry.status === 'accepted'),
     ...(data.jobs ?? []).flatMap((job) => job.holders.flatMap((holder) => holder.links.filter((link) => link.status === 'accepted'))),
-  ];
+  ].filter((link) => {
+    const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(data.record.cid)}`;
+    if (!location || seen.has(location)) return false;
+    seen.add(location);
+    return true;
+  });
   let urlSlot = 0;
-  const rows: { name: string; active: boolean; location: string }[] = wanted.map((slot) => {
+  const rows: { name: string; active: boolean; location: string; unfulfilled: boolean }[] = wanted.map((slot) => {
     if (slot.kind === 'url') {
       const link = links[urlSlot++];
-      const location = link?.location ?? (link ? (link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(data.record.cid)}`) : '');
-      return { name: 'url', active: Boolean(link), location };
+      const location = link ? (link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(data.record.cid)}`) : '';
+      return { name: 'url', active: Boolean(link), location, unfulfilled: !link };
     }
     const backend = media.find((entry) => (entry.medium ?? '').toLowerCase() === slot.label.toLowerCase() || entry.id === slot.label);
-    return { name: slot.label, active: Boolean(backend), location: backend?.location ?? backend?.id ?? '' };
+    return { name: slot.label, active: Boolean(backend), location: backend?.location ?? backend?.id ?? '', unfulfilled: false };
   });
-  // Anything actually stored outside the plan still shows up.
+  // Anything actually stored outside the plan still shows up (once per exact location).
+  const rowLocations = new Set(rows.map((row) => row.location).filter(Boolean));
   for (const entry of media) {
-    if (!rows.some((row) => row.location === (entry.location ?? entry.id))) {
-      rows.push({ name: entry.medium ?? entry.id, active: true, location: entry.location ?? entry.id });
+    const location = entry.location ?? entry.id;
+    if (!rowLocations.has(location)) {
+      rowLocations.add(location);
+      rows.push({ name: entry.medium ?? entry.id, active: true, location, unfulfilled: false });
     }
   }
   if (!rows.length) {
@@ -395,7 +404,7 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
     );
   }
   return (
-    <table className="table" style={{ marginTop: 6 }}>
+    <table className="table media-rows" style={{ marginTop: 6 }}>
       <tbody>
         {rows.map((row, index) => (
           <tr key={`${row.name}-${index}`}>
@@ -403,7 +412,9 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
               <strong>{row.name}</strong>
             </td>
             <td>
-              <span className={`badge ${row.active ? 'ok' : ''}`}>{row.active ? 'active' : 'not stored'}</span>
+              <span className={`badge ${row.unfulfilled ? 'warn' : row.active ? 'ok' : ''}`}>
+                {row.unfulfilled ? 'unfulfilled' : row.active ? 'active' : 'not stored'}
+              </span>
             </td>
             <td className="mono tiny" style={{ overflowWrap: 'anywhere' }}>
               {row.location || '—'}
@@ -416,31 +427,84 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
   );
 }
 
-/** The storage jobs tab: one row per job (active or not), holders and their ordered endpoints. */
+/** One endpoint row of a user inside a storage job: status tag, url and its buttons. */
+function EndpointRow({ cid, link, index }: { cid: string; link: NonNullable<ContentDetailsData['jobs']>[number]['holders'][number]['links'][number]; index: number }) {
+  const [result, setResult] = useState('');
+  const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(cid)}`;
+  const bad = (link.fails ?? 0) > 0;
+  const check = async (mode: 'test' | 'info') => {
+    setResult(mode === 'test' ? 'Testing…' : 'Fetching…');
+    try {
+      const answer = await admin<{ verify: { ok: boolean; url: string; bytes: number; chunks?: { matched: number; total: number }; error?: string } }>(
+        `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
+        { method: 'POST', body: { url: location, linkId: link.id } }
+      );
+      const v = answer.verify;
+      const chunks = v.chunks ? `${v.chunks.matched} of ${v.chunks.total} chunks match the content id` : 'hash matches the content id';
+      setResult(
+        v.ok
+          ? mode === 'test'
+            ? `✓ ${chunks}`
+            : `✓ ${(v.bytes / 1024 / 1024).toFixed(2)} MB · ${chunks}`
+          : `✗ ${v.error ?? 'does not match the content id'}`
+      );
+    } catch (e) {
+      setResult(`✗ ${message(e)}`);
+    }
+  };
+  return (
+    <div className="endpoint-row">
+      <span className="faint">#{index + 1}</span>
+      <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'accepted'}</span>
+      <span className="mono tiny endpoint-url" title={location}>
+        {location}
+      </span>
+      <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+        <button className="small" title="Fetch the endpoint and check that every chunk matches the content id" onClick={() => void check('test')}>
+          Test
+        </button>
+        <CopyButton text={location} label="Location" />
+        <button className="small" title="Fetch the endpoint and show what it serves" onClick={() => void check('info')}>
+          Fetch info
+        </button>
+      </span>
+      {result ? <span className="tiny faint">{result}</span> : null}
+    </div>
+  );
+}
+
+/**
+ * The storage jobs tab: one block per job (separated widely), and inside it one row per
+ * user — # and the test storage job button, the storage job tag and the user id — with
+ * that user's endpoint rows repeated underneath. Slots the plan still needs are shown
+ * as skeleton rows that say the job needs to be filled (no buttons on them).
+ */
 function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
   const [jobTests, setJobTests] = useState<Record<string, string>>({});
-  const [linkTests, setLinkTests] = useState<Record<string, string>>({});
   const [toast, show] = useToast();
 
-  const testJob = async (job: NonNullable<ContentDetailsData['jobs']>[number]) => {
-    setJobTests((m) => ({ ...m, [job.id]: 'Testing…' }));
+  const testJob = async (job: NonNullable<ContentDetailsData['jobs']>[number], accountId: string) => {
+    const key = `${job.id}:${accountId}`;
+    setJobTests((m) => ({ ...m, [key]: 'Testing each endpoint of this user…' }));
     try {
       const result = await admin<{
-        test: { ok: boolean; account?: string; chunkId: string; chunkIndex: number; chunkCount: number; credited: number; error?: string };
-      }>(`/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: {} });
+        test: { ok: boolean; account?: string; endpoint?: string; chunks?: { matched: number; total: number }; checked: number; total: number; error?: string };
+      }>(`/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: { account: accountId } });
       const t = result.test;
       setJobTests((m) => ({
         ...m,
-        [job.id]: t.ok
-          ? `✓ holder ${t.account?.slice(0, 16)}… returned chunk ${t.chunkIndex + 1} of ${t.chunkCount} — hash matches (chunks have their own hashes, not the content id) — paid ${t.credited} credits`
-          : `✗ ${t.error ?? 'no answer'}`,
+        [key]: t.ok
+          ? `✓ ${t.endpoint ?? 'endpoint'} serves the content — ${t.chunks ? `${t.chunks.matched} of ${t.chunks.total} chunks match the content id` : 'hash matches the content id'} (${t.checked} of ${t.total} tried) — moved to the top`
+          : `✗ ${t.error ?? 'no endpoint served the content'}`,
       }));
+      reload();
     } catch (e) {
-      setJobTests((m) => ({ ...m, [job.id]: `✗ ${message(e)}` }));
+      setJobTests((m) => ({ ...m, [key]: `✗ ${message(e)}` }));
     }
   };
 
-  if (!(data.jobs ?? []).length) {
+  const jobs = data.jobs ?? [];
+  if (!jobs.length) {
     return (
       <p className="small muted" style={{ marginTop: 6 }}>
         No storage jobs for this content yet.
@@ -448,130 +512,89 @@ function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: 
     );
   }
   return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>Status</th>
-          <th>Opened</th>
-          <th>Copies</th>
-          <th>Term</th>
-          <th>Rewards &amp; schedule</th>
-          <th />
-        </tr>
-      </thead>
-      <tbody>
-        {(data.jobs ?? []).map((job) => (
-          <Fragment key={job.id}>
-            <tr>
-              <td>
-                <span className={`badge ${job.status === 'failed' ? 'warn' : job.status === 'open' ? 'accent' : ''}`}>{job.status}</span>
-                {job.managed ? (
-                  <span className="badge ok" style={{ marginLeft: 6 }}>
-                    automatic
-                  </span>
-                ) : null}
-              </td>
-              <td className="small">{timeAgo(job.createdAt)}</td>
-              <td className="small">{job.replicas}</td>
-              <td className="small">{Math.round(job.durationSeconds / 86400)} days</td>
-              <td className="tiny faint">
+    <div className="form-stack jobs-stack" style={{ marginTop: 6 }}>
+      {jobs.map((job) => {
+        const slots = Math.max(job.replicas, job.holders.length);
+        return (
+          <div key={job.id} className="card form-stack" style={{ padding: 12 }}>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>storage job {job.status}</span>
+              {job.managed ? <span className="badge">automatic</span> : null}
+              <span className="tiny faint">
                 {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/challenge ·{' '}
-                {job.rewards.completion} end · challenge every {Math.round((job.challengeIntervalSeconds ?? 900) / 60)}m · test retrieval every{' '}
-                {Math.round((job.retrievalIntervalSeconds ?? 0) / 60)}m
-              </td>
-              <td>
-                <div className="row">
-                  {job.holders.some((holder) => holder.status === 'active') && (
-                    <button
-                      className="small"
-                      title="Ask a holder for a real chunk and pay its account the reward when the bytes match"
-                      onClick={() => void testJob(job)}
-                    >
-                      Test job
-                    </button>
-                  )}
-                  <button
-                    className="small danger"
-                    onClick={async () => {
-                      if (!window.confirm('Delete this storage job and every assignment under it?')) return;
-                      await admin(`/v1/admin/storage/jobs/${job.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                      reload();
-                    }}
-                  >
-                    Delete job
-                  </button>
-                </div>
-                {jobTests[job.id] ? (
-                  <div className="tiny" style={{ marginTop: 4 }}>
-                    {jobTests[job.id]}
-                  </div>
-                ) : null}
-              </td>
-            </tr>
+                {job.rewards.completion} end · challenge every {Math.round((job.challengeIntervalSeconds ?? 900) / 60)}m · test endpoints every{' '}
+                {Math.round((job.retrievalIntervalSeconds ?? 0) / 60)}m · {Math.round(job.durationSeconds / 86400)} days
+              </span>
+              <span className="row" style={{ marginLeft: 'auto', gap: 6 }}>
+                <button
+                  className="small danger"
+                  onClick={async () => {
+                    if (!window.confirm('Delete this storage job and every assignment under it?')) return;
+                    await admin(`/v1/admin/storage/jobs/${job.id}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                    reload();
+                  }}
+                >
+                  Delete job
+                </button>
+              </span>
+            </div>
 
-            {job.holders.map((holder) => {
-              const links = [...holder.links].sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0));
-              const allFailed = links.length > 0 && links.every((link) => (link.fails ?? 0) > 0);
-              const failed = holder.status === 'failed' || allFailed;
-              return (
-                <tr key={holder.id}>
-                  <td colSpan={6}>
-                    <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <span className={`badge ${failed ? 'warn' : holder.status === 'active' ? 'ok' : ''}`}>
-                        {failed ? 'failed' : holder.status}
+            <div className="form-stack" style={{ gap: 12 }}>
+              {Array.from({ length: slots }, (_unused, slot) => {
+                const holder = job.holders[slot];
+                // One storage job row per user: skeleton when the plan's copy is not filled yet.
+                if (!holder) {
+                  return (
+                    <div key={`empty-${slot}`} className="job-row skeleton-row">
+                      <span className="faint">#{slot + 1}</span>
+                      <span className="badge warn">needs to be filled</span>
+                      <span className="tiny faint">No user holds this copy of the job yet — accept offers or invite users to fill it.</span>
+                    </div>
+                  );
+                }
+                const links = [...holder.links].sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0));
+                const allFailed = links.length > 0 && links.every((link) => (link.fails ?? 0) > 0);
+                const failed = holder.status === 'failed' || allFailed;
+                return (
+                  <div key={holder.id} className="form-stack" style={{ gap: 6 }}>
+                    <div className="job-row">
+                      <span className="faint">#{slot + 1}</span>
+                      <button
+                        className="small"
+                        title="Test this user's storage job through each of their endpoints — the first that serves the content moves to the top of their list"
+                        onClick={() => void testJob(job, holder.accountId)}
+                      >
+                        Test storage job
+                      </button>
+                      <span className={`badge ${failed ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}>
+                        storage job {failed ? 'failed' : holder.status}
                       </span>
                       <span className="mono tiny">{holder.accountId}</span>
                       <span className="tiny faint">{holder.earned} credits earned</span>
                     </div>
-                    <div style={{ marginTop: 4 }}>
-                      {links.map((link, index) => {
-                        const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(cid)}`;
-                        const bad = (link.fails ?? 0) > 0;
-                        return (
-                          <div key={link.id} className="tiny" style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                            <span className="faint">#{index + 1}</span>
-                            <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'accepted'}</span>
-                            <span className="mono" style={{ overflowWrap: 'anywhere' }}>
-                              {location}
-                            </span>
-                            <button
-                              className="small"
-                              onClick={async () => {
-                                setLinkTests((m) => ({ ...m, [link.id]: 'Checking…' }));
-                                try {
-                                  const result = await admin<{ verify: { ok: boolean; url: string; bytes: number; error?: string } }>(
-                                    `/v1/admin/content/${encodeURIComponent(cid)}/verify`,
-                                    { method: 'POST', body: { url: location, linkId: link.id } }
-                                  );
-                                  setLinkTests((m) => ({
-                                    ...m,
-                                    [link.id]: result.verify.ok ? `✓ ${result.verify.url} serves the content` : `✗ ${result.verify.error ?? 'does not match'}`,
-                                  }));
-                                  reload();
-                                } catch (e) {
-                                  setLinkTests((m) => ({ ...m, [link.id]: `✗ ${message(e)}` }));
-                                }
-                              }}
-                            >
-                              Test
-                            </button>
-                            <CopyButton text={location} label="Location" />
-                            {linkTests[link.id] ? <span className="faint">{linkTests[link.id]}</span> : null}
-                          </div>
-                        );
-                      })}
-                      {links.length === 0 ? <div className="tiny faint">No endpoints offered by this account.</div> : null}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </Fragment>
-        ))}
-      </tbody>
-    </table>
+                    {links.length ? (
+                      links.map((link, index) => <EndpointRow key={link.id} cid={cid} link={link} index={index} />)
+                    ) : (
+                      <div className="tiny faint" style={{ paddingLeft: 28 }}>
+                        No endpoints offered by this account.
+                      </div>
+                    )}
+                    {jobTests[`${job.id}:${holder.accountId}`] ? (
+                      <div className="tiny" style={{ paddingLeft: 28 }}>
+                        {jobTests[`${job.id}:${holder.accountId}`]}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
+
 
 /** The content details tab: what the content is, with editable creator, sources, duplicates. */
 function ContentDetailsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
@@ -1319,6 +1342,16 @@ function Peering() {
   );
 }
 
+interface TierJobRow {
+  upfrontCredits: number;
+  perMbRetrieval: number;
+  perMbChallenge: number;
+  endOfTerm: number;
+  maxLatencyMs: number;
+  challengeEveryMinutes: number;
+  retrievalTestEveryMinutes: number;
+  failedRequestsBeforeFailure: number;
+}
 interface TierRow {
   id: string;
   label: string;
@@ -1327,6 +1360,7 @@ interface TierRow {
   pricePerMiB: number;
   lifecycleDays: number;
   downgradeTo: string | null;
+  job?: TierJobRow;
 }
 interface TiersConfigRow {
   enabled: boolean;
@@ -1335,67 +1369,22 @@ interface TiersConfigRow {
   media: { id: string; label: string; backends: string[] }[];
   tiers: TierRow[];
 }
-interface TierAssignmentRow {
-  cid: string;
-  title?: string;
-  tier: string;
-  bytes: number;
-  expiresAt?: string;
-  manual?: boolean;
-}
 
 /** Content storage tiers: the copy plans, their lifecycles, and every content's assignment. */
 function Tiers() {
   const [config, setConfig] = useState<TiersConfigRow | null>(null);
-  const [assignments, setAssignments] = useState<TierAssignmentRow[]>([]);
   const [backends, setBackends] = useState<string[]>([]);
   const [toast, show] = useToast();
 
   const load = useCallback(() => {
-    admin<{ config: TiersConfigRow; assignments: TierAssignmentRow[]; backends: string[] }>('/v1/admin/tiers')
+    admin<{ config: TiersConfigRow; backends: string[] }>('/v1/admin/tiers')
       .then((r) => {
         setConfig(r.config);
-        setAssignments(r.assignments);
         setBackends(r.backends);
       })
       .catch((e) => show(message(e)));
   }, [show]);
   useEffect(load, [load]);
-
-  // The rewards and schedule of the storage jobs this node opens for tiered content.
-  const [jobDefaults, setJobDefaults] = useState<{
-    rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
-    challengeIntervalSeconds: number;
-    retrievalIntervalSeconds: number;
-  } | null>(null);
-  useEffect(() => {
-    admin<{
-      storageService: {
-        auto: {
-          rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
-          challengeIntervalSeconds?: number;
-          retrievalIntervalSeconds?: number;
-        };
-      };
-    }>('/v1/admin/config')
-      .then((c) =>
-        setJobDefaults({
-          rewards: c.storageService.auto.rewards,
-          challengeIntervalSeconds: c.storageService.auto.challengeIntervalSeconds ?? 900,
-          retrievalIntervalSeconds: c.storageService.auto.retrievalIntervalSeconds ?? 0,
-        })
-      )
-      .catch(() => undefined);
-  }, []);
-  const saveJobDefaults = async (patch: Partial<NonNullable<typeof jobDefaults>>) => {
-    const next = { ...(jobDefaults as NonNullable<typeof jobDefaults>), ...patch };
-    setJobDefaults(next);
-    try {
-      await admin('/v1/admin/config', { method: 'PUT', body: { storageService: { auto: next } } });
-    } catch (e) {
-      show(message(e));
-    }
-  };
 
   const save = async (next: TiersConfigRow) => {
     setConfig(next);
@@ -1512,84 +1501,135 @@ function Tiers() {
 
       <div className="card form-stack">
         <h3>Tiers</h3>
-        {config.tiers.map((tier, index) => (
-          <div key={tier.id} className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <input
-              type="text"
-              value={tier.label}
-              style={{ maxWidth: 120 }}
-              onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, label: e.target.value } : t)) })}
-            />
-            {config.media.map((medium) => (
-              <label key={medium.id} className="row tiny" style={{ gap: 4 }}>
-                {medium.label}
+        {config.tiers.map((tier, index) => {
+          const job: TierJobRow = {
+            upfrontCredits: 20,
+            perMbRetrieval: 5,
+            perMbChallenge: 1,
+            endOfTerm: 20,
+            maxLatencyMs: 2000,
+            challengeEveryMinutes: 10,
+            retrievalTestEveryMinutes: 60,
+            failedRequestsBeforeFailure: 3,
+            ...(tier.job ?? {}),
+          };
+          const saveJob = (patch: Partial<TierJobRow>) =>
+            void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, job: { ...job, ...patch } } : t)) });
+          return (
+            <div key={tier.id} className="tier-block">
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <input
-                  type="number"
-                  min={0}
-                  value={tier.media[medium.id] ?? 0}
-                  style={{ width: 52 }}
-                  onChange={(e) =>
-                    void save({
-                      ...config,
-                      tiers: config.tiers.map((t, i) =>
-                        i === index ? { ...t, media: { ...t.media, [medium.id]: Math.max(0, Number(e.target.value) || 0) } } : t
-                      ),
-                    })
-                  }
+                  type="text"
+                  value={tier.label}
+                  style={{ maxWidth: 120 }}
+                  onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, label: e.target.value } : t)) })}
                 />
-              </label>
-            ))}
-            <label className="row tiny" style={{ gap: 4 }}>
-              URL backups
-              <input
-                type="number"
-                min={0}
-                value={tier.externalUrls}
-                style={{ width: 52 }}
-                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, externalUrls: Math.max(0, Number(e.target.value) || 0) } : t)) })}
-              />
-            </label>
-            <label className="row tiny" style={{ gap: 4 }}>
-              Credits/MiB
-              <input
-                type="number"
-                min={0}
-                value={tier.pricePerMiB}
-                style={{ width: 60 }}
-                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, pricePerMiB: Math.max(0, Number(e.target.value) || 0) } : t)) })}
-              />
-            </label>
-            <label className="row tiny" style={{ gap: 4 }}>
-              Lifecycle (days)
-              <input
-                type="number"
-                min={0}
-                value={tier.lifecycleDays}
-                style={{ width: 60 }}
-                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, lifecycleDays: Math.max(0, Number(e.target.value) || 0) } : t)) })}
-              />
-            </label>
-            <label className="row tiny" style={{ gap: 4 }}>
-              Expires to
-              <select
-                value={tier.downgradeTo ?? ''}
-                onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, downgradeTo: e.target.value || null } : t)) })}
-              >
-                <option value="">forgotten</option>
-                {config.tiers
-                  .filter((other) => other.id !== tier.id)
-                  .map((other) => (
-                    <option key={other.id} value={other.id}>
-                      {other.label}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            <button className="small danger" onClick={() => void save({ ...config, tiers: config.tiers.filter((_, i) => i !== index) })}>
-              Remove
-            </button>
-          </div>
-        ))}
+                {config.media.map((medium) => (
+                  <label key={medium.id} className="row tiny" style={{ gap: 4 }}>
+                    {medium.label}
+                    <input
+                      type="number"
+                      min={0}
+                      value={tier.media[medium.id] ?? 0}
+                      style={{ width: 52 }}
+                      onChange={(e) =>
+                        void save({
+                          ...config,
+                          tiers: config.tiers.map((t, i) =>
+                            i === index ? { ...t, media: { ...t.media, [medium.id]: Math.max(0, Number(e.target.value) || 0) } } : t
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+                <label className="row tiny" style={{ gap: 4 }}>
+                  URL backups
+                  <input
+                    type="number"
+                    min={0}
+                    value={tier.externalUrls}
+                    style={{ width: 52 }}
+                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, externalUrls: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                  />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Credits/MiB
+                  <input
+                    type="number"
+                    min={0}
+                    value={tier.pricePerMiB}
+                    style={{ width: 60 }}
+                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, pricePerMiB: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                  />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Lifecycle (days)
+                  <input
+                    type="number"
+                    min={0}
+                    value={tier.lifecycleDays}
+                    style={{ width: 60 }}
+                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, lifecycleDays: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                  />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Expires to
+                  <select
+                    value={tier.downgradeTo ?? ''}
+                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, downgradeTo: e.target.value || null } : t)) })}
+                  >
+                    <option value="">(nothing)</option>
+                    {config.tiers
+                      .filter((other) => other.id !== tier.id)
+                      .map((other) => (
+                        <option key={other.id} value={other.id}>
+                          {other.label}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <button className="small danger" onClick={() => void save({ ...config, tiers: config.tiers.filter((_, i) => i !== index) })}>
+                  Remove
+                </button>
+              </div>
+              <div className="row tiny job-settings" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 6 }}>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Upfront credits (20)
+                  <input type="number" min={0} value={job.upfrontCredits} style={{ width: 56 }} onChange={(e) => saveJob({ upfrontCredits: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Per mb retrieval (5)
+                  <input type="number" min={0} value={job.perMbRetrieval} style={{ width: 56 }} onChange={(e) => saveJob({ perMbRetrieval: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Per mb challenge (1)
+                  <input type="number" min={0} value={job.perMbChallenge} style={{ width: 56 }} onChange={(e) => saveJob({ perMbChallenge: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  End of term (20)
+                  <input type="number" min={0} value={job.endOfTerm} style={{ width: 56 }} onChange={(e) => saveJob({ endOfTerm: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Maximum latency in ms (2000)
+                  <input type="number" min={50} value={job.maxLatencyMs} style={{ width: 68 }} onChange={(e) => saveJob({ maxLatencyMs: Math.max(50, Number(e.target.value) || 50) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Challenge every (minutes) (10)
+                  <input type="number" min={1} value={job.challengeEveryMinutes} style={{ width: 56 }} onChange={(e) => saveJob({ challengeEveryMinutes: Math.max(1, Number(e.target.value) || 1) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Retrieval test every (minutes, 0 = off) (60)
+                  <input type="number" min={0} value={job.retrievalTestEveryMinutes} style={{ width: 56 }} onChange={(e) => saveJob({ retrievalTestEveryMinutes: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="row tiny" style={{ gap: 4 }}>
+                  Failed requests before failure (3)
+                  <input type="number" min={1} value={job.failedRequestsBeforeFailure} style={{ width: 56 }} onChange={(e) => saveJob({ failedRequestsBeforeFailure: Math.max(1, Number(e.target.value) || 1) })} />
+                </label>
+              </div>
+            </div>
+          );
+        })}
         <button
           className="small"
           onClick={() =>
@@ -1605,6 +1645,16 @@ function Tiers() {
                   pricePerMiB: 1,
                   lifecycleDays: 90,
                   downgradeTo: config.defaultTier,
+                  job: {
+                    upfrontCredits: 20,
+                    perMbRetrieval: 5,
+                    perMbChallenge: 1,
+                    endOfTerm: 20,
+                    maxLatencyMs: 2000,
+                    challengeEveryMinutes: 10,
+                    retrievalTestEveryMinutes: 60,
+                    failedRequestsBeforeFailure: 3,
+                  },
                 },
               ],
             })
@@ -1614,139 +1664,6 @@ function Tiers() {
         </button>
       </div>
 
-      <div className="card form-stack">
-        <h3>Assignments</h3>
-        {assignments.length === 0 ? (
-          <p className="small muted">No content assigned yet — every upload lands in the default tier automatically.</p>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Content</th>
-                <th>Size</th>
-                <th>Tier</th>
-                <th>Lifecycle ends</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {assignments.map((assignment) => (
-                <tr key={assignment.cid}>
-                  <td className="small">
-                    {assignment.title ?? assignment.cid.slice(0, 18) + '…'}
-                    {assignment.manual && (
-                      <span className="badge" style={{ marginLeft: 6 }}>
-                        manual
-                      </span>
-                    )}
-                  </td>
-                  <td className="small">{formatBytes(assignment.bytes)}</td>
-                  <td>
-                    <select
-                      value={assignment.tier}
-                      onChange={async (e) => {
-                        await admin(`/v1/admin/tiers/${encodeURIComponent(assignment.cid)}`, { body: { tier: e.target.value } }).catch((err) =>
-                          show(message(err))
-                        );
-                        load();
-                      }}
-                    >
-                      {config.tiers.map((tier) => (
-                        <option key={tier.id} value={tier.id}>
-                          {tier.label}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="small">{assignment.expiresAt ? new Date(assignment.expiresAt).toLocaleDateString() : 'never'}</td>
-                  <td>
-                    <button
-                      className="small danger"
-                      onClick={async () => {
-                        await admin(`/v1/admin/tiers/${encodeURIComponent(assignment.cid)}`, { method: 'DELETE' }).catch((err) => show(message(err)));
-                        load();
-                      }}
-                    >
-                      Forget
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-      <div className="card form-stack">
-        <h3>Storage job defaults</h3>
-        <p className="small muted">
-          The rewards and the challenge / retrieval schedule of the storage jobs this node opens for content on a tier. Individual jobs can
-          still set their own in the content details.
-        </p>
-        {jobDefaults && (
-          <div className="form-grid">
-            <label className="field">
-              Upfront credits
-              <input
-                type="number"
-                min={0}
-                key="jd-upfront"
-                defaultValue={jobDefaults.rewards.upfront}
-                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, upfront: Number(e.target.value) } })}
-              />
-            </label>
-            <label className="field">
-              Per retrieval
-              <input
-                type="number"
-                min={0}
-                key="jd-perRetrieval"
-                defaultValue={jobDefaults.rewards.perRetrieval}
-                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, perRetrieval: Number(e.target.value) } })}
-              />
-            </label>
-            <label className="field">
-              Per challenge
-              <input
-                type="number"
-                min={0}
-                key="jd-perChallenge"
-                defaultValue={jobDefaults.rewards.perChallenge}
-                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, perChallenge: Number(e.target.value) } })}
-              />
-            </label>
-            <label className="field">
-              End of term
-              <input
-                type="number"
-                min={0}
-                key="jd-completion"
-                defaultValue={jobDefaults.rewards.completion}
-                onBlur={(e) => void saveJobDefaults({ rewards: { ...jobDefaults.rewards, completion: Number(e.target.value) } })}
-              />
-            </label>
-            <label className="field">
-              Challenge every (minutes)
-              <input
-                type="number"
-                min={1}
-                key="jd-challenge"
-                defaultValue={Math.max(1, Math.round(jobDefaults.challengeIntervalSeconds / 60))}
-                onBlur={(e) => void saveJobDefaults({ challengeIntervalSeconds: Math.round(Number(e.target.value) * 60) })}
-              />
-            </label>
-            <label className="field">
-              Retrieval test every (minutes, 0 = off)
-              <input
-                type="number"
-                min={0}
-                key="jd-retrieval"
-                defaultValue={Math.round(jobDefaults.retrievalIntervalSeconds / 60)}
-                onBlur={(e) => void saveJobDefaults({ retrievalIntervalSeconds: Math.round(Number(e.target.value) * 60) })}
-              />
-            </label>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

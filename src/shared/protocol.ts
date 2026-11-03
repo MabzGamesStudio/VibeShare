@@ -818,6 +818,8 @@ export interface ContentUrlRecord {
   createdAt: string;
   /** How many times in a row this endpoint failed to serve — working ones are tried first. */
   fails?: number;
+  /** When the last successful check ran (endpoints that just worked move to the top). */
+  lastOkAt?: number;
 }
 
 /** A place a client can fetch a cid from, offered when this node does not hold the bytes. */

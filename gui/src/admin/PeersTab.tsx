@@ -12,12 +12,6 @@ interface PeerRow {
   serve: boolean;
 }
 
-interface MetaResult {
-  peer: string;
-  entry?: PeerEntry;
-  error?: string;
-}
-
 interface DiscoverResult {
   peer: string;
   items: PeerEntry[];
@@ -47,11 +41,7 @@ async function adopt(item: PeerEntry) {
 }
 
 /**
- * Peers: other nodes this node exchanges content metadata with. It can ask a peer for
- * the metadata of a cid or a link, and for new cids and links matching some criteria —
- * by platform, by whether the content has a cid, a link or both, by its platform
- * numbers, by content filters — with the peer picking its newest, most popular or a
- * random mix.
+ * Peers: other nodes this node exchanges content metadata and discoveries with.
  */
 export function Peers() {
   const [peers, setPeers] = useState<PeerRow[] | null>(null);
@@ -220,99 +210,11 @@ function PeerSyncJob() {
   );
 }
 
-/** Asks peers for the metadata of one cid or link, and for discoveries by criteria. */
+/** Asks peers for discoveries by criteria. */
 function PeersAsk({ peers }: { peers: PeerRow[] }) {
-  const [toast, show] = useToast();
   const askable = peers.filter((peer) => peer.fetch);
   const [peer, setPeer] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [metaRef, setMetaRef] = useState('');
-  const [meta, setMeta] = useState<MetaResult[] | null>(null);
-
-  const lookUp = async (adoptOne: boolean) => {
-    if (!metaRef.trim()) return;
-    setBusy(true);
-    try {
-      const answer = await admin<{ results: MetaResult[] }>('/v1/admin/peers/metadata', {
-        body: { peer: peer || undefined, id: metaRef.trim(), adopt: adoptOne },
-      });
-      setMeta(answer.results);
-      if (adoptOne && answer.results.some((result) => result.entry)) show('Added to the catalog as pending — review it in Review');
-    } catch (e) {
-      show(message(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="form-stack">
-      <div className="card form-stack">
-        <h3>Metadata of a cid or a link</h3>
-        <p className="small muted">Ask a peer what it knows about one content — a content id or a link.</p>
-        <div className="form-grid">
-          <label className="field">
-            Peer
-            <select value={peer} onChange={(e) => setPeer(e.target.value)}>
-              <option value="">Every peer set to fetch</option>
-              {askable.map((entry) => (
-                <option key={entry.ref} value={entry.ref}>
-                  {entry.ref.slice(0, 60)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            Content id or link
-            <input
-              type="text"
-              className="mono"
-              value={metaRef}
-              onChange={(e) => setMetaRef(e.target.value)}
-              placeholder="vs1… or yt:… or https://…"
-            />
-          </label>
-        </div>
-        <div className="row">
-          <button disabled={busy || !metaRef.trim()} onClick={() => void lookUp(false)}>
-            Ask peers
-          </button>
-          <button disabled={busy || !metaRef.trim()} onClick={() => void lookUp(true)}>
-            Ask and add as pending
-          </button>
-          {toast && <span className="small">{toast}</span>}
-        </div>
-        {meta && (
-          <div className="card" style={{ padding: 0 }}>
-            <table className="table">
-              <tbody>
-                {meta.map((result) => (
-                  <tr key={result.peer}>
-                    <td className="mono tiny">{result.peer.slice(0, 28)}…</td>
-                    <td className="small">
-                      {result.error ? (
-                        <span style={{ color: 'var(--danger)' }}>{result.error}</span>
-                      ) : result.entry ? (
-                        <>
-                          <strong>{result.entry.title}</strong> · {result.entry.status} · {result.entry.format} ·{' '}
-                          {Object.entries(result.entry.platformStats ?? {})
-                            .map(([key, value]) => `${key} ${value}`)
-                            .join(' · ') || 'no platform numbers'}
-                        </>
-                      ) : (
-                        'Does not know it'
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-      <Discovery peers={askable} peer={peer} setPeer={setPeer} />
-    </div>
-  );
+  return <Discovery peers={askable} peer={peer} setPeer={setPeer} />;
 }
 
 /** The discovery form: ask a peer for new cids and links by criteria. */
