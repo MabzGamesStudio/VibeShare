@@ -219,14 +219,16 @@ export function App() {
             </div>
             VibeShare
           </div>
+          <div className="nav-section">Content mediums</div>
           {pages.map((page) => (
             <NavItem key={page.id} to={pagePath(page)} icon={<PageIconView icon={page.icon} />} label={page.title} />
           ))}
+          <NavItem to="/dual" icon={<Columns2 size={19} />} label="Dual" />
           <button className="nav-link nav-add" onClick={() => setCreating(true)}>
             <Plus size={19} /> New page
           </button>
-          <NavItem to="/dual" icon={<Columns2 size={19} />} label="Dual" />
           <div className="nav-divider" />
+          <div className="nav-section">Content management</div>
           <NavItem to="/search" icon={<Compass size={19} />} label="Explore" />
           <NavItem to="/subscriptions" icon={<Users size={19} />} label="Subscriptions" count={state?.subscriptions.length} />
           <NavItem to="/library" icon={<BookMarked size={19} />} label="Library" />
@@ -237,6 +239,7 @@ export function App() {
           <NavItem to="/nodes" icon={<Network size={19} />} label="Nodes" count={state?.nodes.length} />
           <NavItem to="/wallet" icon={<Coins size={19} />} label="Credits" />
           <NavItem to="/earn" icon={<Sparkles size={19} />} label="Earn" />
+          <div className="nav-section">More</div>
           <NavItem to="/settings" icon={<SettingsIcon size={19} />} label="Settings" />
           <div className="sidebar-footer">
             {state ? (

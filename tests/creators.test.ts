@@ -442,6 +442,19 @@ describe('an operator editing content by hand', async () => {
     assert.equal(slice.total, 1);
     const creators = await admin<{ creators: unknown[]; total?: number }>(url, '/v1/admin/creators?limit=5');
     assert.equal(creators.total, 0);
+
+    // Searching by ids works in every shape: a source id (`yt:edit1`), the bare platform
+    // number (`edit1`), and any casing.
+    for (const needle of ['yt:edit1', 'edit1', 'YT:EDIT1']) {
+      const found = await admin<{ items: { id: string }[] }>(url, `/v1/admin/content?q=${encodeURIComponent(needle)}`);
+      assert.ok(found.items.some((item) => item.id === 'yt:edit1'), `the search finds ${needle}`);
+    }
+    // A content with separate fallback sources is found by those sources too.
+    await admin(url, '/v1/admin/content', { method: 'PUT', body: { id: 'yt:sourced-clip', sources: ['ia:12345678'], title: 'Sourced clip', format: 'video' } });
+    for (const needle of ['ia:12345678', '12345678']) {
+      const found = await admin<{ items: { id: string }[] }>(url, `/v1/admin/content?q=${encodeURIComponent(needle)}`);
+      assert.ok(found.items.some((item) => item.id === 'yt:sourced-clip'), `the search finds ${needle}`);
+    }
   });
 });
 

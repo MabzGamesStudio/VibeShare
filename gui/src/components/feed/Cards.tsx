@@ -48,7 +48,6 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
                   <Play size={22} fill="currentColor" />
                 </span>
                 {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
-                {item.seen ? <WatchedBadge className="thumb-label" /> : null}
               </span>
             </>
           )}
@@ -92,10 +91,9 @@ export function ItemThumb({ item, share = true, inline = false }: { item: FeedIt
       {/* Just the picture and its length: format and age rating are metadata fields a page can show. */}
       <Link to={watchPath(item.id)} className="thumb-link" aria-label={item.title}>
         <Poster item={item} src={previewOf(item)} />
-        {(item.durationSeconds || item.seen) ? (
+        {item.durationSeconds ? (
           <span className="thumb-overlay">
-            {item.durationSeconds ? <span className="thumb-label">{formatDuration(item.durationSeconds)}</span> : null}
-            {item.seen ? <WatchedBadge className="thumb-label" /> : null}
+            <span className="thumb-label">{formatDuration(item.durationSeconds)}</span>
           </span>
         ) : null}
       </Link>

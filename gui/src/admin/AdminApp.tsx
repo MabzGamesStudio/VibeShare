@@ -1218,9 +1218,14 @@ function BloomStorage({ config, save }: { config: Record<string, unknown>; save:
 export function AdminApp() {
   const [status, setStatus] = useState<Status | null>(null);
   const [needsLogin, setNeedsLogin] = useState(!loadToken());
-  const [tab, setTab] = useState('overview');
+  // The tab lives in the URL hash: refreshing the page keeps the operator where they were.
+  const [tab, setTab] = useState(() => window.location.hash.replace(/^#/, '') || 'overview');
   const [tabMenu, setTabMenu] = useState<{ id: string; top: number; left: number } | null>(null);
   const [settingsOnly, setSettingsOnly] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const wanted = tab || 'overview';
+    if (window.location.hash.replace(/^#/, '') !== wanted) window.history.replaceState(null, '', `#${wanted}`);
+  }, [tab]);
 
   const load = useCallback(() => {
     admin<Status>('/v1/admin/status')
@@ -1237,7 +1242,7 @@ export function AdminApp() {
   if (needsLogin) return <Login onLogin={() => setNeedsLogin(false)} />;
   if (!status) return <Loading />;
   const provider = status.info.type === 'provider';
-  const tabs: [string, string][] = [
+  const tabs: [string, ReactNode][] = [
     ['overview', 'Overview'],
     ...(provider
       ? ([
@@ -1250,13 +1255,14 @@ export function AdminApp() {
           // review pages. A dot (not a count) marks that something is waiting.
           [
             'review',
-            `Review${
-              status.pending &&
+            <>
+              Review
+              {status.pending &&
               status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0) + (status.pending.iconSuggestions ?? 0) + (status.pending.accountLinks ?? 0) >
-                0
-                ? ' •'
-                : ''
-            }`,
+                0 ? (
+                <span className="tab-dot" />
+              ) : null}
+            </>,
           ],
           ['catalog', 'Catalog'],
           ['claims', 'Claims'],
@@ -1339,11 +1345,26 @@ export function AdminApp() {
                   )}
                   {id === 'review' && (
                     <>
-                      <button onClick={() => (setTabMenu(null), setTab('review'), load())}>Submissions</button>
-                      <button onClick={() => (setTabMenu(null), setTab('review-suggestions'), load())}>Suggestions</button>
-                      <button onClick={() => (setTabMenu(null), setTab('review-content'), load())}>Content for creators</button>
-                      <button onClick={() => (setTabMenu(null), setTab('review-icons'), load())}>Creator icons</button>
-                      <button onClick={() => (setTabMenu(null), setTab('review-links'), load())}>Account links without the creator key</button>
+                      <button onClick={() => (setTabMenu(null), setTab('review'), load())}>
+                        Submissions
+                        {status.pending?.submissions ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-suggestions'), load())}>
+                        Suggestions
+                        {status.pending?.suggestions ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-content'), load())}>
+                        Content for creators
+                        {status.pending?.creatorSuggestions ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-icons'), load())}>
+                        Creator icons
+                        {status.pending?.iconSuggestions ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('review-links'), load())}>
+                        Account links without the creator key
+                        {status.pending?.accountLinks ? <span className="tab-dot" /> : null}
+                      </button>
                     </>
                   )}
                   {id === 'accounts' && <button onClick={() => (setTabMenu(null), setTab('moderation'), load())}>Moderation</button>}

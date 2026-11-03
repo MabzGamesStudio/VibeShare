@@ -985,7 +985,7 @@ export function WatchPage() {
 
           <h1 className="watch-title">{title}</h1>
           {view.seen && (
-            <div style={{ marginTop: -8, marginBottom: 12 }}>
+            <div className="watch-watched">
               <WatchedBadge />
             </div>
           )}

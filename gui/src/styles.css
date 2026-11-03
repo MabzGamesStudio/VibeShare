@@ -3528,3 +3528,53 @@ input.invalid {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Review dots (tab + menu items) and left-aligned menu text. */
+.tab-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tab-menu-items button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+/* Tab menu items: the text always starts at the left, dots sit next to the label. */
+.tab-menu-items button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+
+/* The watched mark in a metadata row: no separator dot in front of it (it reads
+   eyeIcon *watched), aligned with the row text and padded around. */
+.fields-meta > .badge::before {
+  content: none;
+  margin: 0;
+}
+.fields-meta > .badge {
+  margin-left: 4px;
+  padding: 2px 8px;
+}
+.fields-overlay .fields-meta > .badge {
+  padding: 2px 9px;
+}
+
+/* The watched mark under the content page title: below the title, never over it. */
+.watch-watched {
+  margin: 8px 0 12px;
+}
+.watch-watched .badge {
+  padding: 3px 10px;
+  font-size: 12px;
+}

@@ -2210,10 +2210,18 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     router.get('/v1/admin/content', (ctx) => {
       admin(ctx);
       const status = ctx.query.get('status');
-      const q = (ctx.query.get('q') ?? '').toLowerCase();
+      const q = (ctx.query.get('q') ?? '').trim().toLowerCase();
       const items = this.registry
         .all()
-        .filter((entry) => (!status || entry.status === status) && (!q || entry.title.toLowerCase().includes(q) || entry.id.includes(q)))
+        .filter((entry) => {
+          if (status && entry.status !== status) return false;
+          if (!q) return true;
+          if (entry.title.toLowerCase().includes(q)) return true;
+          // Ids match in any of their parts: a content id (`vs1…`), a source id
+          // (`yt:12345678`) or the bare platform number (`12345678`).
+          const parts = [entry.id, ...(entry.sources ?? [])].flatMap((part) => part.toLowerCase().split('~'));
+          return parts.some((part) => part.includes(q) || part.endsWith(`:${q}`));
+        })
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         // The preview image kept on this node (or the remote one of discovered content).
         .map((entry) => ({

@@ -11,7 +11,7 @@ import {
   type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
-import { Loading, Modal } from '../components/ui';
+import { CopyButton, Loading, Modal } from '../components/ui';
 import { formatDuration, splitList, timeAgo } from '../util';
 import { ListControls, Pager, Sentinel, useConsoleList, type Paging } from './paging';
 import { admin, message } from './api';
@@ -455,20 +455,70 @@ function stampWithAgo(value?: string): string {
 }
 
 /** Everything the node knows about one entry, opened by clicking it in the catalog. */
-function EntryDetails({ entry, onClose, onEdit }: { entry: Entry; onClose: () => void; onEdit: () => void }) {
+function EntryDetails({
+  entry,
+  onClose,
+  onEdit,
+  onChanged,
+}: {
+  entry: Entry;
+  onClose: () => void;
+  onEdit: () => void;
+  onChanged?: () => void;
+}) {
   const fullId = [entry.id, ...entry.sources].join('~');
+  const [toast, show] = useToast();
   return (
     <Modal
       title="Content details"
       onClose={onClose}
       wide
       actions={
-        <>
-          <button onClick={onClose}>Close</button>
-          <button className="primary" onClick={onEdit}>
-            Edit
-          </button>
-        </>
+        <div className="row between" style={{ width: '100%' }}>
+          <div className="row">
+            <button onClick={onClose}>Close</button>
+            <button className="primary" onClick={onEdit}>
+              Edit
+            </button>
+          </div>
+          <div className="row">
+            {entry.status === 'listed' ? (
+              <button
+                className="danger"
+                onClick={async () => {
+                  const reason = window.prompt('Reason (shown to clients)', 'Blocked by the operator');
+                  if (reason === null) return;
+                  await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}/block`, { body: { reason } }).catch((e) => show(message(e)));
+                  onChanged?.();
+                  onClose();
+                }}
+              >
+                Block
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  await admin('/v1/admin/content', { method: 'PUT', body: { id: entry.id, status: 'listed' } }).catch((e) => show(message(e)));
+                  onChanged?.();
+                  onClose();
+                }}
+              >
+                List
+              </button>
+            )}
+            <button
+              className="danger"
+              title="Forget it: clients see it as unknown"
+              onClick={async () => {
+                await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
+                onChanged?.();
+                onClose();
+              }}
+            >
+              Forget
+            </button>
+          </div>
+        </div>
       }
     >
       <div className="form-stack">
@@ -871,65 +921,41 @@ function Catalog() {
               {(items ?? []).map((entry) => (
                 <tr key={entry.id}>
                   <td style={{ cursor: 'pointer' }} title="Open details" onClick={() => setDetails(entry)}>
-                    <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
-                      {entry.thumbnail ? (
-                        <img src={entry.thumbnail} alt="" className="admin-thumb" loading="lazy" />
-                      ) : (
-                        <div className="admin-thumb empty" title="No preview image" />
-                      )}
-                      <div>
-                        <strong>{entry.title}</strong>
-                        <div className="mono tiny faint">{entry.id}</div>
-                      </div>
+                    {entry.thumbnail ? (
+                      <img src={entry.thumbnail} alt="" className="admin-thumb" loading="lazy" />
+                    ) : (
+                      <div className="admin-thumb empty" title="No preview image" />
+                    )}
+                  </td>
+                  <td
+                    style={{ cursor: 'pointer', width: '100%', maxWidth: 420, overflow: 'hidden' }}
+                    title="Open details"
+                    onClick={() => setDetails(entry)}
+                  >
+                    <strong className="ellipsis" style={{ display: 'block' }} title={entry.title}>
+                      {entry.title}
+                    </strong>
+                    <div className="mono tiny faint ellipsis" title={entry.id}>
+                      {entry.id}
                     </div>
                   </td>
-                  <td>
-                    <span className={`badge ${entry.status === 'listed' ? 'ok' : entry.status === 'pending' ? 'warn' : 'danger'}`}>{entry.status}</span>
+                  <td className="small" style={{ whiteSpace: 'nowrap' }}>
+                    {FORMAT_LABELS[entry.format]}
                   </td>
-                  <td className="small">{FORMAT_LABELS[entry.format]}</td>
-                  <td className="small">
-                    <div>👍 {entry.likes}</div>
-                    <div>👎 {entry.dislikes}</div>
-                  </td>
-                  <td>
-                    <div className="row">
-                      <button className="small" onClick={() => setEditing(entry)}>
-                        Edit
-                      </button>
-                      {entry.status === 'listed' ? (
-                        <button
-                          className="small danger"
-                          onClick={async () => {
-                            const reason = window.prompt('Reason (shown to clients)', 'Blocked by the operator');
-                            if (reason === null) return;
-                            await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}/block`, { body: { reason } }).catch((e) => show(message(e)));
-                            load();
-                          }}
-                        >
-                          Block
-                        </button>
-                      ) : (
-                        <button
-                          className="small"
-                          onClick={async () => {
-                            await admin('/v1/admin/content', { method: 'PUT', body: { id: entry.id, status: 'listed' } }).catch((e) => show(message(e)));
-                            load();
-                          }}
-                        >
-                          List
-                        </button>
-                      )}
-                      <button
-                        className="small"
-                        title="Forget it: clients see it as unknown"
-                        onClick={async () => {
-                          await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}`, { method: 'DELETE' }).catch((e) => show(message(e)));
-                          load();
-                        }}
-                      >
-                        Forget
-                      </button>
+                  <td className="small" style={{ whiteSpace: 'nowrap', minWidth: 110 }}>
+                    <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                      <span>👍</span>
+                      <span>{entry.likes}</span>
                     </div>
+                    <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                      <span>👎</span>
+                      <span>{entry.dislikes}</span>
+                    </div>
+                  </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button className="small" onClick={() => setEditing(entry)}>
+                      Edit
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -958,6 +984,7 @@ function Catalog() {
       {details && (
         <EntryDetails
           entry={details}
+          onChanged={load}
           onClose={() => setDetails(null)}
           onEdit={() => {
             setEditing(details);
@@ -1583,7 +1610,16 @@ function CommentsTab() {
             <tbody>
               {visible.map((section) => (
                 <tr key={section.content} style={{ cursor: 'pointer' }} title="Open details" onClick={() => void openSection(section.content)}>
-                  <td className="mono small">{section.content}</td>
+                  <td className="mono small">
+                    <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                      <span className="ellipsis" title={section.content}>
+                        {section.content}
+                      </span>
+                      <span onClick={(e) => e.stopPropagation()}>
+                        <CopyButton text={section.content} label="Copy id" />
+                      </span>
+                    </div>
+                  </td>
                   <td className="small">
                     {section.blocks} blocks · {section.hidden} hidden
                   </td>
@@ -1610,53 +1646,58 @@ function CommentsTab() {
         <Pager page={page} perPage={prefs.perPage} total={total} loading={false} go={setPage} />
       )}
       {open && (
-        <div className="card form-stack">
-          <div className="row between">
-            <h3 style={{ margin: 0 }}>{open.content}</h3>
-            <div className="row" style={{ gap: 8 }}>
-              {open.blocks > 0 && (
-                <>
-                  <button
-                    className="small"
-                    title="Remove every block, vote and hiding this node keeps for the page"
-                    onClick={async () => {
-                      try {
-                        await admin(`/v1/admin/comments/${encodeURIComponent(open.content)}`, { method: 'DELETE' });
-                        setOpen(null);
-                        show('All comment data of this page is gone.');
-                        load();
-                      } catch (e) {
-                        show(message(e));
-                      }
-                    }}
-                  >
-                    Flush all comment data
-                  </button>
-                  <button
-                    className={open.shown ? '' : 'primary'}
-                    onClick={async () => {
-                      try {
-                        setOpen(
-                          await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(open.content)}`, {
-                            method: 'PUT',
-                            body: { shown: !open.shown },
-                          })
-                        );
-                        load();
-                      } catch (e) {
-                        show(message(e));
-                      }
-                    }}
-                  >
-                    {open.shown ? 'Turn comments off (keep headers only)' : 'Turn comments on'}
-                  </button>
-                </>
-              )}
+        <Modal
+          title={open.content}
+          wide
+          onClose={() => setOpen(null)}
+          actions={
+            <div className="row between" style={{ width: '100%' }}>
+              <div className="row" style={{ gap: 8 }}>
+                {open.blocks > 0 && (
+                  <>
+                    <button
+                      className="small"
+                      title="Remove every block, vote and hiding this node keeps for the page"
+                      onClick={async () => {
+                        try {
+                          await admin(`/v1/admin/comments/${encodeURIComponent(open.content)}`, { method: 'DELETE' });
+                          setOpen(null);
+                          show('All comment data of this page is gone.');
+                          load();
+                        } catch (e) {
+                          show(message(e));
+                        }
+                      }}
+                    >
+                      Flush all comment data
+                    </button>
+                    <button
+                      className={open.shown ? '' : 'primary'}
+                      onClick={async () => {
+                        try {
+                          setOpen(
+                            await admin<AdminCommentsView>(`/v1/admin/comments/${encodeURIComponent(open.content)}`, {
+                              method: 'PUT',
+                              body: { shown: !open.shown },
+                            })
+                          );
+                          load();
+                        } catch (e) {
+                          show(message(e));
+                        }
+                      }}
+                    >
+                      {open.shown ? 'Turn comments off (keep headers only)' : 'Turn comments on'}
+                    </button>
+                  </>
+                )}
+              </div>
               <button className="small ghost" onClick={() => setOpen(null)}>
                 Close
               </button>
             </div>
-          </div>
+          }
+        >
           {open.blocks === 0 ? (
             <p className="small muted">No comments on this page.</p>
           ) : (
@@ -1699,7 +1740,7 @@ function CommentsTab() {
           {open.comments.length === 0 && <p className="small muted">No comment data here (every block may be hidden, or none were written).</p>}
             </>
           )}
-        </div>
+        </Modal>
       )}
     </div>
   );
