@@ -12,7 +12,7 @@ import { compact } from '../components/feed/Fields';
 import { CARD_PAGE } from '../components/Feed';
 import { Avatar, CopyButton, Empty, Loading, Modal, Switch } from '../components/ui';
 import { useApp } from '../state';
-import { creatorPath } from '../util';
+import { creatorPath, groupPath } from '../util';
 
 /**
  * The creator's related creators and their links elsewhere. Related creators — accounts
@@ -524,6 +524,11 @@ export function CreatorPage() {
           </h1>
           <div className="row small muted" style={{ marginTop: 6 }}>
             <span className="badge">{CREATOR_KIND_LABELS[creator.kind]}</span>
+            {creator.kind === 'group' && (
+              <Link to={groupPath(creator.id)} className="badge accent" title="The group page: who is in it, and their content">
+                {(creator.members ?? []).length} creator{(creator.members ?? []).length === 1 ? '' : 's'} in the group
+              </Link>
+            )}
             {creator.keys?.length ? <span className="badge ok">Verified key</span> : <span className="badge">Name only</span>}
             <span>{view.items.length} item{view.items.length === 1 ? '' : 's'}</span>
           </div>

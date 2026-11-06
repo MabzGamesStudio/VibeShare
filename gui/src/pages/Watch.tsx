@@ -29,6 +29,7 @@ import {
   RATING_LABELS,
   RATINGS,
   TOPICS,
+  topicIdOf,
   type CreatorKind,
 } from '../../../src/shared/taxonomy';
 import { api, errorMessage, uploadFile } from '../api';
@@ -42,7 +43,7 @@ import { ShareButton } from '../components/Share';
 import { StorageTierCard } from '../components/StorageTier';
 import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
 import { useApp } from '../state';
-import { creatorPath, formatBytes, formatDuration, timeAgo } from '../util';
+import { creatorPath, formatBytes, formatDuration, groupPath, profilePath, timeAgo, topicPath } from '../util';
 
 const KIND_LABELS: Record<SuggestionKind, string> = {
   tag: 'Add a tag',
@@ -1035,11 +1036,33 @@ export function WatchPage() {
                 <FormatIcon format={item.format} size={12} /> {FORMAT_LABELS[item.format]}
               </span>
               <span className="badge">{RATING_LABELS[item.rating]}</span>
-              {item.topics.map((topic) => (
-                <Link key={topic} to={`/search?q=${encodeURIComponent('topic:' + topic)}`} className="badge">
-                  {topic}
+              {/* Who it comes from, and what it belongs to: creator, groups, topics. */}
+              {item.creator && (
+                <Link to={profilePath(item.creator.kind, item.creator.id)} className="badge" title="Open the creator">
+                  {item.creator.name}
+                </Link>
+              )}
+              {item.groups?.map((group) => (
+                <Link key={group.id} to={groupPath(group.id)} className="badge" title={`Open the group ${group.name}`}>
+                  {group.name}
                 </Link>
               ))}
+              {item.topics.map((topic) => {
+                // The topic page's id is the hash of the name; a node that renamed a topic
+                // keeps its own id, so only fall back to a search when it is not this one.
+                const id = topicIdOf(topic);
+                const known = item.topicIds?.includes(id);
+                return (
+                  <Link
+                    key={topic}
+                    to={known ? topicPath(id) : `/search?q=${encodeURIComponent('topic:' + topic)}`}
+                    className="badge"
+                    title={known ? 'Open this topic' : 'Search this topic'}
+                  >
+                    {topic}
+                  </Link>
+                );
+              })}
               {item.tags.map((tag) => (
                 <Link key={tag} to={`/search?q=${encodeURIComponent('#' + tag)}`} className="badge">
                   #{tag}

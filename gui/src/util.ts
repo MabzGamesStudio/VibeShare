@@ -64,6 +64,24 @@ export function creatorPath(id: string): string {
   return `/creator/${encodeURIComponent(id)}`;
 }
 
+export function groupPath(id: string): string {
+  return `/group/${encodeURIComponent(id)}`;
+}
+
+export function topicPath(id: string): string {
+  return `/topic/${encodeURIComponent(id)}`;
+}
+
+/**
+ * The page a creator, group or topic opens on. Groups and topics are creators to a
+ * reader: a group has its own page, everything else opens like a creator.
+ */
+export function profilePath(kind: string | undefined, id: string): string {
+  if (kind === 'group') return groupPath(id);
+  if (kind === 'topic') return topicPath(id);
+  return creatorPath(id);
+}
+
 export async function copyText(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);

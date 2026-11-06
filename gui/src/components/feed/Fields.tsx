@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import type { FeedItem, MetadataField } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
 import { FORMAT_LABELS, RATING_LABELS } from '../../../../src/shared/taxonomy';
-import { creatorPath, formatDuration, timeAgo, watchPath } from '../../util';
+import { formatDuration, profilePath, timeAgo, watchPath } from '../../util';
 import { Avatar, WatchedBadge } from '../ui';
 
 export function compact(value: number): string {
@@ -20,7 +20,7 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
   switch (field) {
     case 'creator':
       return item.creator ? (
-        <Link to={creatorPath(item.creator.id)} className="field-creator" onClick={(e) => e.stopPropagation()}>
+        <Link to={profilePath(item.creator.kind, item.creator.id)} className="field-creator" onClick={(e) => e.stopPropagation()}>
           {item.creator.name}
         </Link>
       ) : null;
@@ -80,7 +80,7 @@ export function Fields({ item, fields, variant = 'card' }: { item: FeedItem; fie
   return (
     <div className={`fields fields-${variant}`}>
       {showAvatar && (
-        <Link to={creatorPath(item.creator!.id)} className="fields-avatar">
+        <Link to={profilePath(item.creator!.kind, item.creator!.id)} className="fields-avatar">
           <Avatar name={item.creator!.name} id={item.creator!.id} icon={item.creator!.icon} />
         </Link>
       )}

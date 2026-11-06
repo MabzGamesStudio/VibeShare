@@ -11,6 +11,8 @@ import { ShareProvider } from './components/Share';
 import { CookieConsent } from './components/CookieConsent';
 import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
+import { GroupPage } from './pages/Group';
+import { TopicPage } from './pages/Topic';
 import { DualPage } from './pages/Dual';
 import { DevDataPage } from './pages/DevData';
 import { EarnPage } from './pages/Earn';
@@ -296,6 +298,8 @@ export function App() {
               <Route path="/subscriptions/all" element={<AllSubscriptionsPage />} />
               <Route path="/watch/:id" element={<WatchPage />} />
               <Route path="/creator/:id" element={<CreatorPage />} />
+              <Route path="/group/:id" element={<GroupPage />} />
+              <Route path="/topic/:id" element={<TopicPage />} />
               <Route path="/publish" element={<PublishPage />} />
               <Route path="/devdata" element={<DevDataPage />} />
               <Route path="/library" element={<LibraryPage />} />

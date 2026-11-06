@@ -1,4 +1,5 @@
 // Content metadata vocabulary shared by every node and the GUI. Browser-safe: no Node imports.
+import { sha256hex } from './crypto.js';
 
 export const FORMATS = [
   'video',
@@ -53,6 +54,15 @@ export function ratingAllowed(rating: Rating | undefined, limit: Rating | undefi
 
 export const CREATOR_KINDS = ['person', 'company', 'group', 'unknown'] as const;
 export type CreatorKind = (typeof CREATOR_KINDS)[number];
+
+/**
+ * The id of a topic: a hash of its normalized name (`tp1…`). A topic is never keyed by
+ * its name, so the id is what content, pages and subscriptions carry — and every node
+ * and client computing it from the same name lands on the same topic.
+ */
+export function topicIdOf(name: string): string {
+  return `tp1${sha256hex(normalizeTag(name)).slice(0, 32)}`;
+}
 
 export const CREATOR_KIND_LABELS: Record<CreatorKind, string> = {
   person: 'Person',

@@ -12,6 +12,7 @@ import {
   normalizeTag,
   RATINGS,
   ratingAllowed,
+  topicIdOf,
   type CreatorKind,
   type Format,
   type Rating,
@@ -43,6 +44,8 @@ export interface Entry {
   format: Format;
   rating: Rating;
   topics: string[];
+  /** The topic records this entry is filed under (each is an exact topic id). */
+  topicIds?: string[];
   tags: string[];
   language?: string;
   durationSeconds?: number;
@@ -72,10 +75,29 @@ export interface CreatorRecord extends CreatorInfo {
   addedAt: string;
 }
 
+/** A topic as the node keeps it: a hash id, a name, and what users/operators added. */
+export interface TopicRecord {
+  /** `tp1…`: the hash of the name — never the name itself. */
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  status: 'listed' | 'blocked';
+  addedAt: string;
+}
+
 interface RegistryData {
   entries: Record<string, Entry>;
   creators: Record<string, CreatorRecord>;
+  topics?: Record<string, TopicRecord>;
 }
+
+/**
+ * The id of a topic: a hash of its name (`tp1…`). Topics are never keyed by their name,
+ * so renaming one, or two nodes agreeing on a name, never collides with content data.
+ * (The function itself lives in shared/taxonomy.ts, where clients use it too.)
+ */
+export { topicIdOf };
 
 export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'addedAt' | 'updatedAt'>> & { id?: string };
 
@@ -178,6 +200,98 @@ export class Registry {
     return id ? this.store.data.creators[id] : undefined;
   }
 
+  // -------------------------------------------------------------------------
+  // Groups: a creator of kind `group` whose members are other content creators.
+  // Membership is binary; there is no linking between creators.
+
+  /** Every group (listed ones only unless asked for more). */
+  groups(includeBlocked = false): CreatorRecord[] {
+    return Object.values(this.store.data.creators).filter(
+      (creator) => creator.kind === 'group' && (includeBlocked || creator.status !== 'blocked')
+    );
+  }
+
+  /** The creators that are members of a group (ids only); empty for anything else. */
+  members(id: string | undefined): string[] {
+    const creator = this.creator(id);
+    return creator?.kind === 'group' ? [...(creator.members ?? [])] : [];
+  }
+
+  /** The groups a creator is a member of, with their names (blocked groups left out). */
+  groupsOf(creatorId: string | undefined): { id: string; name: string }[] {
+    if (!creatorId) return [];
+    return this.groups()
+      .filter((group) => (group.members ?? []).includes(creatorId))
+      .map((group) => ({ id: group.id, name: group.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Adds and removes members of a group. Only creators the node knows become members. */
+  setMembers(groupId: string, add: string[] = [], remove: string[] = []): CreatorRecord {
+    const group = this.creator(groupId);
+    if (!group) throw badRequest(`Unknown group ${groupId}`);
+    const drop = new Set(remove);
+    const members = (group.members ?? []).filter((id) => !drop.has(id));
+    for (const id of add) {
+      if (!this.creator(id)) throw badRequest(`Unknown creator ${id}`);
+      if (!members.includes(id)) members.push(id);
+    }
+    return this.upsertCreator({ id: group.id, name: group.name, kind: 'group', members: members.slice(0, 500) });
+  }
+
+  // -------------------------------------------------------------------------
+  // Topics: a category of content, kept under a hash id (never under its name).
+
+  topic(id: string | undefined): TopicRecord | undefined {
+    return id ? this.store.data.topics?.[id] : undefined;
+  }
+
+  /** Every topic, listed ones only unless asked for more. */
+  topics(includeBlocked = false): TopicRecord[] {
+    return Object.values(this.store.data.topics ?? {}).filter((topic) => includeBlocked || topic.status === 'listed');
+  }
+
+  /**
+   * Stores a topic. A new name gets the id its hash produces, so the same name never
+   * doubles; passing an existing id edits that topic (its name may then be changed).
+   */
+  upsertTopic(input: { id?: string; name: string; description?: string; icon?: string; status?: 'listed' | 'blocked' }): { topic: TopicRecord; created: boolean } {
+    const name = String(input.name ?? '').trim().slice(0, 120);
+    if (!name) throw badRequest('A topic needs a name');
+    const existing = input.id ? this.store.data.topics?.[input.id] : this.store.data.topics?.[topicIdOf(name)];
+    if (input.id && !existing) throw badRequest(`Unknown topic ${input.id}`);
+    const topic: TopicRecord = {
+      id: existing?.id ?? topicIdOf(name),
+      name,
+      description: (input.description ?? existing?.description)?.slice(0, 2000) || undefined,
+      icon: (input.icon !== undefined ? input.icon : existing?.icon) || undefined,
+      status: input.status ?? existing?.status ?? 'listed',
+      addedAt: existing?.addedAt ?? new Date().toISOString(),
+    };
+    (this.store.data.topics ??= {})[topic.id] = topic;
+    this.changed();
+    return { topic, created: !existing };
+  }
+
+  /** The topic ids of a list of topic names, storing the topics that are new. */
+  topicIdsFor(names: string[], create = true): string[] {
+    const ids: string[] = [];
+    for (const name of cleanList(names)) {
+      const id = topicIdOf(name);
+      if (!this.store.data.topics?.[id]) {
+        if (!create) continue;
+        this.upsertTopic({ name });
+      }
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  /** How many listed contents are filed under a topic id. */
+  countTopic(id: string): number {
+    return this.all().filter((entry) => entry.status === 'listed' && entry.topicIds?.includes(id)).length;
+  }
+
   /** Lists or blocks content, keeping votes and creation time of an existing entry. */
   upsert(input: EntryInput): Entry {
     const { key, contentId, link } = identityOf(input);
@@ -206,6 +320,7 @@ export class Registry {
       format: input.format ?? existing?.format ?? 'other',
       rating: input.rating ?? existing?.rating ?? 'all',
       topics: input.topics ? cleanList(input.topics) : (existing?.topics ?? []),
+      topicIds: input.topics ? this.topicIdsFor(input.topics) : existing?.topicIds,
       tags: input.tags ? cleanList(input.tags, 64) : (existing?.tags ?? []),
       language: input.language ?? existing?.language,
       durationSeconds: input.durationSeconds ?? existing?.durationSeconds,
@@ -265,6 +380,8 @@ export class Registry {
       links: input.links ?? existing?.links,
       accounts: input.accounts ?? existing?.accounts,
       icon: (input.icon !== undefined ? input.icon : existing?.icon) || undefined,
+      // Only groups have members; other creators keep none.
+      members: kind === 'group' ? [...new Set((input.members ?? existing?.members ?? []).filter(Boolean))].slice(0, 500) : undefined,
       status: input.status ?? existing?.status ?? 'listed',
       addedAt: existing?.addedAt ?? new Date().toISOString(),
     };
@@ -312,6 +429,7 @@ export class Registry {
     const creator = this.creator(entry.creatorId);
     const contentId = entry.contentId ?? (isNativeId(entry.id) ? entry.id : undefined);
     const link = entry.link ?? (isNativeId(entry.id) ? entry.sources[0] : entry.id);
+    const groups = this.groupsOf(entry.creatorId);
     return {
       id: [entry.id, ...entry.sources].join('~'),
       status: 'listed',
@@ -322,6 +440,7 @@ export class Registry {
       format: entry.format,
       rating: entry.rating,
       topics: entry.topics,
+      topicIds: entry.topicIds?.length ? entry.topicIds : undefined,
       tags: entry.tags,
       language: entry.language,
       durationSeconds: entry.durationSeconds,
@@ -330,6 +449,7 @@ export class Registry {
         : entry.creatorId
           ? { id: entry.creatorId, name: entry.creatorId.slice(0, 12), kind: 'unknown' }
           : undefined,
+      groups: groups.length ? groups : undefined,
       thumbnail: entry.thumbnail ? `/v1/thumbnails/${this.thumbKey(entry.id)}` : entry.thumbnailUrl,
       media: entry.media,
       pageUrl: entry.pageUrl,
@@ -360,17 +480,35 @@ export class Registry {
     const limit = RATINGS[Math.min(RATINGS.indexOf(preferences.maxRating ?? nodeMaxRating), RATINGS.indexOf(nodeMaxRating))];
     const formats = preferences.formats?.length ? new Set(preferences.formats) : null;
     const topics = preferences.onlyTopics && preferences.topics?.length ? new Set(preferences.topics) : null;
+    const blockedTopics = preferences.blockedTopics?.length ? new Set(preferences.blockedTopics) : null;
     const blockedTags = new Set((preferences.blockedTags ?? []).map(normalizeTag));
     const blockedCreators = new Set(preferences.blockedCreators ?? []);
     const kinds = preferences.creatorKinds?.length ? new Set(preferences.creatorKinds) : null;
     const languages = preferences.languages?.length ? preferences.languages : null;
+    // A blocked group blocks everyone in it, not only the group's own page; a whitelisted
+    // creator or group keeps that creator, and every member of that group.
+    const blockedMembers = new Set<string>();
+    const allowedMembers = new Set<string>();
+    const allowed = preferences.onlyCreators && preferences.creatorIds?.length ? new Set(preferences.creatorIds) : null;
+    for (const group of this.groups(true)) {
+      if (group.status === 'blocked' || blockedCreators.has(group.id)) for (const member of group.members ?? []) blockedMembers.add(member);
+      if (allowed?.has(group.id)) for (const member of group.members ?? []) allowedMembers.add(member);
+    }
     return this.all().filter((entry) => {
       if (entry.status !== 'listed') return false;
       if (!ratingAllowed(entry.rating, limit)) return false;
       if (formats && !formats.has(entry.format)) return false;
-      if (topics && !entry.topics.some((topic) => topics.has(topic))) return false;
+      // Topics match by name or by topic id: a page filter may carry either.
+      if (topics && !entry.topics.some((topic) => topics.has(topic)) && !(entry.topicIds ?? []).some((id) => topics.has(id))) return false;
+      if (
+        blockedTopics &&
+        (entry.topics.some((topic) => blockedTopics.has(topic)) || (entry.topicIds ?? []).some((id) => blockedTopics.has(id)))
+      )
+        return false;
       if (blockedTags.size && entry.tags.some((tag) => blockedTags.has(tag))) return false;
       if (entry.creatorId && blockedCreators.has(entry.creatorId)) return false;
+      if (entry.creatorId && blockedMembers.has(entry.creatorId)) return false;
+      if (allowed && !(entry.creatorId && (allowed.has(entry.creatorId) || allowedMembers.has(entry.creatorId)))) return false;
       const creator = this.creator(entry.creatorId);
       if (creator?.status === 'blocked') return false;
       if (kinds && !kinds.has(creator?.kind ?? 'unknown')) return false;
@@ -473,6 +611,8 @@ export class Registry {
       format: FORMATS.includes(item.format) ? item.format : 'other',
       rating: item.rating ?? policy.defaultRating,
       topics: cleanList(item.topics ?? []),
+      // Crawler finds are filed under their topics too, so a topic page lists them.
+      topicIds: this.topicIdsFor(item.topics ?? []),
       tags: cleanList(item.tags ?? [], 32),
       language: item.language,
       durationSeconds: item.durationSeconds,

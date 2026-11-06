@@ -7,6 +7,7 @@ import type {
   CreatorView,
   FeedItem,
   FeedResponse,
+  GroupView,
   NodeEntry,
   PageFilters,
   PageSource,
@@ -14,6 +15,8 @@ import type {
   PublishPreview,
   PublishRequest,
   Settings,
+  Subscription,
+  TopicView,
 } from '../shared/clientapi.js';
 import type { BloomStatus, CommentPostRequest, CommentsResponse, SavedState, SearchHistoryItem } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
@@ -35,7 +38,7 @@ import {
   type ProfileAccess,
   type SealKey,
 } from '../shared/profiles.js';
-import { SOFTWARE, claimSigningPayload, type AccountFilterState, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type LookupResult, type Page, type Preferences } from '../shared/protocol.js';
+import { SOFTWARE, claimSigningPayload, type AccountFilterState, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type GroupInfo, type GroupSuggestion, type GroupSuggestionRequest, type GroupSuggestionResponse, type LookupResult, type Page, type Preferences, type TopicCreateRequest, type TopicCreateResponse, type TopicInfo, type TopicSuggestion, type TopicSuggestionRequest, type TopicSuggestionResponse } from '../shared/protocol.js';
 import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
@@ -43,6 +46,7 @@ import { signData } from '../shared/crypto.js';
 import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
 import { assembleVvshWebm, DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
+import type { CreatorKind } from '../shared/taxonomy.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -436,17 +440,126 @@ export class ClientCore {
         if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Creator on ${node.name}: ${errorText(error)}`);
       }
     }
+    // A group is a creator of kind `group` with its own page: a link to /creator/<group id>
+    // (an old bookmark, a related account) still opens it, members and content included.
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes
+          .client(node)
+          .json<{ group: CreatorInfo; members: CreatorInfo[]; items: ContentItem[] }>(`/v1/groups/${encodeURIComponent(id)}`, { auth: false });
+        return { creator: result.group, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
+      } catch (error) {
+        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Group on ${node.name}: ${errorText(error)}`);
+      }
+    }
     const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
-    return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subscription?.kind ?? 'unknown' }, items: [] };
+    const subKind = subscription?.kind === 'topic' ? 'unknown' : (subscription?.kind ?? 'unknown');
+    return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subKind }, items: [] };
+  }
+
+  /**
+   * A group page: the group, its member creators (for the carousel) and every member's
+   * content in one list. A group is a creator everywhere else, so subscribing to one is
+   * the same as subscribing to a creator.
+   */
+  async group(id: string): Promise<GroupView> {
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes.client(node).json<{ group: GroupInfo; members: CreatorInfo[]; items: ContentItem[] }>(
+          `/v1/groups/${encodeURIComponent(id)}`,
+          { auth: false }
+        );
+        return {
+          group: result.group,
+          members: result.members ?? [],
+          items: result.items.map((item) => this.feedItem(node, item)),
+          via: node.id,
+        };
+      } catch (error) {
+        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Group on ${node.name}: ${errorText(error)}`);
+      }
+    }
+    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
+    if (!subscription) throw notFound('No algorithm node knows this group');
+    return { group: { id, name: subscription.name, kind: 'group', members: [] }, members: [], items: [] };
+  }
+
+  /** A topic page: the topic and every content filed under its exact topic id. */
+  async topic(id: string): Promise<TopicView> {
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes
+          .client(node)
+          .json<{ topic: TopicInfo; items: ContentItem[] }>(`/v1/topics/${encodeURIComponent(id)}`, { auth: false });
+        return { topic: result.topic, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
+      } catch (error) {
+        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Topic on ${node.name}: ${errorText(error)}`);
+      }
+    }
+    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
+    if (!subscription) throw notFound('No algorithm node knows this topic');
+    return { topic: { id, name: subscription.name, icon: subscription.icon }, items: [] };
+  }
+
+  /** Topics matching a name or id, across the enabled algorithm nodes (Explore). */
+  async searchTopics(query: string): Promise<{ topics: TopicInfo[] }> {
+    const q = String(query ?? '').trim().slice(0, 100);
+    const found = new Map<string, TopicInfo>();
+    for (const node of this.nodes.active('algorithm')) {
+      try {
+        const result = await this.nodes.client(node).json<{ topics: TopicInfo[] }>(`/v1/topics?q=${encodeURIComponent(q)}`, {
+          auth: false,
+          timeoutMs: 8000,
+        });
+        for (const topic of result.topics ?? []) if (!found.has(topic.id)) found.set(topic.id, topic);
+      } catch (error) {
+        log.debug(`Topics on ${node.name}: ${errorText(error)}`);
+      }
+      if (found.size >= 24) break;
+    }
+    return { topics: [...found.values()].slice(0, 24) };
+  }
+
+  /** Groups matching a name or id (a group is a creator of kind `group`). */
+  async searchGroups(query: string): Promise<{ groups: CreatorInfo[] }> {
+    const { creators } = await this.searchCreators(String(query ?? ''), 'group');
+    return { groups: creators.filter((creator) => creator.kind === 'group') };
+  }
+
+  /** A client brings a topic: the node keeps it under the hash of the name. */
+  createTopic(node: NodeEntry, body: TopicCreateRequest): Promise<TopicCreateResponse> {
+    if (!String(body.name ?? '').trim()) throw badRequest('A topic needs a name');
+    return this.nodes.client(node).json<TopicCreateResponse>('/v1/topics', { body: { name: body.name, description: body.description } });
+  }
+
+  /** Suggesting changes to a group: members to add or drop, a name, a description, links, an icon. */
+  suggestGroup(node: NodeEntry, group: string, body: GroupSuggestionRequest): Promise<GroupSuggestionResponse> {
+    return this.nodes.client(node).json<GroupSuggestionResponse>(`/v1/groups/${encodeURIComponent(group)}/suggestion`, { body });
+  }
+
+  /** Suggesting what a topic's description or icon should say. */
+  suggestTopic(node: NodeEntry, topic: string, body: TopicSuggestionRequest): Promise<TopicSuggestionResponse> {
+    return this.nodes.client(node).json<TopicSuggestionResponse>(`/v1/topics/${encodeURIComponent(topic)}/suggestion`, { body });
+  }
+
+  /** The group changes the user asked for on a node, with their status. */
+  myGroupSuggestions(node: NodeEntry): Promise<{ suggestions: GroupSuggestion[] }> {
+    return this.nodes.client(node).json<{ suggestions: GroupSuggestion[] }>('/v1/group-suggestions/mine');
+  }
+
+  /** The topic suggestions the user made on a node, with their status. */
+  myTopicSuggestions(node: NodeEntry): Promise<{ suggestions: TopicSuggestion[] }> {
+    return this.nodes.client(node).json<{ suggestions: TopicSuggestion[] }>('/v1/topic-suggestions/mine');
   }
 
   /** Creators matching a name or id, across the enabled algorithm nodes (Explore). */
-  async searchCreators(query: string): Promise<{ creators: CreatorInfo[] }> {
+  async searchCreators(query: string, kind?: CreatorKind | 'group'): Promise<{ creators: CreatorInfo[] }> {
     const q = String(query ?? '').trim().slice(0, 100);
     const found = new Map<string, CreatorInfo>();
     for (const node of this.nodes.active('algorithm')) {
       try {
-        const result = await this.nodes.client(node).json<{ creators: CreatorInfo[] }>(`/v1/creators?q=${encodeURIComponent(q)}`, {
+        const suffix = kind ? `&kind=${encodeURIComponent(kind)}` : '';
+        const result = await this.nodes.client(node).json<{ creators: CreatorInfo[] }>(`/v1/creators?q=${encodeURIComponent(q)}${suffix}`, {
           auth: false,
           timeoutMs: 8000,
         });
@@ -1102,14 +1215,16 @@ export class ClientCore {
     return { nodes: results };
   }
 
-  subscribe(body: { id?: string; name?: string; kind?: string }) {
+  subscribe(body: { id?: string; name?: string; kind?: string; icon?: string }) {
     if (!body.id) throw badRequest('id is required');
     const list = this.store.data.data.subscriptions;
     if (!list.some((s) => s.id === body.id)) {
       list.push({
         id: body.id,
         name: String(body.name ?? body.id).slice(0, 120),
-        kind: body.kind as Settings['profile']['kind'],
+        // A creator kind — a group subscribes like a creator — or `topic` for a topic.
+        kind: (body.kind as Subscription['kind']) || undefined,
+        icon: body.icon ? String(body.icon) : undefined,
         addedAt: new Date().toISOString(),
       });
       this.store.changed();

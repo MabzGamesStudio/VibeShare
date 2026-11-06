@@ -400,6 +400,103 @@ export interface CreatorInfo {
   accounts?: CreatorAccount[];
   /** The creator's icon: a data: URL of a small image (≤ 200 kB). */
   icon?: string;
+  /**
+   * Groups only (kind `group`): the content creators that are members. Membership is
+   * binary — a creator is in the group or not — with no linking between creators.
+   */
+  members?: string[];
+}
+
+/**
+ * A group page's view: the group, its member creators (resolved) and every member's
+ * content in one list. A group behaves like a creator everywhere else: it is searched,
+ * subscribed to and shown the same way.
+ */
+export interface GroupInfo extends CreatorInfo {
+  kind: 'group';
+  members: string[];
+  memberCreators?: CreatorInfo[];
+}
+
+/** A topic: a category of content. Its id is a hash, never its name. */
+export interface TopicInfo {
+  id: string;
+  name: string;
+  description?: string;
+  /** A data: URL of a small image (≤ 200 kB), suggested by users or set by the operator. */
+  icon?: string;
+  /** How many listed contents carry this topic id. */
+  items?: number;
+}
+
+/** A client creating a topic (or asking for one the node does not have yet). */
+export interface TopicCreateRequest {
+  name: string;
+  description?: string;
+}
+
+export interface TopicCreateResponse {
+  topic: TopicInfo;
+  /** True when the topic did not exist before (the client brought the name). */
+  newInfo: boolean;
+  credited: number;
+}
+
+/** A client's suggestion of a change to a group: members, name, description, links, icon. */
+export interface GroupSuggestionRequest {
+  /** Creator ids to add to the group. */
+  add?: string[];
+  /** Creator ids to remove from the group. */
+  remove?: string[];
+  name?: string;
+  description?: string;
+  links?: string[];
+  /** A data: URL of a small image (≤ 200 kB). */
+  icon?: string;
+  reason?: string;
+}
+
+/** A suggested group change, as the node keeps it for the operator. */
+export interface GroupSuggestion extends GroupSuggestionRequest {
+  id: string;
+  groupId: string;
+  groupName?: string;
+  accountId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: string;
+  reviewedAt?: string;
+  credited?: number;
+}
+
+export interface GroupSuggestionResponse {
+  suggestion: GroupSuggestion;
+  newInfo: boolean;
+  credited: number;
+}
+
+/** A client's suggestion of a topic description or icon. */
+export interface TopicSuggestionRequest {
+  description?: string;
+  /** A data: URL of a small image (≤ 200 kB). */
+  icon?: string;
+  reason?: string;
+}
+
+export interface TopicSuggestion extends TopicSuggestionRequest {
+  id: string;
+  topicId: string;
+  topicName?: string;
+  accountId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: string;
+  reviewedAt?: string;
+  credited?: number;
+}
+
+export interface TopicSuggestionResponse {
+  suggestion: TopicSuggestion;
+  newInfo: boolean;
+  credited: number;
 }
 
 export interface TagNote {
@@ -419,10 +516,14 @@ export interface ContentItem {
   format: Format;
   rating: Rating;
   topics: string[];
+  /** The topic ids this content is filed under (each matches a topic record exactly). */
+  topicIds?: string[];
   tags: string[];
   language?: string;
   durationSeconds?: number;
   creator?: CreatorInfo;
+  /** The groups the content's creator is a member of. */
+  groups?: { id: string; name: string }[];
   /**
    * The thumbnail: a path on the algorithm node (/v1/thumbnails/<key>) for thumbnails it
    * stores, or an absolute https URL for content discovered on other platforms.
@@ -471,8 +572,14 @@ export interface Preferences {
   topics?: string[];
   /** Only show the topics above. */
   onlyTopics?: boolean;
+  /** Topics never to show (by name or topic id). */
+  blockedTopics?: string[];
   blockedTags?: string[];
   blockedCreators?: string[];
+  /** Only these creators (and group members) — a whitelist of creator ids. */
+  creatorIds?: string[];
+  /** Only show content by the creators/creators in groups listed above. */
+  onlyCreators?: boolean;
   /** Only creators of these kinds (empty = all). */
   creatorKinds?: CreatorKind[];
   /**

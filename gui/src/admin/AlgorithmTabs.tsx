@@ -13,6 +13,7 @@ import {
 } from '../../../src/shared/taxonomy';
 import { CopyButton, Loading, Modal } from '../components/ui';
 import { formatDuration, splitList, timeAgo } from '../util';
+import { Groups, Topics } from './GroupsTopics';
 import { ListControls, Pager, Sentinel, useConsoleList, type Paging } from './paging';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
@@ -1499,6 +1500,8 @@ export function AlgorithmTabs({ tab }: { tab: string }) {
   if (tab === 'review-links') return <Review section="links" />;
   if (tab === 'catalog') return <Catalog />;
   if (tab === 'creators') return <Creators />;
+  if (tab === 'groups') return <Groups />;
+  if (tab === 'groups-topics') return <Topics />;
   if (tab === 'comments') return <CommentsTab />;
   return null;
 }

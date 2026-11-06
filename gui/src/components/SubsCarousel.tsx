@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Subscription } from '../../../src/shared/clientapi';
-import { creatorPath } from '../util';
+import { profilePath } from '../util';
 import { Avatar } from './ui';
 
 /**
@@ -50,8 +50,8 @@ export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] 
           <span className="carousel-name">All</span>
         </Link>
         {subscriptions.map((subscription) => (
-          <Link key={subscription.id} to={creatorPath(subscription.id)} className="carousel-tile" aria-label={subscription.name}>
-            <Avatar name={subscription.name} id={subscription.id} />
+          <Link key={subscription.id} to={profilePath(subscription.kind, subscription.id)} className="carousel-tile" aria-label={subscription.name}>
+            <Avatar name={subscription.name} id={subscription.id} icon={subscription.icon} />
             <span className="carousel-name">{subscription.name}</span>
           </Link>
         ))}

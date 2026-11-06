@@ -7,6 +7,7 @@ import { isDevBuild } from '../shared/devbuild.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
 import type { Invoice, PaymentReceipt, Preferences } from '../shared/protocol.js';
+import type { CreatorKind } from '../shared/taxonomy.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import type { VvshConvertQuote, VvshFile } from '../shared/vvsh.js';
 import type { ClientCore } from './core.js';
@@ -241,7 +242,39 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // Creators: searching them (Explore), linking their platform accounts (proven with the
   // creator key), and suggesting content that is related to one.
-  on('GET', '/api/creators', (request) => core.searchCreators(request.query.get('q') ?? ''));
+  on('GET', '/api/creators', (request) => core.searchCreators(request.query.get('q') ?? '', (request.query.get('kind') as CreatorKind | 'group' | null) ?? undefined));
+  on('GET', '/api/groups/:id', (request) => core.group(request.params.id));
+  on('GET', '/api/topics', (request) => core.searchTopics(request.query.get('q') ?? ''));
+  on('GET', '/api/topics/:id', (request) => core.topic(request.params.id));
+  // A client brings a topic: the node keeps it under the hash of its name.
+  on('POST', '/api/topics', async (request) => {
+    const body = await request.json<{ nodeId?: string; name?: string; description?: string }>();
+    return core.createTopic(nodes.require(String(body.nodeId ?? '')), { name: String(body.name ?? ''), description: body.description });
+  });
+  // Changes to a group (members, name, description, links, icon) the user asks for.
+  on('POST', '/api/groups/suggestions', async (request) => {
+    const body = await request.json<{
+      nodeId?: string;
+      group?: string;
+      add?: string[];
+      remove?: string[];
+      name?: string;
+      description?: string;
+      links?: string[];
+      icon?: string;
+      reason?: string;
+    }>();
+    const { nodeId, group, ...rest } = body;
+    return core.suggestGroup(nodes.require(String(nodeId ?? '')), String(group ?? ''), rest);
+  });
+  on('GET', '/api/groups/suggestions/:id', (request) => core.myGroupSuggestions(node(request)));
+  // A topic description or icon the user suggests.
+  on('POST', '/api/topics/suggestions', async (request) => {
+    const body = await request.json<{ nodeId?: string; topic?: string; description?: string; icon?: string; reason?: string }>();
+    const { nodeId, topic, ...rest } = body;
+    return core.suggestTopic(nodes.require(String(nodeId ?? '')), String(topic ?? ''), rest);
+  });
+  on('GET', '/api/topics/suggestions/:id', (request) => core.myTopicSuggestions(node(request)));
   on('PUT', '/api/creators/accounts', async (request) => {
     const body = await request.json<{
       nodeId?: string;

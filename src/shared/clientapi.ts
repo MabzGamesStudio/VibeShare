@@ -2,7 +2,7 @@
 import type { NodeType } from './noderef.js';
 import type { Manifest } from './content.js';
 import type { CommentBlock, CommentVotes } from './comments.js';
-import type { ContentItem, CreatorInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, AccountView } from './protocol.js';
+import type { ContentItem, CreatorInfo, GroupInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, TopicInfo, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
 import type { VvshFile } from './vvsh.js';
 import type { CreatorKind, Format, Rating } from './taxonomy.js';
@@ -212,6 +212,14 @@ export interface PageFilters {
   /** Topics to favour, or (with onlyTopics) to require. */
   topics: string[];
   onlyTopics: boolean;
+  /** Topic ids added with the + button: whitelist (onlyTopicIds) or blacklist. */
+  topicIds?: string[];
+  onlyTopicIds?: boolean;
+  blockedTopicIds?: string[];
+  /** Specific creators and groups added with the + button: whitelist or blacklist. */
+  creatorIds?: string[];
+  onlyCreators?: boolean;
+  blockedCreatorIds?: string[];
   creatorKinds: CreatorKind[];
   /** Search pages: how results are ordered. */
   sort?: 'relevance' | 'new' | 'top';
@@ -340,7 +348,10 @@ export interface TorSettings {
 export interface Subscription {
   id: string;
   name: string;
-  kind?: CreatorKind;
+  /** A creator kind, or `topic` for a topic subscription. */
+  kind?: CreatorKind | 'topic';
+  /** Topics only: an icon, when the topic has one. */
+  icon?: string;
   addedAt: string;
 }
 
@@ -471,6 +482,23 @@ export interface ContentView {
 
 export interface CreatorView {
   creator: CreatorInfo;
+  items: FeedItem[];
+  via?: string;
+}
+
+/** A group page: the group, its member creators (for the carousel) and their content. */
+export interface GroupView {
+  group: GroupInfo;
+  /** The members, resolved to full creator summaries for the carousel. */
+  members: CreatorInfo[];
+  /** Everything every member published, newest first. */
+  items: FeedItem[];
+  via?: string;
+}
+
+/** A topic page: the topic and the content filed under it, newest first. */
+export interface TopicView {
+  topic: TopicInfo;
   items: FeedItem[];
   via?: string;
 }

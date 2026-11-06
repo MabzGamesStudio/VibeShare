@@ -247,6 +247,24 @@ export function pagePreferences(preferences: Preferences, filters: Partial<PageF
     out.onlyTopics = Boolean(filters.onlyTopics);
   }
   if (filters.creatorKinds?.length) out.creatorKinds = filters.creatorKinds;
+  // Creators, groups and topics a page picked with its + buttons: a whitelist narrows to
+  // them, a blacklist keeps them out. Group ids work everywhere a creator id does.
+  const blocked = [...(filters.blockedCreatorIds ?? []), ...(filters.blockedTopicIds ?? [])];
+  if (blocked.length) {
+    out.blockedCreators = [...new Set([...(preferences.blockedCreators ?? []), ...blocked])];
+    out.blockedTopics = [...new Set([...(preferences.blockedTopics ?? []), ...blocked])];
+  }
+  // Whitelists stay apart: picking creators keeps their content (topics still count as a
+  // preference), picking topics requires them; picking both requires both, as the node
+  // applies its filters one after another.
+  if (filters.creatorIds?.length && filters.onlyCreators) {
+    out.creatorIds = [...new Set([...(preferences.creatorIds ?? []), ...filters.creatorIds])];
+    out.onlyCreators = true;
+  }
+  if (filters.topicIds?.length && filters.onlyTopicIds) {
+    out.topics = [...new Set([...(preferences.topics ?? []), ...filters.topicIds])];
+    out.onlyTopics = true;
+  }
   out.maxRating = lowerRating(preferences.maxRating, filters.maxRating);
   return out;
 }

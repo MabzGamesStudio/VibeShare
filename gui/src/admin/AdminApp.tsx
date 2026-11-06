@@ -17,7 +17,15 @@ export interface Status {
   content?: { contents: number; bytes: number; chunks: number };
   storageService?: { jobs: number; activeAssignments: number; onlineHolders: number };
   registry?: { listed: number; blocked: number; creators: number; pending?: number; discovered?: number };
-  pending?: { suggestions: number; submissions: number; creatorSuggestions?: number; iconSuggestions?: number; accountLinks?: number };
+  pending?: {
+    suggestions: number;
+    submissions: number;
+    creatorSuggestions?: number;
+    iconSuggestions?: number;
+    accountLinks?: number;
+    groupSuggestions?: number;
+    topicSuggestions?: number;
+  };
 }
 
 export function useToast(): [string | null, (text: string) => void] {
@@ -1271,8 +1279,17 @@ export function AdminApp() {
           ['apis', 'API keys'],
           ['sources', 'Sources'],
           ['creators', 'Creators'],
+          // Groups and their topics: a group is a list of creators, a topic a category of
+          // content. Its menu (below) jumps between the two pages.
+          [
+            'groups',
+            <>
+              Groups & topics
+              {(status.pending?.groupSuggestions ?? 0) + (status.pending?.topicSuggestions ?? 0) > 0 ? <span className="tab-dot" /> : null}
+            </>,
+          ],
           ['comments', 'Comments'],
-        ] as [string, string][])),
+        ] as [string, ReactNode][])),
     ['accounts', 'Accounts'],
     ['payments', 'Payments'],
     ['settings', 'Settings'],
@@ -1307,7 +1324,7 @@ export function AdminApp() {
           // pages), Accounts (moderation) and Settings (the configuration groups). The
           // menu is fixed-positioned so the scrolling tabs bar cannot clip it — it opens
           // over the content at the top.
-          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' ? (
+          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' || id === 'groups' ? (
             <div
               key={id}
               className="tab-menu"
@@ -1322,7 +1339,8 @@ export function AdminApp() {
                   tab === id ||
                   (id === 'content' && (tab === 'add-local' || tab === 'suggestions')) ||
                   (id === 'accounts' && tab === 'moderation') ||
-                  (id === 'review' && tab.startsWith('review'))
+                  (id === 'review' && tab.startsWith('review')) ||
+                  (id === 'groups' && (tab === 'groups' || tab === 'groups-topics'))
                     ? 'on'
                     : ''
                 }`}
@@ -1364,6 +1382,18 @@ export function AdminApp() {
                       <button onClick={() => (setTabMenu(null), setTab('review-links'), load())}>
                         Account links without the creator key
                         {status.pending?.accountLinks ? <span className="tab-dot" /> : null}
+                      </button>
+                    </>
+                  )}
+                  {id === 'groups' && (
+                    <>
+                      <button onClick={() => (setTabMenu(null), setTab('groups'), load())}>
+                        Groups
+                        {status.pending?.groupSuggestions ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('groups-topics'), load())}>
+                        Topics
+                        {status.pending?.topicSuggestions ? <span className="tab-dot" /> : null}
                       </button>
                     </>
                   )}

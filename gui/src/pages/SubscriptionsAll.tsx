@@ -2,18 +2,19 @@ import { Search, UserPlus, Users, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Subscription } from '../../../src/shared/clientapi';
-import type { CreatorInfo } from '../../../src/shared/protocol';
+import type { CreatorInfo, TopicInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
 import { api, errorMessage } from '../api';
 import { Avatar, Empty } from '../components/ui';
 import { useApp } from '../state';
-import { creatorPath } from '../util';
+import { profilePath } from '../util';
 
 /** Creators matching the query, each with a Subscribe button (or Unsubscribe). */
 function AddSubscriptions({ subscriptions }: { subscriptions: Subscription[] }) {
   const { refresh, toast } = useApp();
   const [query, setQuery] = useState('');
   const [creators, setCreators] = useState<CreatorInfo[]>([]);
+  const [topics, setTopics] = useState<TopicInfo[]>([]);
   const [directId, setDirectId] = useState('');
   const [directName, setDirectName] = useState('');
 
@@ -22,15 +23,31 @@ function AddSubscriptions({ subscriptions }: { subscriptions: Subscription[] }) 
     const text = query.trim();
     if (!text) {
       setCreators([]);
+      setTopics([]);
       return;
     }
+    // Creators, groups and topics: a group is a creator, a topic its own kind of page.
     api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(text)}`)
       .then((result) => live && setCreators(result.creators))
       .catch(() => live && setCreators([]));
+    api<{ topics: TopicInfo[] }>(`/api/topics?q=${encodeURIComponent(text)}`)
+      .then((result) => live && setTopics(result.topics))
+      .catch(() => live && setTopics([]));
     return () => {
       live = false;
     };
   }, [query]);
+
+  const toggleTopic = async (topic: TopicInfo) => {
+    try {
+      const subscribed = subscriptions.some((subscription) => subscription.id === topic.id);
+      if (subscribed) await api(`/api/subscriptions/${encodeURIComponent(topic.id)}`, { method: 'DELETE' });
+      else await api('/api/subscriptions', { body: { id: topic.id, name: topic.name, kind: 'topic', icon: topic.icon } });
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
 
   const toggle = async (creator: { id: string; name: string; kind?: CreatorInfo['kind'] }) => {
     try {
@@ -59,10 +76,10 @@ function AddSubscriptions({ subscriptions }: { subscriptions: Subscription[] }) 
   return (
     <div className="card form-stack" style={{ marginTop: 26 }}>
       <h2>Add subscriptions</h2>
-      <p className="small muted">Search for creators by name, or paste a creator id to follow them.</p>
+      <p className="small muted">Search for a creator, a group or a topic by name, or paste a creator id to follow them.</p>
       <label className="field">
-        Search creators
-        <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Name, @handle, platform id…" />
+        Search creators, groups and topics
+        <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Name, @handle, platform id, topic…" />
       </label>
       {creators.length > 0 && (
         <div className="page-list">
@@ -70,7 +87,7 @@ function AddSubscriptions({ subscriptions }: { subscriptions: Subscription[] }) 
             const subscribed = subscriptions.some((subscription) => subscription.id === creator.id);
             return (
               <div key={creator.id} className="page-row">
-                <Link to={creatorPath(creator.id)} className="row" style={{ gap: 10, flex: 1, minWidth: 0, textDecoration: 'none', color: 'inherit' }}>
+                <Link to={profilePath(creator.kind, creator.id)} className="row" style={{ gap: 10, flex: 1, minWidth: 0, textDecoration: 'none', color: 'inherit' }}>
                   <Avatar name={creator.name} id={creator.id} icon={creator.icon} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <strong>{creator.name}</strong>
@@ -81,6 +98,27 @@ function AddSubscriptions({ subscriptions }: { subscriptions: Subscription[] }) 
                   </div>
                 </Link>
                 <button className={subscribed ? '' : 'primary'} onClick={() => toggle(creator)}>
+                  {subscribed ? 'Unsubscribe' : 'Subscribe'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {topics.length > 0 && (
+        <div className="page-list">
+          {topics.map((topic) => {
+            const subscribed = subscriptions.some((subscription) => subscription.id === topic.id);
+            return (
+              <div key={topic.id} className="page-row">
+                <Link to={profilePath('topic', topic.id)} className="row" style={{ gap: 10, flex: 1, minWidth: 0, textDecoration: 'none', color: 'inherit' }}>
+                  <Avatar name={topic.name} id={topic.id} icon={topic.icon} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <strong>{topic.name}</strong>
+                    <div className="tiny faint">Topic · {topic.items ?? 0} item{(topic.items ?? 0) === 1 ? '' : 's'}</div>
+                  </div>
+                </Link>
+                <button className={subscribed ? '' : 'primary'} onClick={() => void toggleTopic(topic)}>
                   {subscribed ? 'Unsubscribe' : 'Subscribe'}
                 </button>
               </div>
@@ -154,11 +192,14 @@ export function AllSubscriptionsPage() {
           <div className="page-list">
             {shown.map((subscription) => (
               <div key={subscription.id} className="page-row">
-                <Link to={creatorPath(subscription.id)} className="row" style={{ gap: 10, flex: 1, minWidth: 0, textDecoration: 'none', color: 'inherit' }}>
-                  <Avatar name={subscription.name} id={subscription.id} />
+                <Link to={profilePath(subscription.kind, subscription.id)} className="row" style={{ gap: 10, flex: 1, minWidth: 0, textDecoration: 'none', color: 'inherit' }}>
+                  <Avatar name={subscription.name} id={subscription.id} icon={subscription.icon} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <strong>{subscription.name}</strong>
-                    <div className="tiny faint mono">{subscription.id}</div>
+                    <div className="tiny faint">
+                      {subscription.kind === 'topic' ? 'Topic' : subscription.kind === 'group' ? 'Group' : 'Creator'} ·{' '}
+                      <span className="mono">{subscription.id}</span>
+                    </div>
                   </div>
                 </Link>
                 <button className="ghost icon small" onClick={() => unsubscribe(subscription)} aria-label={`Unsubscribe from ${subscription.name}`}>

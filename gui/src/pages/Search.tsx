@@ -3,11 +3,47 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { FeedResponse } from '../../../src/shared/clientapi';
-import type { CreatorInfo } from '../../../src/shared/protocol';
+import type { CreatorInfo, TopicInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS, CREATOR_KINDS, FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../../../src/shared/taxonomy';
-import { api } from '../api';
+import { api, errorMessage } from '../api';
 import { Feed } from '../components/Feed';
-import { Chips, toggle, Avatar } from '../components/ui';
+import { Chips, toggle, Avatar, Modal } from '../components/ui';
+import { useApp } from '../state';
+import { groupPath, profilePath, topicPath } from '../util';
+
+/** Groups matching the query: a group is searched and subscribed to like a creator. */
+function GroupResults({ query }: { query: string }) {
+  const [groups, setGroups] = useState<CreatorInfo[]>([]);
+  useEffect(() => {
+    let live = true;
+    api<{ creators: CreatorInfo[] }>(`/api/creators?kind=group&q=${encodeURIComponent(query.trim())}`)
+      .then((result) => live && setGroups(result.creators))
+      .catch(() => live && setGroups([]));
+    return () => {
+      live = false;
+    };
+  }, [query]);
+  if (!groups.length) return null;
+  return (
+    <div className="card form-stack" style={{ marginBottom: 24 }}>
+      <h2>Groups</h2>
+      <div className="page-list">
+        {groups.map((group) => (
+          <Link key={group.id} to={groupPath(group.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <Avatar name={group.name} id={group.id} icon={group.icon} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <strong>{group.name}</strong>
+              <div className="tiny faint">
+                {group.members?.length ?? 0} creator{(group.members?.length ?? 0) === 1 ? '' : 's'}
+                {group.description ? ` · ${group.description}` : ''}
+              </div>
+            </div>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /** Creators matching the query (Explore shows creators too, and not only exact names). */
 function CreatorResults({ query }: { query: string }) {
@@ -27,7 +63,7 @@ function CreatorResults({ query }: { query: string }) {
       <h2>Creators</h2>
       <div className="page-list">
         {creators.map((creator) => (
-          <Link key={creator.id} to={`/creator/${encodeURIComponent(creator.id)}`} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <Link key={creator.id} to={profilePath(creator.kind, creator.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
             <Avatar name={creator.name} id={creator.id} icon={creator.icon} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <strong>{creator.name}</strong>
@@ -41,12 +77,110 @@ function CreatorResults({ query }: { query: string }) {
       </div>
     </div>
   );
+/**
+ * Topics matching the query, each opening on its topic page. When no topic matches yet,
+ * the user can bring one: the node stores it under the hash of its name, so the same name
+ * always means the same topic.
+ */
+function TopicResults({ query }: { query: string }) {
+  const { state, toast } = useApp();
+  const [topics, setTopics] = useState<TopicInfo[]>([]);
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [added, setAdded] = useState(0);
+  const trimmed = query.trim();
+
+  useEffect(() => {
+    let live = true;
+    api<{ topics: TopicInfo[] }>(`/api/topics?q=${encodeURIComponent(trimmed)}`)
+      .then((result) => live && setTopics(result.topics))
+      .catch(() => live && setTopics([]));
+    return () => {
+      live = false;
+    };
+  }, [trimmed, added]);
+
+  useEffect(() => setName(trimmed), [trimmed]);
+  const node = state?.nodes.find((entry) => entry.type === 'algorithm' && entry.enabled);
+
+  const create = async () => {
+    if (!node || !name.trim()) return;
+    setBusy(true);
+    try {
+      const result = await api<{ topic: TopicInfo; newInfo: boolean }>('/api/topics', {
+        body: { nodeId: node.id, name: name.trim(), description: description.trim() || undefined },
+      });
+      toast(result.newInfo ? `Topic “${result.topic.name}” created` : `“${result.topic.name}” already exists`, 'success');
+      setOpen(false);
+      setDescription('');
+      setAdded(added + 1);
+      setTopics((list) => (list.some((topic) => topic.id === result.topic.id) ? list : [result.topic, ...list]));
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card form-stack" style={{ marginBottom: 24 }}>
+      <div className="row between">
+        <h2>Topics</h2>
+        <button className="small" disabled={!node} title={node ? 'Bring a topic the nodes do not have yet' : 'No algorithm node is enabled'} onClick={() => setOpen(true)}>
+          + Create a topic
+        </button>
+      </div>
+      {topics.length ? (
+        <div className="page-list">
+          {topics.map((topic) => (
+            <Link key={topic.id} to={topicPath(topic.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
+              <Avatar name={topic.name} id={topic.id} icon={topic.icon} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <strong>{topic.name}</strong>
+                <div className="tiny faint">
+                  {topic.items ?? 0} item{(topic.items ?? 0) === 1 ? '' : 's'}
+                  {topic.description ? ` · ${topic.description}` : ''}
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      ) : (
+        <span className="hint">No topic matches yet. Create it and the content filed under it shows on its page.</span>
+      )}
+      {open && (
+        <Modal title="Create a topic" onClose={() => setOpen(false)}>
+          <div className="form-stack">
+            <label className="field">
+              Name
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Science" />
+            </label>
+            <label className="field">
+              Description <span className="hint">Optional</span>
+              <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What belongs in this topic" />
+            </label>
+            <span className="hint">The topic id is the hash of its name: every node and every user asking for this name lands on the same topic.</span>
+            <div className="row">
+              <button className="primary" disabled={busy || !name.trim() || !node} onClick={() => void create()}>
+                {busy ? 'Creating…' : 'Create topic'}
+              </button>
+              <button onClick={() => setOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
 }
 
-/** What Explore shows: content, creators, or both (both by default). */
-const SHOW_KINDS = ['content', 'creators'] as const;
+}
+
+/** What Explore shows: content, creators, groups, topics, or all of them (all by default). */
+const SHOW_KINDS = ['content', 'creators', 'groups', 'topics'] as const;
 type ShowKind = (typeof SHOW_KINDS)[number];
-const SHOW_LABELS: Record<ShowKind, string> = { content: 'Content', creators: 'Creators' };
+const SHOW_LABELS: Record<ShowKind, string> = { content: 'Content', creators: 'Creators', groups: 'Groups', topics: 'Topics' };
 
 export function SearchPage() {
   const [params, setParams] = useSearchParams();
@@ -132,6 +266,8 @@ export function SearchPage() {
         </div>
       )}
       {show.includes('creators') && <CreatorResults query={query} />}
+      {show.includes('groups') && <GroupResults query={query} />}
+      {show.includes('topics') && <TopicResults query={query} />}
       {show.includes('content') && (
         <Feed
           deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
@@ -154,7 +290,7 @@ export function SearchPage() {
           }
         />
       )}
-      {show.length === 0 && <div className="banner info small">Choose what to show above: content, creators, or both.</div>}
+      {show.length === 0 && <div className="banner info small">Choose what to show above: content, creators, groups, topics, or all of them.</div>}
     </div>
   );
 }
