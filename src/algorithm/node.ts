@@ -11,7 +11,9 @@ import {
   commentRemovePayload,
   commentSigningPayload,
   type CommentBlock,
+  commentOrderOf,
   type CommentData,
+  type CommentOrder,
   type CommentTimePrecision,
 } from '../shared/comments.js';
 import { badRequest, forbidden, HttpError, notFound, readJson, requestJson, type Ctx } from '../shared/http.js';
@@ -747,16 +749,53 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     return this.fetchCommentData(section.remote);
   }
 
-  /** The chain as clients get it: every header, and the data except what is kept back. */
-  private async servedComments(section: CommentSection): Promise<CommentBlock[]> {
-    const data = await this.commentDataOf(section);
+  /**
+   * The chain as clients get it: every header, and the comment data of the comments the
+   * node sends. `load` picks which comment data goes out (the ranked first screen and
+   * what scrolled in after it); headers of comments whose data waits its turn are marked
+   * `pending`, headers of comments kept back stay plain (clients show those removed).
+   */
+  private servedComments(section: CommentSection, data: (CommentData | null)[], load: Set<string> | null): CommentBlock[] {
     const hidden = new Set(section.hidden);
     return section.blocks.map((block, index) => {
       const comment = data[index];
-      return section.shown && comment && !hidden.has(comment.id)
-        ? { ...block, data: comment }
-        : { prev: block.prev, dataHash: block.dataHash, hash: block.hash, id: block.id };
+      const kept = Boolean(comment && hidden.has(comment.id));
+      const sending = Boolean(section.shown && comment && !kept && (!load || load.has(comment.id)));
+      return sending
+        ? { ...block, data: comment as CommentData }
+        : {
+            prev: block.prev,
+            dataHash: block.dataHash,
+            hash: block.hash,
+            id: block.id,
+            ...(section.shown && comment && !kept && load ? { pending: true } : {}),
+          };
     });
+  }
+
+  /**
+   * The comment ids in the order the node wants them shown. The order is the node's own
+   * decision — a client only suggests one — and it is what the first screen of comment
+   * data and every later scroll load follow.
+   */
+  private rankComments(section: CommentSection, data: (CommentData | null)[], order: CommentOrder): string[] {
+    if (!section.shown) return [];
+    const hidden = new Set(section.hidden);
+    const votes = this.commentVotes(section, undefined);
+    const latest = new Map<string, CommentData>();
+    for (const comment of data) if (comment && !hidden.has(comment.id)) latest.set(comment.id, comment);
+    const score = (id: string) => {
+      const vote = votes[id] ?? { likes: 0, dislikes: 0 };
+      return { likes: vote.likes, dislikes: vote.dislikes, at: Date.parse(latest.get(id)!.time) || 0 };
+    };
+    const comparators: Record<CommentOrder, (a: string, b: string) => number> = {
+      'most-liked': (a, b) => score(b).likes - score(a).likes || score(b).at - score(a).at,
+      'most-disliked': (a, b) => score(b).dislikes - score(a).dislikes || score(b).at - score(a).at,
+      newest: (a, b) => score(b).at - score(a).at,
+      oldest: (a, b) => score(a).at - score(b).at,
+      relevant: (a, b) => score(b).likes - score(b).dislikes - (score(a).likes - score(a).dislikes) || score(b).at - score(a).at,
+    };
+    return [...latest.keys()].sort(comparators[order] ?? comparators.relevant);
   }
 
   /** Where the votes on each comment stand, including the asking account's own. */
@@ -1017,7 +1056,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);
       const platform = String(body.filters?.platform ?? '').slice(0, 40);
       if (platform) visible = visible.filter((entry) => sourceKeyOf(entry) === platform);
-      const searched = this.registry.search(visible, body.query.slice(0, 300), body.sort ?? 'relevance').map(({ entry }) => entry);
+      const searched = this.registry
+        .search(
+          visible,
+          body.query.slice(0, 300),
+          body.sort ?? 'relevance',
+          // The seed the client sent drives every non-deterministic step of the ranking,
+          // and the trace id carries its search version and parameters: the same trace id
+          // and the same parameters reproduce the same exact results.
+          body.trace || body.seed ? `${String(body.trace ?? '').slice(0, 200)}:${String(body.seed ?? '').slice(0, 200)}` : ''
+        )
+        .map(({ entry }) => entry);
       // A few VibeShare-published pieces come first, whatever the ranking — the ones
       // matching the query, or simply whatever is published when the page just explores —
       // and they are suggested even when the reader has seen them before. Everything
@@ -1113,16 +1162,29 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     // Comments on a content page: the whole hash-chained history, always. Clients verify
-    // every block header and signature themselves before showing anything.
+    // every block header and signature themselves before showing anything. Which comment
+    // data rides along is the node's decision (a client only suggests an order), and only
+    // the first screen of it goes out at once — `?offset=` brings the next as the reader
+    // scrolls, with every block header again.
     router.get('/v1/comments/:id', async (ctx) => {
       const account = this.auth.account(ctx);
       // Reading a page never stores anything: a page without comments sends an empty chain.
       const { key: root, section } = this.findCommentSection(ctx.params.id);
+      const order = commentOrderOf(ctx.query.get('order'));
+      const offset = Math.max(0, Math.trunc(Number(ctx.query.get('offset') ?? 0)) || 0);
+      const limit = Math.min(200, Math.max(1, Math.trunc(Number(ctx.query.get('limit') ?? 20)) || 20));
+      const data = section ? await this.commentDataOf(section) : [];
+      const rank = section ? this.rankComments(section, data, order) : [];
+      const loaded = Math.min(offset + limit, rank.length);
       return {
         root,
-        blocks: section ? await this.servedComments(section) : [],
+        blocks: section ? this.servedComments(section, data, new Set(rank.slice(0, loaded))) : [],
         votes: section ? this.commentVotes(section, account?.id) : {},
         shown: section?.shown ?? true,
+        order,
+        rank,
+        total: rank.length,
+        loaded,
       };
     });
 
@@ -1633,7 +1695,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       case 'rating':
         if (!RATINGS.includes(value as Rating)) throw badRequest(`Unknown rating ${value}`);
         return value;
-      case 'tag':
       case 'topic': {
         const tag = normalizeTag(value);
         if (!tag) throw badRequest('Empty tag');
@@ -1710,9 +1771,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const entry = this.registry.get(suggestion.contentId);
     if (entry) {
       switch (suggestion.kind) {
-        case 'tag':
-          if (!entry.tags.includes(suggestion.value)) entry.tags.push(suggestion.value);
-          break;
         case 'topic':
           if (!entry.topics.includes(suggestion.value)) entry.topics.push(suggestion.value);
           break;
@@ -2141,8 +2199,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       request: {
         ...request,
         providers: (request.providers ?? []).filter((ref) => parseNodeRef(ref)).slice(0, 8),
-        tags: (request.tags ?? []).slice(0, 32),
-        topics: (request.topics ?? []).slice(0, 16),
+        topics: [...new Set([...(request.topics ?? []), ...(request.tags ?? [])])].slice(0, 16),
       },
       verifiedCreator,
       hasThumbnail: Boolean(thumbnail),
@@ -2176,10 +2233,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       description: request.description,
       format: request.format ?? 'other',
       rating: request.rating ?? 'all',
-      topics: request.topics,
-      tags: request.tags,
+      topics: [...new Set([...(request.topics ?? []), ...(request.tags ?? [])])],
       language: request.language,
       durationSeconds: request.durationSeconds,
+      gallery: (request.gallery ?? []).slice(0, 64).map((url) => ({ url, type: 'image' as const })),
       providers: request.providers,
       publishedAt: request.publishedAt,
       thumbnail: submission.hasThumbnail || undefined,
@@ -2250,7 +2307,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const wantedRating = filters.maxRating ? RATINGS.indexOf(filters.maxRating) : RATINGS.length - 1;
     const formats = filters.formats?.length ? new Set(filters.formats) : null;
     const topics = filters.topics?.length ? new Set(filters.topics.map(normalizeTag)) : null;
-    const tags = filters.tags?.length ? new Set(filters.tags.map(normalizeTag)) : null;
     const metrics = criteria.metrics ?? [];
     const wanted = this.registry.all().filter((entry) => {
       if (entry.status === 'blocked') return false;
@@ -2262,7 +2318,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (formats && !formats.has(entry.format)) return false;
       if (RATINGS.indexOf(entry.rating) > wantedRating) return false;
       if (topics && !entry.topics.some((topic) => topics.has(normalizeTag(topic)))) return false;
-      if (tags && !entry.tags.some((tag) => tags.has(normalizeTag(tag)))) return false;
       for (const metric of metrics) {
         const value = entry.platformStats?.[metric.key];
         if (value === undefined) return false;
@@ -2302,7 +2357,6 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         format: item.format,
         rating: item.rating,
         topics: item.topics,
-        tags: item.tags,
         language: item.language,
         durationSeconds: item.durationSeconds,
         publishedAt: item.publishedAt,
@@ -3130,8 +3184,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
             description: meta.description,
             format: meta.format,
             rating: meta.rating,
-            topics: meta.topics,
-            tags: meta.tags,
+            topics: [...new Set([...(meta.topics ?? []), ...(((meta.tags as string[] | undefined) ?? []))])],
             language: meta.language,
             durationSeconds: meta.durationSeconds,
             creator: item.creator ? { name: item.creator.name, kind: item.creator.kind } : undefined,

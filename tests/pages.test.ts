@@ -79,10 +79,10 @@ describe('page configurations', () => {
   it('share links open the hosted web client on the content', () => {
     assert.equal(
       shareLink(DEFAULT_SHARE_BASE_URL, 'vs1abc~yt:dQw4w9WgXcQ'),
-      'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/#/watch/vs1abc~yt%3AdQw4w9WgXcQ'
+      'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/watch/vs1abc~yt%3AdQw4w9WgXcQ'
     );
-    assert.equal(shareLink('https://example.org/app/index.html#/old', 'yt:x'), 'https://example.org/app/#/watch/yt%3Ax');
-    assert.equal(shareLink('https://example.org/', 'vs1abc', 'vs:provider:vk1x@https://p.example'), 'https://example.org/#/watch/vs1abc?p=vs%3Aprovider%3Avk1x%40https%3A%2F%2Fp.example');
+    assert.equal(shareLink('https://example.org/app/index.html#/old', 'yt:x'), 'https://example.org/app/watch/yt%3Ax');
+    assert.equal(shareLink('https://example.org/', 'vs1abc', 'vs:provider:vk1x@https://p.example'), 'https://example.org/watch/vs1abc?p=vs%3Aprovider%3Avk1x%40https%3A%2F%2Fp.example');
   });
 });
 

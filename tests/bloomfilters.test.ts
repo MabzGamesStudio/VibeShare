@@ -346,6 +346,7 @@ describe('a client keeping track of what the user has seen', async () => {
       method: 'PATCH',
       body: {
         pauseHistory: true,
+        watchHistory: true,
         selectedBloom: { enabled: true, bits: 10_000, expected: 10_000 },
         previewBloom: { enabled: true, bits: 100_000, expected: 10_000 },
         searchBloom: { enabled: true, bits: 10_000, expected: 10_000 },

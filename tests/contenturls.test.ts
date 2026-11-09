@@ -54,6 +54,12 @@ describe('downloadable content copies (URLs and base URLs)', async () => {
     // The kept copy is served back.
     const bytes = Buffer.from(await (await fetch(`${url}/v1/downloads/${cid}`)).arrayBuffer());
     assert.ok(bytes.equals(data));
+
+    // And offered first when the node is asked for the cid: the kept copy lives here now.
+    const answer = await fetch(`${url}/v1/content/${cid}`);
+    const body = (await answer.json()) as { missing?: boolean; links?: { cid: string; url: string }[] };
+    assert.equal(body.missing, true);
+    assert.equal(body.links?.[0]?.url, `${url}/v1/downloads/${cid}`, 'the node’s own kept copy is the first link');
   });
 
   it('sends a link instead of the content, and the client only accepts an exact cid match', async () => {
@@ -78,6 +84,42 @@ describe('downloadable content copies (URLs and base URLs)', async () => {
     const tampered = Buffer.from(bytes);
     tampered[0] ^= 0xff;
     assert.ok(!bytesMatchCid(tampered, cid), 'tampered bytes are not processed');
+  });
+
+  it('downloads content through the client from the links a provider sends', async () => {
+    const { dir, cleanup } = tempDir();
+    const { client: node, api } = await startClient(dir);
+    try {
+      await api('/api/nodes', { body: { text: provider.reference() } });
+      const state = await api<{ nodes: { id: string; type: string }[] }>('/api/state');
+      const pid = state.nodes.find((entry) => entry.type === 'provider')!.id;
+      const data = randomBytesOf(3072, 41);
+      const cid = bytesCid(data);
+      files.set('served.bin', data);
+      await api(`/api/nodes/${pid}/content-urls`, { method: 'POST', body: { items: [{ cid, url: `${origin}/served.bin` }] } });
+
+      // The provider holds only a link for this cid. The download follows it and takes the
+      // bytes only when they hash to the cid exactly — this used to fail with
+      // "Invalid manifest: unsupported version" instead of fetching them.
+      const download = await fetch(`${node.url()}/stream/${cid}?download=1`, { headers: { 'x-vs-token': node.token } });
+      assert.equal(download.status, 200, 'the link answer is followed and the content downloaded');
+      const bytes = new Uint8Array(await download.arrayBuffer());
+      assert.ok(bytesMatchCid(bytes, cid), 'the downloaded bytes hash to the exact cid');
+      assert.equal(bytes.length, data.length);
+
+      // Bytes that do not hash to the cid are never taken, and the answer says so.
+      const tampered = Buffer.from(data);
+      tampered[0] ^= 0xff;
+      files.set('served.bin', tampered);
+      const bad = await fetch(`${node.url()}/stream/${cid}?download=1`, { headers: { 'x-vs-token': node.token } });
+      assert.equal(bad.status, 502, 'tampered bytes are refused');
+      const problem = (await bad.json()) as { error: { code: string; attempts?: { error: string }[] } };
+      assert.equal(problem.error.code, 'unavailable');
+      assert.ok(problem.error.attempts?.some((entry) => entry.error.includes('does not match')), 'and the answer says the cid did not match');
+    } finally {
+      await node.stop();
+      cleanup();
+    }
   });
 
   it('accepts data from a link only on an exact cid match, and says so clearly when it does not match', async () => {

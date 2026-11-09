@@ -1,4 +1,4 @@
-import { BookOpen, Film, Gamepad2, Image, Music, Package, Podcast, Radio, Smartphone, FileText, Headphones, File } from 'lucide-react';
+import { BookOpen, Film, Gamepad2, Image, Images, Music, Package, Podcast, Radio, Smartphone, FileText, Headphones, File } from 'lucide-react';
 import type { Format } from '../../../src/shared/taxonomy';
 
 export const FORMAT_ICONS: Record<Format, typeof Film> = {
@@ -9,6 +9,7 @@ export const FORMAT_ICONS: Record<Format, typeof Film> = {
   audio: Headphones,
   podcast: Podcast,
   image: Image,
+  'image-list': Images,
   article: FileText,
   game: Gamepad2,
   software: Package,

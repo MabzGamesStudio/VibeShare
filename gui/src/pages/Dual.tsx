@@ -2,6 +2,7 @@
 // example two vertical video scrolls at once, or a video grid next to a feed. The
 // choice of each half is remembered.
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { PageConfig } from '../../../src/shared/clientapi';
 import { PageView } from '../components/feed/PageView';
 import { Loading } from '../components/ui';
@@ -40,6 +41,16 @@ function Pane({
 }
 
 export function DualPage() {
+  const navigate = useNavigate();
+  // On a phone two halves cannot fit on one screen: the dual view opens the shorts tab.
+  useEffect(() => {
+    const check = () => {
+      if (window.innerWidth < 1000) navigate('/p/shorts');
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, [navigate]);
   const { state } = useApp();
   const pages = state?.settings.pages ?? [];
   // By default the left half is the vertical video scroll (Shorts) and the right half

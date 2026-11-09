@@ -1,4 +1,4 @@
-import { BookMarked, Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
+import { BookMarked, ChevronLeft, ChevronRight, Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry, SearchHistoryItem } from '../../src/shared/clientapi';
@@ -9,6 +9,7 @@ import { PageEditor, pagePath } from './components/feed/PageEditor';
 import { PageView } from './components/feed/PageView';
 import { ShareProvider } from './components/Share';
 import { CookieConsent } from './components/CookieConsent';
+import { ToastArea } from './components/toasts';
 import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
 import { GroupPage } from './pages/Group';
@@ -48,6 +49,13 @@ function TopSearch() {
   const [past, setPast] = useState<SearchHistoryItem[]>([]);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  // On a phone the search starts as a magnifying glass: tapping it opens the field over
+  // the credit chips, and the past searches below it take up most of the screen.
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (mobileOpen) inputRef.current?.focus();
+  }, [mobileOpen]);
   const suggest = Boolean(state?.settings.searchSuggestions);
   useEffect(() => {
     if (location.pathname === '/search') setQuery(new URLSearchParams(location.search).get('q') ?? '');
@@ -68,12 +76,22 @@ function TopSearch() {
     const picked = open && active >= 0 ? shown[active]?.query : undefined;
     const text = (picked ?? query).trim();
     setOpen(false);
+    setMobileOpen(false);
     // Pasting a content id or link opens it directly.
     if (parseContentId(text)) navigate(watchPath(text));
     else navigate(`/search?q=${encodeURIComponent(text)}`);
   };
   return (
-    <div className="searchbox-wrap">
+    <div className={`searchbox-wrap ${mobileOpen ? 'mobile-open' : ''}`}>
+      <button
+        type="button"
+        className="ghost icon search-toggle"
+        aria-label={mobileOpen ? 'Close search' : 'Search'}
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen((value) => !value)}
+      >
+        <SearchIcon size={18} />
+      </button>
       <form className="searchbox" onSubmit={submit} role="search">
         <SearchIcon size={18} className="faint" />
         <input
@@ -83,6 +101,7 @@ function TopSearch() {
             setOpen(true);
             setActive(-1);
           }}
+          ref={inputRef}
           onFocus={() => setOpen(true)}
           onBlur={() => setOpen(false)}
           onKeyDown={(e) => {
@@ -184,7 +203,7 @@ function PageRoute({ id }: { id?: string }) {
       <div className="page">
         <Empty icon={<Compass size={42} />} title="This page does not exist">
           <p>
-            It may have been deleted. <Link to="/settings#pages" className="link">Manage your pages</Link>
+            It may have been deleted. <Link to="/settings?tab=pages" className="link">Manage your pages</Link>
           </p>
         </Empty>
       </div>
@@ -197,6 +216,22 @@ export function App() {
   const { state, error, providers, algorithms } = useApp();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  // The panel slides left when collapsed (desktop); the choice is remembered.
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('vibeshare-sidebar') === 'collapsed';
+    } catch {
+      return false;
+    }
+  });
+  const collapse = (value: boolean) => {
+    setCollapsed(value);
+    try {
+      localStorage.setItem('vibeshare-sidebar', value ? 'collapsed' : 'open');
+    } catch {
+      // The choice still applies for this session when storage is unavailable.
+    }
+  };
   const location = useLocation();
   useEffect(() => setOpen(false), [location.pathname]);
 
@@ -213,13 +248,16 @@ export function App() {
   return (
     <ShareProvider>
       <CookieConsent />
-      <div className="app">
+      <div className={`app ${collapsed ? 'collapsed' : ''}`}>
         <aside className={`sidebar ${open ? 'open' : ''}`}>
           <div className="brand">
             <div className="brand-logo">
               <Sparkles size={18} />
             </div>
             VibeShare
+            <button className="ghost icon sidebar-collapse" title="Hide the panel" aria-label="Hide the panel" onClick={() => (window.matchMedia('(max-width: 820px)').matches ? setOpen(false) : collapse(true))}>
+              <ChevronLeft size={16} />
+            </button>
           </div>
           <div className="nav-section">Content mediums</div>
           {pages.map((page) => (
@@ -257,6 +295,11 @@ export function App() {
         {open && <div className="sidebar-scrim" onClick={() => setOpen(false)} />}
         <div className="main">
           <header className="topbar">
+            {collapsed && (
+              <button className="ghost icon sidebar-expand" title="Show the panel" aria-label="Show the panel" onClick={() => collapse(false)}>
+                <ChevronRight size={16} />
+              </button>
+            )}
             <button className="ghost icon menu-button" onClick={() => setOpen(!open)} aria-label="Menu">
               <Menu size={20} />
             </button>
@@ -281,7 +324,7 @@ export function App() {
                     <strong>A hidden profile is locked.</strong>{' '}
                     <span className="small">
                       Its data is encrypted on this device — unlock it in{' '}
-                      <Link className="link" to="/settings#profiles">
+                      <Link className="link" to="/settings?tab=profiles">
                         Settings → Profiles
                       </Link>{' '}
                       with its username and password.
@@ -321,6 +364,7 @@ export function App() {
           />
         )}
       </div>
+      <ToastArea saving={Boolean(state?.settings.toastHistory)} showIcon={state?.settings.toastIcon !== false} />
     </ShareProvider>
   );
 }

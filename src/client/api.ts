@@ -198,6 +198,28 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/receipts', () => ({ receipts: listReceipts(core.store) }));
   on('DELETE', '/api/receipts/:id', (request) => ({ removed: removeReceipt(core.store, request.params.id) }));
 
+  // Whether the algorithm search nodes know a content id: Earn only accepts a provider's
+  // job for content at least one of them can vouch for.
+  on('POST', '/api/lookup', async (request) => {
+    const body = await request.json<{ ids?: string[] }>();
+    const ids = (body.ids ?? []).slice(0, 50).map(String);
+    const known: Record<string, boolean> = {};
+    for (const id of ids) known[id] = false;
+    for (const algorithm of nodes.list().filter((entry) => entry.type === 'algorithm' && entry.enabled)) {
+      if (Object.values(known).every(Boolean)) break;
+      try {
+        const answer = await nodes.client(algorithm).json<{ items: { id?: string; status?: string }[] }>('/v1/lookup', { body: { ids } });
+        for (const item of answer.items ?? []) {
+          // 'unknown' is the node never having heard of it; anything else means it exists.
+          if (item.id && item.status && item.status !== 'unknown' && item.id in known) known[item.id] = true;
+        }
+      } catch {
+        // This node is not answering right now — the next one may know.
+      }
+    }
+    return { known };
+  });
+
   // Discovery
   on('POST', '/api/feed', async (request) => {
     const body = await request.json<{ cursor?: string; seed?: string; formats?: Preferences['formats'] }>();
@@ -205,10 +227,14 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     return core.collect('feed', { preferences, seed: body.seed }, body.cursor);
   });
   on('POST', '/api/search', async (request) => {
-    const body = await request.json<{ query?: string; filters?: Preferences & { creator?: string; platform?: string }; sort?: string; cursor?: string }>();
+    const body = await request.json<{ query?: string; filters?: Preferences & { creator?: string; platform?: string }; sort?: string; cursor?: string; seed?: string; trace?: string }>();
     const given = Object.entries(body.filters ?? {}).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length));
     const filters = { ...core.settings.preferences, ...Object.fromEntries(given) };
-    return core.collect('search', { query: String(body.query ?? ''), filters, sort: body.sort }, body.cursor);
+    return core.collect(
+      'search',
+      { query: String(body.query ?? ''), filters, sort: body.sort, seed: body.seed, trace: body.trace },
+      body.cursor
+    );
   });
   on('POST', '/api/browse', async (request) => core.browse(await request.json()));
   // Content played from outside the network: nodes reward reports of ids they did not have.
@@ -231,7 +257,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // Comments on a content page: the hash-chained history the node holds (the GUI verifies
   // it itself), and writing to it — a comment, a reply, an edit, a vote, a removal ask.
-  on('GET', '/api/comments/:id', (request) => core.comments(request.params.id));
+  on('GET', '/api/comments/:id', (request) =>
+    core.comments(request.params.id, {
+      order: request.query.get('order') ?? undefined,
+      offset: Number(request.query.get('offset') ?? 0) || 0,
+      limit: Number(request.query.get('limit') ?? 0) || undefined,
+    })
+  );
   on('POST', '/api/comments/:id', async (request) => core.comment(request.params.id, await request.json<CommentPostRequest>()));
   on('POST', '/api/comments/:id/:comment/vote', async (request) => {
     const body = await request.json<{ vote?: number }>();
@@ -369,6 +401,12 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('DELETE', '/api/search-history', async (request) =>
     core.clearSearchHistory((await request.json<{ query?: string }>().catch(() => ({ query: undefined }))).query)
   );
+  // Toast messages: saved on request (Settings → History → Toast messages) and just as
+  // searchable and deletable as the histories above.
+  on('GET', '/api/toasts', (request) => core.toastsItems(request.query.get('q') ?? undefined));
+  on('POST', '/api/toasts', async (request) => core.rememberToast(await request.json<{ text?: string; kind?: string; at?: string }>()));
+  on('DELETE', '/api/toasts', () => core.forgetToasts());
+  on('DELETE', '/api/toasts/:id', (request) => core.forgetToasts(request.params.id));
   // Saved cids and the collections the user sorts them into (a cid may be in several)
   on('GET', '/api/saved', () => core.savedState());
   on('POST', '/api/saved', async (request) => core.saveCid(await request.json()));

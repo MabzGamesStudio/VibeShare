@@ -87,6 +87,11 @@ export function sha256hex(data: string | Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+/** SHA-1 hex digest — what Netlify's deploy files API expects for its file records. */
+export function sha1hex(data: string | Uint8Array): string {
+  return createHash('sha1').update(data).digest('hex');
+}
+
 export function hmacHex(secret: string | Buffer, data: string | Uint8Array): string {
   return createHmac('sha256', secret).update(data).digest('hex');
 }

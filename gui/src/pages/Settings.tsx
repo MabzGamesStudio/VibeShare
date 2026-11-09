@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Lock, Pencil, Plus, RotateCcw, Share2, Shield, ShieldAlert, Trash2, UserRound } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
-import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type ProfileSummary, type Settings, type TorSettings } from '../../../src/shared/clientapi';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type ProfileSummary, type Settings, type ToastMessage, type TorSettings } from '../../../src/shared/clientapi';
 import { DEFAULT_SHARE_BASE_URL, newPageId, presetPage, shareLink } from '../../../src/shared/clientdefaults';
 import { LANGUAGES } from '../../../src/shared/language';
 import {
@@ -772,6 +772,80 @@ function ProfilesCard() {
   );
 }
 
+/** Saved toast messages: whether to keep them at all, the bell icon, and what is kept. */
+function ToastMessagesSection() {
+  const { state, updateSettings } = useApp();
+  const [query, setQuery] = useState('');
+  const [items, setItems] = useState<ToastMessage[]>([]);
+  const saving = Boolean(state?.settings.toastHistory);
+  const load = () => {
+    api<{ items: ToastMessage[] }>(`/api/toasts${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`)
+      .then((answer) => setItems(answer.items))
+      .catch(() => setItems([]));
+  };
+  useEffect(load, [query, saving]);
+  return (
+    <div className="card form-stack" id="toasts">
+      <h2>Toast messages</h2>
+      <p className="small muted">
+        Messages pop up at the bottom right, and the bell button keeps them for this session. Nothing is saved on this device by
+        default — turn on saving to keep them. Saved messages search and clear exactly like the watch and search history.
+      </p>
+      <Switch checked={saving} onChange={(toastHistory) => void updateSettings({ toastHistory })} label="Save toast messages on this device" />
+      <Switch
+        checked={state?.settings.toastIcon !== false}
+        onChange={(toastIcon) => void updateSettings({ toastIcon })}
+        label="Show the bell icon on every page"
+      />
+      {saving && (
+        <>
+          <label className="field">
+            Search messages
+            <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Words in the message" />
+          </label>
+          {items.length > 0 && (
+            <div className="row">
+              <button
+                className="small"
+                onClick={async () => {
+                  await api('/api/toasts', { method: 'DELETE' });
+                  load();
+                }}
+              >
+                <Trash2 size={14} /> Clear all saved messages
+              </button>
+            </div>
+          )}
+          <div className="form-stack" style={{ maxHeight: 420, overflowY: 'auto' }}>
+            {items.length === 0 ? (
+              <p className="hint">{query.trim() ? 'Nothing matches.' : 'Nothing saved yet.'}</p>
+            ) : (
+              items.map((item) => (
+                <div key={item.id} className="row between" style={{ gap: 8, alignItems: 'flex-start' }}>
+                  <div className="small">
+                    <span className="faint tiny">{new Date(item.at).toLocaleString()}</span>{' '}
+                    <span style={item.kind === 'error' ? { color: 'var(--danger)' } : undefined}>{item.text}</span>
+                  </div>
+                  <button
+                    className="small ghost"
+                    title="Delete"
+                    onClick={async () => {
+                      await api(`/api/toasts/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+                      load();
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** The settings grouped into tabs: similar settings live together. */
 const SETTINGS_TABS: [string, string][] = [
   ['feed', 'Feed'],
@@ -783,8 +857,8 @@ const SETTINGS_TABS: [string, string][] = [
   ['logs', 'Logs'],
 ];
 
-/** Which tab a deep link (settings#profiles…) lands on. */
-function tabForHash(hash: string): string {
+/** Which tab a deep link (settings?tab=profiles…; the old #profiles links too) lands on. */
+function tabForTarget(target: string): string {
   const groups: Record<string, string> = {
     pages: 'feed',
     feed: 'feed',
@@ -806,8 +880,11 @@ function tabForHash(hash: string): string {
     logs: 'logs',
     log: 'logs',
     debug: 'logs',
+    toasts: 'history',
+    toast: 'history',
   };
-  return groups[hash.slice(1)] ?? 'feed';
+  const key = target.replace(/^#/, '').replace(/^\?tab=/, '');
+  return groups[key] ?? (SETTINGS_TABS.some(([id]) => id === key) ? key : 'feed');
 }
 
 /** Debug logs: a live view of what the app asks of the nodes (Settings → Logs). */
@@ -923,15 +1000,18 @@ function StateRefreshCard() {
 export function SettingsPage() {
   const { state, updateSettings } = useApp();
   const location = useLocation();
-  const [tab, setTab] = useState(() => tabForHash(location.hash));
+  const [params, setParams] = useSearchParams();
+  const [tab, setTab] = useState(() => tabForTarget(params.get('tab') ?? location.hash));
+  const [historyTab, setHistoryTab] = useState<'history' | 'toasts'>(() => (params.get('tab') === 'toasts' ? 'toasts' : 'history'));
   useEffect(() => {
-    const target = tabForHash(location.hash);
+    const target = tabForTarget(params.get('tab') ?? location.hash);
     if (target) setTab(target);
-  }, [location.hash]);
+  }, [params, location.hash]);
   useEffect(() => {
-    const id = location.hash.slice(1);
+    // The tab id doubles as the anchor of its first card (`?tab=sharing` scrolls there).
+    const id = params.get('tab') ?? location.hash.slice(1);
     if (id && state) document.getElementById(id)?.scrollIntoView({ block: 'start' });
-  }, [location.hash, Boolean(state), tab]);
+  }, [params, location.hash, Boolean(state), tab]);
   if (!state) return null;
   const s = state.settings;
   const prefs = s.preferences;
@@ -948,7 +1028,17 @@ export function SettingsPage() {
 
       <div className="tabs">
         {SETTINGS_TABS.map(([id, label]) => (
-          <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+          <button
+            key={id}
+            className={`tab ${tab === id ? 'on' : ''}`}
+            onClick={() => {
+              setTab(id);
+              setParams((current) => {
+                current.set('tab', id);
+                return current;
+              }, { replace: true });
+            }}
+          >
             {label}
           </button>
         ))}
@@ -1002,12 +1092,25 @@ export function SettingsPage() {
           />
         </div>
         <label className="field">
-          Hide tags
-          <ListInput value={prefs.blockedTags ?? []} onChange={(blockedTags) => setPrefs({ blockedTags })} placeholder="spoilers, jump-scares" />
+          Hide topics <span className="hint">Topic names, comma separated</span>
+          <ListInput value={prefs.blockedTopics ?? []} onChange={(blockedTopics) => setPrefs({ blockedTopics })} placeholder="spoilers, jump-scares" />
         </label>
         <label className="field">
           Hide creators <span className="hint">Creator ids, comma separated</span>
           <ListInput value={prefs.blockedCreators ?? []} onChange={(blockedCreators) => setPrefs({ blockedCreators })} />
+        </label>
+        <label className="field">
+          Subscriptions carousel order
+          <select
+            value={s.subscriptionOrder}
+            onChange={(e) => void updateSettings({ subscriptionOrder: e.target.value as Settings['subscriptionOrder'] })}
+          >
+            <option value="subscribed">Subscribed date (newest first)</option>
+            <option value="random">Random</option>
+            <option value="az">Alphabetical (A–Z)</option>
+            <option value="za">Alphabetical (Z–A)</option>
+            <option value="recent">Most recent posting</option>
+          </select>
         </label>
         <label className="field">
           Content no algorithm node has reviewed
@@ -1146,10 +1249,34 @@ export function SettingsPage() {
       )}
 
       {tab === 'history' && (
-        <div className="card form-stack">
-          <h2>History</h2>
-          <HistorySection />
-        </div>
+        <>
+          <div className="segmented" role="tablist" aria-label="History sections">
+            <button
+              role="tab"
+              aria-selected={historyTab === 'history'}
+              className={historyTab === 'history' ? 'on' : ''}
+              onClick={() => setHistoryTab('history')}
+            >
+              Watch and search history
+            </button>
+            <button
+              role="tab"
+              aria-selected={historyTab === 'toasts'}
+              className={historyTab === 'toasts' ? 'on' : ''}
+              onClick={() => setHistoryTab('toasts')}
+            >
+              Toast messages
+            </button>
+          </div>
+          {historyTab === 'history' ? (
+            <div className="card form-stack">
+              <h2>History</h2>
+              <HistorySection />
+            </div>
+          ) : (
+            <ToastMessagesSection />
+          )}
+        </>
       )}
 
       {tab === 'logs' && <LogsCard />}

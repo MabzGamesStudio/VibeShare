@@ -31,7 +31,6 @@ async function adopt(item: PeerEntry) {
       format: item.format,
       rating: item.rating,
       topics: item.topics,
-      tags: item.tags,
       language: item.language,
       durationSeconds: item.durationSeconds,
       publishedAt: item.publishedAt,

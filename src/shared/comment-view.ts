@@ -10,7 +10,7 @@ export interface CommentThread {
 
 /** Parents own their replies visually even when a reply arrived later in the chain. */
 export function commentThreads(entries: ChainEntry[], root: string): CommentThread[] {
-  const comments = entries.filter((entry): entry is CommentEntry => !('removed' in entry));
+  const comments = entries.filter((entry): entry is CommentEntry => !('removed' in entry) && !('pending' in entry));
   const nodes = new Map(comments.map((entry) => [entry.id, { entry, replies: [] } as CommentThread]));
   const roots: CommentThread[] = [];
   for (const node of nodes.values()) {

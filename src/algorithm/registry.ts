@@ -17,7 +17,7 @@ import {
   type Format,
   type Rating,
 } from '../shared/taxonomy.js';
-import { wilson, quality } from './ranking.js';
+import { wilson, quality, seededRandom } from './ranking.js';
 import { matchesLanguages } from '../shared/language.js';
 
 /** What the node knows about one content. Every entry has a content id, a link, or both — they are separate. */
@@ -46,9 +46,10 @@ export interface Entry {
   topics: string[];
   /** The topic records this entry is filed under (each is an exact topic id). */
   topicIds?: string[];
-  tags: string[];
   language?: string;
   durationSeconds?: number;
+  /** The images of a list-of-images content, in order. */
+  gallery?: ContentMedia[];
   creatorId?: string;
   thumbnail?: boolean;
   providers: string[];
@@ -99,7 +100,11 @@ interface RegistryData {
  */
 export { topicIdOf };
 
-export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'addedAt' | 'updatedAt'>> & { id?: string };
+export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'addedAt' | 'updatedAt'>> & {
+  id?: string;
+  /** Legacy input alias: platform tags, folded into topics (tags are redundant of topics). */
+  tags?: string[];
+};
 
 function cleanList(value: unknown, max = 32): string[] {
   if (!Array.isArray(value)) return [];
@@ -262,7 +267,9 @@ export class Registry {
     if (input.id && !existing) throw badRequest(`Unknown topic ${input.id}`);
     const topic: TopicRecord = {
       id: existing?.id ?? topicIdOf(name),
-      name,
+      // A topic brought by name keeps the name it was first stored with, so "Deep Sea"
+      // and "deep sea" never rename each other; only an edit that carries the id renames.
+      name: existing && !input.id ? existing.name : name,
       description: (input.description ?? existing?.description)?.slice(0, 2000) || undefined,
       icon: (input.icon !== undefined ? input.icon : existing?.icon) || undefined,
       status: input.status ?? existing?.status ?? 'listed',
@@ -319,11 +326,11 @@ export class Registry {
       description: (input.description ?? existing?.description)?.slice(0, 5000),
       format: input.format ?? existing?.format ?? 'other',
       rating: input.rating ?? existing?.rating ?? 'all',
-      topics: input.topics ? cleanList(input.topics) : (existing?.topics ?? []),
-      topicIds: input.topics ? this.topicIdsFor(input.topics) : existing?.topicIds,
-      tags: input.tags ? cleanList(input.tags, 64) : (existing?.tags ?? []),
+      topics: input.topics || input.tags ? cleanList([...(input.topics ?? []), ...(input.tags ?? [])], 64) : (existing?.topics ?? []),
+      topicIds: input.topics || input.tags ? this.topicIdsFor(cleanList([...(input.topics ?? []), ...(input.tags ?? [])], 64)) : existing?.topicIds,
       language: input.language ?? existing?.language,
       durationSeconds: input.durationSeconds ?? existing?.durationSeconds,
+      gallery: input.gallery ?? existing?.gallery,
       creatorId: input.creatorId ?? existing?.creatorId,
       thumbnail: input.thumbnail ?? existing?.thumbnail,
       providers: [...new Set([...(existing?.providers ?? []), ...(input.providers ?? [])])].slice(0, 16),
@@ -441,9 +448,9 @@ export class Registry {
       rating: entry.rating,
       topics: entry.topics,
       topicIds: entry.topicIds?.length ? entry.topicIds : undefined,
-      tags: entry.tags,
       language: entry.language,
       durationSeconds: entry.durationSeconds,
+      gallery: entry.gallery,
       creator: creator
         ? { id: creator.id, name: creator.name, kind: creator.kind, description: creator.description, keys: creator.keys, links: creator.links, icon: creator.icon }
         : entry.creatorId
@@ -481,7 +488,6 @@ export class Registry {
     const formats = preferences.formats?.length ? new Set(preferences.formats) : null;
     const topics = preferences.onlyTopics && preferences.topics?.length ? new Set(preferences.topics) : null;
     const blockedTopics = preferences.blockedTopics?.length ? new Set(preferences.blockedTopics) : null;
-    const blockedTags = new Set((preferences.blockedTags ?? []).map(normalizeTag));
     const blockedCreators = new Set(preferences.blockedCreators ?? []);
     const kinds = preferences.creatorKinds?.length ? new Set(preferences.creatorKinds) : null;
     const languages = preferences.languages?.length ? preferences.languages : null;
@@ -505,7 +511,6 @@ export class Registry {
         (entry.topics.some((topic) => blockedTopics.has(topic)) || (entry.topicIds ?? []).some((id) => blockedTopics.has(id)))
       )
         return false;
-      if (blockedTags.size && entry.tags.some((tag) => blockedTags.has(tag))) return false;
       if (entry.creatorId && blockedCreators.has(entry.creatorId)) return false;
       if (entry.creatorId && blockedMembers.has(entry.creatorId)) return false;
       if (allowed && !(entry.creatorId && (allowed.has(entry.creatorId) || allowedMembers.has(entry.creatorId)))) return false;
@@ -518,25 +523,29 @@ export class Registry {
   }
 
   /**
-   * Full-text search over title, tags, creator, topics and description.
-   * `#tag` and `@creator` narrow the results; `format:video` and `topic:science` filter.
+   * Full-text search over title, topics, creator and description.
+   * `#topic` (or `topic:science`) and `@creator` narrow the results; `format:video` filters.
+   * A seed makes the order reproducible: it drives the little discovery term that breaks
+   * near-ties, so the same seed (and the same trace id) answers the same exact results.
    */
-  search(entries: Entry[], query: string, sort: SearchSort): { entry: Entry; score: number }[] {
+  search(entries: Entry[], query: string, sort: SearchSort, seed = ''): { entry: Entry; score: number }[] {
     const tokens = words(query);
-    const tags = tokens.filter((t) => t.startsWith('#')).map((t) => normalizeTag(t.slice(1)));
     const creators = tokens.filter((t) => t.startsWith('@')).map((t) => t.slice(1));
     const formats = tokens.filter((t) => t.startsWith('format:')).map((t) => t.slice(7));
-    const topicFilters = tokens.filter((t) => t.startsWith('topic:')).map((t) => t.slice(6));
+    const topicFilters = [
+      ...tokens.filter((t) => t.startsWith('#')).map((t) => normalizeTag(t.slice(1))),
+      ...tokens.filter((t) => t.startsWith('topic:')).map((t) => normalizeTag(t.slice(6))),
+    ];
     const terms = tokens.filter((t) => !/^[#@]|^(format|topic):/.test(t));
     const results: { entry: Entry; score: number }[] = [];
     for (const entry of entries) {
-      if (tags.length && !tags.every((tag) => entry.tags.includes(tag))) continue;
       if (formats.length && !formats.includes(entry.format)) continue;
-      if (topicFilters.length && !topicFilters.every((topic) => entry.topics.includes(topic))) continue;
+      const topics = entry.topics.map((topic) => normalizeTag(topic));
+      if (topicFilters.length && !topicFilters.every((topic) => topics.includes(topic))) continue;
       const creator = this.creator(entry.creatorId);
       const creatorText = `${creator?.name ?? ''} ${entry.creatorId ?? ''}`.toLowerCase();
       if (creators.length && !creators.every((name) => creatorText.includes(name))) continue;
-      let score = tags.length + creators.length + formats.length + topicFilters.length > 0 ? 1 : 0;
+      let score = creators.length + formats.length + topicFilters.length > 0 ? 1 : 0;
       let matched = 0;
       if (terms.length) {
         const title = words(entry.title);
@@ -545,9 +554,8 @@ export class Registry {
           let termScore = 0;
           if (title.includes(term)) termScore += 4;
           else if (title.some((word) => word.startsWith(term))) termScore += 2.5;
-          if (entry.tags.some((tag) => tag === term || tag.startsWith(term))) termScore += 2;
           if (creatorText.includes(term)) termScore += 2;
-          if (entry.topics.includes(term)) termScore += 1.5;
+          if (entry.topics.some((topic) => topic === term || topic.startsWith(term))) termScore += 2;
           if (description.includes(term)) termScore += 1;
           if (entry.format === term) termScore += 1;
           if (termScore > 0) matched++;
@@ -557,7 +565,10 @@ export class Registry {
         score *= matched / terms.length;
       }
       if (score <= 0 && terms.length) continue;
-      results.push({ entry, score: score + quality(entry) * 0.5 });
+      // The seed's discovery term only breaks near-ties: the same seed always answers the
+      // same order, and without one the search stays purely about the match.
+      const discovery = seed ? seededRandom(seed, entry.id) * 0.25 : 0;
+      results.push({ entry, score: score + quality(entry) * 0.5 + discovery });
     }
     if (sort === 'new') results.sort((a, b) => b.entry.publishedAt.localeCompare(a.entry.publishedAt));
     else if (sort === 'top') results.sort((a, b) => wilson(b.entry.likes, b.entry.dislikes) - wilson(a.entry.likes, a.entry.dislikes));
@@ -610,10 +621,10 @@ export class Registry {
       description: item.description?.slice(0, 5000),
       format: FORMATS.includes(item.format) ? item.format : 'other',
       rating: item.rating ?? policy.defaultRating,
-      topics: cleanList(item.topics ?? []),
-      // Crawler finds are filed under their topics too, so a topic page lists them.
-      topicIds: this.topicIdsFor(item.topics ?? []),
-      tags: cleanList(item.tags ?? [], 32),
+      // Crawler finds are filed under their topics (raw platform tags fold in too), so a
+      // topic page lists them.
+      topics: cleanList([...(item.topics ?? []), ...(item.tags ?? [])], 32),
+      topicIds: this.topicIdsFor(cleanList([...(item.topics ?? []), ...(item.tags ?? [])], 32)),
       language: item.language,
       durationSeconds: item.durationSeconds,
       creatorId: item.creator?.id,

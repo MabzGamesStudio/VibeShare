@@ -258,6 +258,37 @@ export class ClientNode {
       const body = await readJson<{ providerId?: string; assignmentId?: string }>(ctx.req);
       return { reports: await this.worker.verify(body.providerId, body.assignmentId) };
     });
+    // Giving one job back: the client stops storing it and the provider frees its slot.
+    r.post('/api/services/release', async (ctx) => {
+      const body = await readJson<{ providerId?: string; assignmentId?: string }>(ctx.req);
+      const released = body.providerId && body.assignmentId ? await this.worker.release(body.providerId, body.assignmentId) : false;
+      if (!released) return { ok: false as const, error: 'That job is not stored here any more' };
+      return { ok: true as const, status: await this.worker.status() };
+    });
+    // Reachability checks behind the provider-jobs wizard: the daemon asks the address, so
+    // the browser never depends on the host sending CORS headers.
+    r.get('/api/probe', async (ctx) => {
+      const target = new URL(String(ctx.req.url ?? '/'), 'http://127.0.0.1').searchParams.get('url') ?? '';
+      const started = Date.now();
+      const fail = (why: string) => ({ ok: false as const, status: 0, bytes: 0, type: '', error: why, ms: Date.now() - started });
+      if (!/^https?:\/\//.test(target)) return fail('The address must start with http:// or https://');
+      try {
+        let response = await fetch(target, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(15_000) });
+        // Some hosts refuse HEAD: ask for one byte instead and read the length they send.
+        if (response.status === 405 || response.status === 501) {
+          response = await fetch(target, { headers: { range: 'bytes=0-0' }, redirect: 'follow', signal: AbortSignal.timeout(15_000) });
+        }
+        return {
+          ok: response.ok || response.status === 206,
+          status: response.status,
+          bytes: Number(response.headers.get('content-length') ?? 0),
+          type: response.headers.get('content-type') ?? '',
+          ms: Date.now() - started,
+        };
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : String(error));
+      }
+    });
 
     // Streaming and downloads (Range requests from <video>, <audio>, <img>, downloads)
     r.get('/stream/:id', async (ctx) => {

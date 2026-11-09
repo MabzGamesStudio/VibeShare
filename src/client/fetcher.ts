@@ -1,4 +1,6 @@
-import { chunkIdOf, chunksForRange, CID_MISMATCH, contentIdOf, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { bytesMatchCid, chunkIdOf, chunksForRange, CID_MISMATCH, contentIdOf, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { builtinContent, type BuiltinContent } from '../shared/builtin-content.js';
+import type { ContentLink } from '../shared/protocol.js';
 import type { NodeEntry } from '../shared/clientapi.js';
 import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
@@ -19,6 +21,26 @@ interface ManifestHit {
   provider: NodeEntry;
 }
 
+/**
+ * The answer a provider sends when it does not hold a cid but knows where its bytes live:
+ * `{ missing: true, links }` — the client fetches them itself and accepts only bytes that
+ * hash to the cid exactly. Anything else is not a link answer.
+ */
+function offeredLinks(answer: unknown, cid: string): ContentLink[] | null {
+  if (!answer || typeof answer !== 'object') return null;
+  const body = answer as { missing?: unknown; links?: unknown };
+  if (body.missing !== true || !Array.isArray(body.links)) return null;
+  const links: ContentLink[] = [];
+  for (const entry of body.links) {
+    if (!entry || typeof entry !== 'object') continue;
+    const link = entry as { cid?: unknown; url?: unknown };
+    if (typeof link.url !== 'string' || !/^https?:\/\//.test(link.url)) continue;
+    if (typeof link.cid === 'string' && link.cid && link.cid !== cid) continue;
+    links.push({ cid, url: link.url });
+  }
+  return links;
+}
+
 /** An answer to a (Range) request for content bytes, for any HTTP server or service worker. */
 export interface ContentResponse {
   status: 200 | 206 | 416;
@@ -35,6 +57,7 @@ export interface ContentResponse {
  */
 export class Fetcher {
   private manifests = new Map<string, ManifestHit>();
+  private links = new Map<string, ContentLink[]>();
   private inflight = new Map<string, Promise<Buffer>>();
 
   constructor(
@@ -57,7 +80,17 @@ export class Fetcher {
     for (const node of skipped) attempts.push({ node: node.id, name: node.name, error: 'Above your price limit' });
     for (const provider of this.candidates()) {
       try {
-        const manifest = validateManifest(await this.nodes.client(provider).json(`/v1/content/${cid}`, { timeoutMs: 10000 }));
+        const answer: unknown = await this.nodes.client(provider).json(`/v1/content/${cid}`, { timeoutMs: 10000 });
+        // A node that holds only a downloadable copy sends links instead of a manifest:
+        // remember them and keep looking — a real manifest anywhere beats links.
+        const links = offeredLinks(answer, cid);
+        if (links) {
+          const seen = this.links.get(cid) ?? [];
+          this.links.set(cid, [...seen, ...links.filter((link) => !seen.some((known) => known.url === link.url))]);
+          attempts.push({ node: provider.id, name: provider.name, error: 'Does not hold it — sent a download link' });
+          continue;
+        }
+        const manifest = validateManifest(answer);
         // The retrieved content must match the cid the client asked for exactly: a manifest
         // is only taken when its own hash is exactly that cid.
         if (contentIdOf(manifest) !== cid) {
@@ -125,7 +158,21 @@ export class Fetcher {
    * errors still become a proper status code.
    */
   async open(cid: string, range: string | null | undefined, download: boolean): Promise<ContentResponse> {
-    const { manifest } = await this.manifest(cid);
+    // Content the client ships with (the default article describing VibeShare): its full
+    // bytes are always on hand, so it streams and downloads with no provider connection.
+    const builtin = builtinContent(cid);
+    if (builtin) return this.builtinAnswer(builtin, range, download);
+    let hit: ManifestHit;
+    try {
+      hit = await this.manifest(cid);
+    } catch (error) {
+      // Only downloadable copies: the providers sent links instead of a manifest. The
+      // bytes behind them are taken only on an exact cid match.
+      const links = this.links.get(cid);
+      if (links?.length) return this.linkAnswer(cid, links, range, download);
+      throw error;
+    }
+    const { manifest } = hit;
     const size = manifest.size;
     let start = 0;
     let end = size - 1;
@@ -166,6 +213,71 @@ export class Fetcher {
     return { status: partial ? 206 : 200, headers, body: this.pieces(cid, manifest, firstChunk, first, last, offset, end, download ? 4 : 2) };
   }
 
+  /** The client's own bytes for a content id it ships with — served like any other, minus the providers. */
+  private builtinAnswer(found: BuiltinContent, range: string | null | undefined, download: boolean): ContentResponse {
+    return this.blobAnswer(new TextEncoder().encode(found.text), found.name, found.mime, range, download);
+  }
+
+  /**
+   * Content fetched whole from the links a provider sent (downloadable copies have no
+   * manifest): every link is tried in order and only bytes that hash to the cid exactly
+   * are ever served.
+   */
+  private async linkAnswer(cid: string, links: ContentLink[], range: string | null | undefined, download: boolean): Promise<ContentResponse> {
+    const attempts: { node: string; name: string; error: string }[] = [];
+    for (const link of links) {
+      try {
+        const response = await fetch(link.url, { signal: AbortSignal.timeout(60_000) });
+        if (!response.ok) {
+          attempts.push({ node: 'link', name: link.url, error: `The link answered ${response.status}` });
+          continue;
+        }
+        const data = new Uint8Array(await response.arrayBuffer());
+        if (!bytesMatchCid(data, cid)) {
+          attempts.push({ node: 'link', name: link.url, error: CID_MISMATCH });
+          continue;
+        }
+        const name = (decodeURIComponent(link.url.split('?')[0].split('/').filter(Boolean).pop() ?? '') || 'content').slice(0, 255);
+        return this.blobAnswer(data, name, mimeFromName(name), range, download);
+      } catch (error) {
+        attempts.push({ node: 'link', name: link.url, error: errorText(error) });
+      }
+    }
+    throw new FetchError('No provider could send this content through its links', attempts);
+  }
+
+  /** One whole file held in memory, ranged and downloadable like the chunked content. */
+  private blobAnswer(data: Uint8Array, name: string, mime: string, range: string | null | undefined, download: boolean): ContentResponse {
+    const size = data.length;
+    let start = 0;
+    let end = size - 1;
+    let partial = false;
+    const match = range?.match(/^bytes=(\d*)-(\d*)$/);
+    if (match && size > 0) {
+      partial = true;
+      if (match[1] === '' && match[2] !== '') {
+        start = Math.max(0, size - Number(match[2]));
+      } else {
+        start = Number(match[1] || 0);
+        if (match[2] !== '') end = Math.min(size - 1, Number(match[2]));
+      }
+      if (start > end || start >= size) return { status: 416, headers: { 'content-range': `bytes */${size}` }, body: null };
+    }
+    const headers: Record<string, string> = {
+      'content-type': mime,
+      'accept-ranges': 'bytes',
+      'content-length': String(end - start + 1),
+      'cache-control': 'private, max-age=3600',
+      'x-content-type-options': 'nosniff',
+    };
+    if (partial) headers['content-range'] = `bytes ${start}-${end}/${size}`;
+    if (download) headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
+    async function* pieces(): AsyncGenerator<Uint8Array> {
+      yield data.subarray(start, end + 1);
+    }
+    return { status: partial ? 206 : 200, headers, body: pieces() };
+  }
+
   private async *pieces(
     cid: string,
     manifest: Manifest,
@@ -196,5 +308,6 @@ export class Fetcher {
 
   forget(cid: string): void {
     this.manifests.delete(cid);
+    this.links.delete(cid);
   }
 }

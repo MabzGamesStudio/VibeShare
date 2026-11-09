@@ -4,15 +4,19 @@ import { ChevronDown, ChevronRight, MessageCircle, MoreHorizontal, Pencil, Thumb
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   checkCommentChain,
+  COMMENT_ORDERS,
+  COMMENT_ORDER_LABELS,
   COMMENT_TIME_PRECISIONS,
   type ChainEntry,
   type CommentEntry,
+  type CommentOrder,
   type CommentTimePrecision,
 } from '../../../src/shared/comments';
 import type { CommentPostRequest, CommentsResponse } from '../../../src/shared/clientapi';
 import { commentThreads, formatCommentDate, type CommentDateDisplay, type CommentThread } from '../../../src/shared/comment-view';
 import { api, errorMessage } from '../api';
-import { Loading } from './ui';
+import { useSentinel } from './feed/usePaged';
+import { Loading, Spinner } from './ui';
 
 const PRECISION_LABELS: Record<CommentTimePrecision, string> = {
   datetime: 'Date and time',
@@ -36,12 +40,12 @@ export function Comments({ contentId }: { contentId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [anonymous, setAnonymous] = useState(false);
-  const [precision, setPrecision] = useState<CommentTimePrecision>('datetime');
+  const [precision, setPrecision] = useState<CommentTimePrecision>('date');
   const [dateDisplay, setDateDisplay] = useState<DateDisplay>(() => {
     try {
-      return (localStorage.getItem('vibeshare-comment-dates') as DateDisplay | null) ?? 'local';
+      return (localStorage.getItem('vibeshare-comment-dates') as DateDisplay | null) ?? 'relative';
     } catch {
-      return 'local';
+      return 'relative';
     }
   });
   const [replyTo, setReplyTo] = useState<string | null>(null);
@@ -50,14 +54,23 @@ export function Comments({ contentId }: { contentId: string }) {
   const [editText, setEditText] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  // What the reader would like to see first; the algorithm search node decides the order
+  // it actually sends (and which comment data loads first).
+  const [order, setOrder] = useState<CommentOrder>('relevant');
 
-  const load = useCallback(async () => {
-    try {
-      setData(await api<CommentsResponse>(`/api/comments/${encodeURIComponent(contentId)}`));
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }, [contentId]);
+  // Every answer carries all the block headers of the chain and the comment data of the
+  // comments loaded so far; asking again with `offset` brings the data of the next ones.
+  const load = useCallback(
+    async (offset = 0) => {
+      try {
+        const suffix = `?order=${encodeURIComponent(order)}${offset ? `&offset=${offset}` : ''}`;
+        setData(await api<CommentsResponse>(`/api/comments/${encodeURIComponent(contentId)}${suffix}`));
+      } catch (e) {
+        setError(errorMessage(e));
+      }
+    },
+    [contentId, order]
+  );
 
   useEffect(() => {
     setData(null);
@@ -112,8 +125,24 @@ export function Comments({ contentId }: { contentId: string }) {
   const chain = data ? checkCommentChain(data.blocks, data.votes) : null;
   const entries = chain?.entries ?? [];
   const broken = Boolean(chain?.errors.length);
-  const threads = commentThreads(entries, contentId);
   const removed = entries.filter((entry): entry is Extract<ChainEntry, { removed: true }> => 'removed' in entry);
+  // Comments whose data waits for the reader to scroll down to them (headers already in).
+  const pending = entries.filter((entry): entry is Extract<ChainEntry, { pending: true }> => 'pending' in entry);
+  const loaded = data?.loaded ?? 0;
+  const total = data?.total ?? 0;
+  const more = Boolean(data?.shown) && !broken && loaded < total;
+  const sentinel = useSentinel(() => void load(loaded), more, loaded);
+  // The order the node decided on: comments show up in it, their replies nested below.
+  const rank = data?.rank ?? [];
+  const rankOf = (id: string) => {
+    const at = rank.indexOf(id);
+    return at === -1 ? rank.length : at;
+  };
+  const byRank = (list: Thread[]): Thread[] =>
+    [...list]
+      .sort((a, b) => rankOf(a.entry.id) - rankOf(b.entry.id))
+      .map((thread) => ({ ...thread, replies: byRank(thread.replies) }));
+  const threads = byRank(commentThreads(entries, contentId));
 
   const toggleFold = (id: string) => {
     setCollapsed((current) => {
@@ -245,7 +274,7 @@ export function Comments({ contentId }: { contentId: string }) {
       <div className="comments-title">
         <div>
           <h3>Comments</h3>
-          <p>{entries.filter((entry) => !('removed' in entry)).length} verified comments and replies</p>
+          <p>{entries.filter((entry) => !('removed' in entry) && !('pending' in entry)).length} verified comments and replies</p>
         </div>
         <MessageCircle size={21} aria-hidden="true" />
       </div>
@@ -267,8 +296,15 @@ export function Comments({ contentId }: { contentId: string }) {
             <div className="comment-compose-options">
               <label className="comment-anonymous">
                 <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
-                <span>Post anonymously</span>
+                <span title="The algorithm search node knows the account id that created the post, but it is not definitive whether they log who posted it.">
+                  Post anonymously*
+                </span>
               </label>
+              {anonymous && (
+                <p className="hint" style={{ margin: '4px 0 0', color: 'var(--warn)' }}>
+                  There is no option to edit or delete the comment if it is anonymous after posting it.
+                </p>
+              )}
               <details className="comment-options">
                 <summary className="comment-dots" aria-label="Comment settings" title="Comment settings">
                   <MoreHorizontal size={20} />
@@ -315,11 +351,34 @@ export function Comments({ contentId }: { contentId: string }) {
       {!data ? (
         <Loading />
       ) : (
-        <div className="comment-list">
-          {!broken && threads.map(renderComment)}
-          {!broken && removed.map((entry) => <div className="comment-removed" key={entry.id}>A comment was removed</div>)}
-          {!broken && entries.length === 0 && <p className="comment-empty">No comments yet. Start the conversation.</p>}
-        </div>
+        <>
+          {data.shown && total > 1 && (
+            <div className="segmented comment-order" role="tablist" aria-label="Comment order">
+              {COMMENT_ORDERS.map((value) => (
+                <button
+                  key={value}
+                  role="tab"
+                  aria-selected={order === value}
+                  className={order === value ? 'on' : ''}
+                  onClick={() => setOrder(value)}
+                >
+                  {COMMENT_ORDER_LABELS[value]}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="comment-list">
+            {!broken && threads.map(renderComment)}
+            {!broken && removed.map((entry) => <div className="comment-removed" key={entry.id}>A comment was removed</div>)}
+            {!broken && pending.map((entry) => <div className="comment-pending" key={entry.id} aria-hidden="true" />)}
+            {!broken && entries.length === 0 && <p className="comment-empty">No comments yet. Start the conversation.</p>}
+          </div>
+          {!broken && more && (
+            <div ref={sentinel} className="comment-more">
+              <Spinner />
+            </div>
+          )}
+        </>
       )}
     </section>
   );

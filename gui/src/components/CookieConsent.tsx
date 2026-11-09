@@ -36,7 +36,7 @@ export function CookieConsent() {
             <strong>What is stored:</strong> your choice here (on this device only, never sent anywhere) and your settings — both strictly necessary to
             run the app. <strong>What third parties get, if you allow embeds:</strong> their embedded player loads, and with it their cookies and
             tracking — that is the platform's doing, not VibeShare's. You can allow embeds now and still block them later (or the other way round) in{' '}
-            <Link className="link" to="/settings#privacy">
+            <Link className="link" to="/settings?tab=privacy">
               Settings → Privacy
             </Link>
             , where withdrawing is exactly as easy as choosing. {doNotTrack() && ' Your browser asks not to be tracked: embeds stay off until you explicitly allow them.'}

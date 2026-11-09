@@ -1,214 +1,350 @@
+// Explore: one relevance-ordered list of everything that matches — creators, groups,
+// topics and content mixed together by how well they match — with the search settings
+// kept for the session, and the seed and trace id the algorithm search node needs to
+// repeat the very same search.
 import { SlidersHorizontal } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
-import type { FeedResponse } from '../../../src/shared/clientapi';
+import type { FeedItem, FeedResponse } from '../../../src/shared/clientapi';
 import type { CreatorInfo, TopicInfo } from '../../../src/shared/protocol';
-import { CREATOR_KIND_LABELS, CREATOR_KINDS, FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../../../src/shared/taxonomy';
-import { api, errorMessage } from '../api';
-import { Feed } from '../components/Feed';
-import { Chips, toggle, Avatar, Modal } from '../components/ui';
+import {
+  CREATOR_KIND_LABELS,
+  CREATOR_KINDS,
+  FORMAT_LABELS,
+  FORMATS,
+  RATING_LABELS,
+  RATING_REASONS,
+  RATINGS,
+  TOPICS,
+  type CreatorKind,
+  type Format,
+  type Rating,
+} from '../../../src/shared/taxonomy';
+import { api } from '../api';
+import { Fields } from '../components/feed/Fields';
+import { Poster } from '../components/feed/Player';
+import { usePaged, useSentinel } from '../components/feed/usePaged';
+import { Avatar, Chips, Spinner, toggle } from '../components/ui';
 import { useApp } from '../state';
-import { groupPath, profilePath, topicPath } from '../util';
+import { groupPath, profilePath, splitList, topicPath, watchPath } from '../util';
 
-/** Groups matching the query: a group is searched and subscribed to like a creator. */
-function GroupResults({ query }: { query: string }) {
-  const [groups, setGroups] = useState<CreatorInfo[]>([]);
-  useEffect(() => {
-    let live = true;
-    api<{ creators: CreatorInfo[] }>(`/api/creators?kind=group&q=${encodeURIComponent(query.trim())}`)
-      .then((result) => live && setGroups(result.creators))
-      .catch(() => live && setGroups([]));
-    return () => {
-      live = false;
-    };
-  }, [query]);
-  if (!groups.length) return null;
-  return (
-    <div className="card form-stack" style={{ marginBottom: 24 }}>
-      <h2>Groups</h2>
-      <div className="page-list">
-        {groups.map((group) => (
-          <Link key={group.id} to={groupPath(group.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <Avatar name={group.name} id={group.id} icon={group.icon} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <strong>{group.name}</strong>
-              <div className="tiny faint">
-                {group.members?.length ?? 0} creator{(group.members?.length ?? 0) === 1 ? '' : 's'}
-                {group.description ? ` · ${group.description}` : ''}
-              </div>
-            </div>
-          </Link>
-        ))}
-      </div>
-    </div>
-  );
+type ShowKind = 'content' | 'creators' | 'groups' | 'topics';
+
+const SHOW_KINDS: ShowKind[] = ['content', 'creators', 'groups', 'topics'];
+const SHOW_LABELS: Record<ShowKind, string> = {
+  content: 'Content',
+  creators: 'Creators',
+  groups: 'Groups',
+  topics: 'Topics',
+};
+
+/** Everything the search remembers about how the user searches, kept for the session. */
+interface SearchSettings {
+  show: ShowKind[];
+  formats: Format[];
+  /** Topics to show (names or topic ids) and topics to leave out. */
+  topics: string[];
+  blockedTopics: string[];
+  /** Creators and groups to show (ids) and to leave out. */
+  creators: string[];
+  blockedCreators: string[];
+  /** The age restriction of this search (empty = the account's own preference). */
+  rating: Rating | '';
+  /** Content warning types to leave out entirely. */
+  disregard: string[];
+  /** Platforms to search in, and platforms to leave out. */
+  platforms: string[];
+  blockedPlatforms: string[];
+  kinds: CreatorKind[];
+  sort: 'relevance' | 'new' | 'top';
+  /** endless: results load as the reader scrolls; pages: a page at a time. */
+  paging: 'lazy' | 'pages';
+  pageSize: number;
+  /** The seed the node's non-deterministic steps draw from (advanced). */
+  seed: string;
+  /** The trace id: with the same one (and the same parameters) the node repeats the
+   *  exact same search (advanced). */
+  trace: string;
 }
 
-/** Creators matching the query (Explore shows creators too, and not only exact names). */
-function CreatorResults({ query }: { query: string }) {
-  const [creators, setCreators] = useState<CreatorInfo[]>([]);
-  useEffect(() => {
-    let live = true;
-    api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(query.trim())}`)
-      .then((result) => live && setCreators(result.creators))
-      .catch(() => live && setCreators([]));
-    return () => {
-      live = false;
-    };
-  }, [query]);
-  if (!creators.length) return null;
-  return (
-    <div className="card form-stack" style={{ marginBottom: 24 }}>
-      <h2>Creators</h2>
-      <div className="page-list">
-        {creators.map((creator) => (
-          <Link key={creator.id} to={profilePath(creator.kind, creator.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <Avatar name={creator.name} id={creator.id} icon={creator.icon} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <strong>{creator.name}</strong>
-              <div className="tiny faint">
-                {CREATOR_KIND_LABELS[creator.kind]}
-                {creator.accounts?.length ? ` · ${creator.accounts.map((account) => account.platform).join(', ')}` : ''}
-              </div>
-            </div>
-          </Link>
-        ))}
-      </div>
-    </div>
-  );
-/**
- * Topics matching the query, each opening on its topic page. When no topic matches yet,
- * the user can bring one: the node stores it under the hash of its name, so the same name
- * always means the same topic.
- */
-function TopicResults({ query }: { query: string }) {
-  const { state, toast } = useApp();
-  const [topics, setTopics] = useState<TopicInfo[]>([]);
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [added, setAdded] = useState(0);
-  const trimmed = query.trim();
+const SESSION_KEY = 'vibeshare-search-settings';
 
-  useEffect(() => {
-    let live = true;
-    api<{ topics: TopicInfo[] }>(`/api/topics?q=${encodeURIComponent(trimmed)}`)
-      .then((result) => live && setTopics(result.topics))
-      .catch(() => live && setTopics([]));
-    return () => {
-      live = false;
-    };
-  }, [trimmed, added]);
-
-  useEffect(() => setName(trimmed), [trimmed]);
-  const node = state?.nodes.find((entry) => entry.type === 'algorithm' && entry.enabled);
-
-  const create = async () => {
-    if (!node || !name.trim()) return;
-    setBusy(true);
-    try {
-      const result = await api<{ topic: TopicInfo; newInfo: boolean }>('/api/topics', {
-        body: { nodeId: node.id, name: name.trim(), description: description.trim() || undefined },
-      });
-      toast(result.newInfo ? `Topic “${result.topic.name}” created` : `“${result.topic.name}” already exists`, 'success');
-      setOpen(false);
-      setDescription('');
-      setAdded(added + 1);
-      setTopics((list) => (list.some((topic) => topic.id === result.topic.id) ? list : [result.topic, ...list]));
-    } catch (error) {
-      toast(errorMessage(error), 'error');
-    } finally {
-      setBusy(false);
-    }
+function loadSettings(): SearchSettings {
+  const base: SearchSettings = {
+    show: [...SHOW_KINDS],
+    formats: [],
+    topics: [],
+    blockedTopics: [],
+    creators: [],
+    blockedCreators: [],
+    rating: '',
+    disregard: [],
+    platforms: [],
+    blockedPlatforms: [],
+    kinds: [],
+    sort: 'relevance',
+    paging: 'lazy',
+    pageSize: 24,
+    seed: '',
+    trace: '',
   };
+  try {
+    return { ...base, ...(JSON.parse(sessionStorage.getItem(SESSION_KEY) ?? '{}') as Partial<SearchSettings>) };
+  } catch {
+    return base;
+  }
+}
 
-  return (
-    <div className="card form-stack" style={{ marginBottom: 24 }}>
-      <div className="row between">
-        <h2>Topics</h2>
-        <button className="small" disabled={!node} title={node ? 'Bring a topic the nodes do not have yet' : 'No algorithm node is enabled'} onClick={() => setOpen(true)}>
-          + Create a topic
-        </button>
-      </div>
-      {topics.length ? (
-        <div className="page-list">
-          {topics.map((topic) => (
-            <Link key={topic.id} to={topicPath(topic.id)} className="page-row" style={{ textDecoration: 'none', color: 'inherit' }}>
-              <Avatar name={topic.name} id={topic.id} icon={topic.icon} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <strong>{topic.name}</strong>
-                <div className="tiny faint">
-                  {topic.items ?? 0} item{(topic.items ?? 0) === 1 ? '' : 's'}
-                  {topic.description ? ` · ${topic.description}` : ''}
-                </div>
-              </div>
-            </Link>
-          ))}
+/** How well a name matches the query — what the mix of result kinds is ordered by. */
+function matchScore(name: string, query: string): number {
+  const wanted = query.trim().toLowerCase();
+  const mine = name.toLowerCase();
+  if (!wanted) return 120;
+  if (mine === wanted) return 300;
+  if (mine.startsWith(wanted)) return 240;
+  if (mine.split(/\s+/).some((word) => word.startsWith(wanted))) return 200;
+  if (mine.includes(wanted)) return 160;
+  return 110;
+}
+
+type Row =
+  | { type: 'creator' | 'group'; key: string; score: number; info: CreatorInfo }
+  | { type: 'topic'; key: string; score: number; info: TopicInfo }
+  | { type: 'content'; key: string; score: number; item: FeedItem };
+
+/** One result of the mixed list: a creator, a group, a topic, or a piece of content. */
+function ResultRow({ row }: { row: Row }) {
+  if (row.type === 'content') {
+    return (
+      <Link to={watchPath(row.item.id)} className="page-row search-result" style={{ textDecoration: 'none', color: 'inherit' }}>
+        <div className="search-thumb">
+          <Poster item={row.item} />
         </div>
-      ) : (
-        <span className="hint">No topic matches yet. Create it and the content filed under it shows on its page.</span>
-      )}
-      {open && (
-        <Modal title="Create a topic" onClose={() => setOpen(false)}>
-          <div className="form-stack">
-            <label className="field">
-              Name
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Science" />
-            </label>
-            <label className="field">
-              Description <span className="hint">Optional</span>
-              <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What belongs in this topic" />
-            </label>
-            <span className="hint">The topic id is the hash of its name: every node and every user asking for this name lands on the same topic.</span>
-            <div className="row">
-              <button className="primary" disabled={busy || !name.trim() || !node} onClick={() => void create()}>
-                {busy ? 'Creating…' : 'Create topic'}
-              </button>
-              <button onClick={() => setOpen(false)}>Cancel</button>
-            </div>
-          </div>
-        </Modal>
-      )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <strong>{row.item.title}</strong>
+          <Fields item={row.item} fields={['creator', 'published', 'likes', 'platform']} variant="compact" />
+        </div>
+      </Link>
+    );
+  }
+  if (row.type === 'topic') {
+    return (
+      <Link to={topicPath(row.info.id)} className="page-row search-result" style={{ textDecoration: 'none', color: 'inherit' }}>
+        <Avatar name={row.info.name} id={row.info.id} icon={row.info.icon} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <strong>{row.info.name}</strong>
+          <div className="tiny faint">Topic{row.info.description ? ` · ${row.info.description}` : ''}</div>
+        </div>
+      </Link>
+    );
+  }
+  const group = row.type === 'group';
+  return (
+    <Link
+      to={group ? groupPath(row.info.id) : profilePath(row.info.kind, row.info.id)}
+      className="page-row search-result"
+      style={{ textDecoration: 'none', color: 'inherit' }}
+    >
+      <Avatar name={row.info.name} id={row.info.id} icon={row.info.icon} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <strong>{row.info.name}</strong>
+        <div className="tiny faint">
+          {group ? `${row.info.members?.length ?? 0} creator${(row.info.members?.length ?? 0) === 1 ? '' : 's'}` : CREATOR_KIND_LABELS[row.info.kind]}
+          {row.info.accounts?.length ? ` · ${row.info.accounts.map((account) => account.platform).join(', ')}` : ''}
+          {row.info.description ? ` · ${row.info.description}` : ''}
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+/** Platforms with three states: not picked, searched in, or left out entirely. */
+function PlatformPicker({ included, excluded, onChange }: { included: string[]; excluded: string[]; onChange: (included: string[], excluded: string[]) => void }) {
+  return (
+    <div className="chips">
+      {SOURCE_CATALOG.map((source) => {
+        const state = included.includes(source.key) ? 'on' : excluded.includes(source.key) ? 'off' : '';
+        return (
+          <button
+            key={source.key}
+            type="button"
+            className={`chip ${state}`}
+            title={state === 'on' ? 'Searching this platform' : state === 'off' ? 'Left out of the search' : 'Not picked — click to search it'}
+            onClick={() => {
+              if (included.includes(source.key)) onChange(included.filter((key) => key !== source.key), [...excluded, source.key]);
+              else if (excluded.includes(source.key)) onChange(included, excluded.filter((key) => key !== source.key));
+              else onChange([...included, source.key], excluded);
+            }}
+          >
+            {source.name}
+            {state === 'off' ? ' ✕' : ''}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
+/** A text field that fills a list: names or ids, comma or newline separated. */
+function ListField({ label, value, onChange, placeholder }: { label: string; value: string[]; onChange: (next: string[]) => void; placeholder: string }) {
+  const [text, setText] = useState(value.join(', '));
+  useEffect(() => setText(value.join(', ')), [value.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <label className="field">
+      {label}
+      <input type="text" value={text} placeholder={placeholder} onChange={(e) => setText(e.target.value)} onBlur={() => onChange(splitList(text))} />
+    </label>
+  );
 }
-
-/** What Explore shows: content, creators, groups, topics, or all of them (all by default). */
-const SHOW_KINDS = ['content', 'creators', 'groups', 'topics'] as const;
-type ShowKind = (typeof SHOW_KINDS)[number];
-const SHOW_LABELS: Record<ShowKind, string> = { content: 'Content', creators: 'Creators', groups: 'Groups', topics: 'Topics' };
 
 export function SearchPage() {
   const [params, setParams] = useSearchParams();
-  const query = params.get('q') ?? '';
-  const [showFilters, setShowFilters] = useState(true);
-  const [show, setShow] = useState<ShowKind[]>([...SHOW_KINDS]);
-  const [formats, setFormats] = useState<Format[]>([]);
-  const [rating, setRating] = useState<Rating | ''>('');
-  const [topics, setTopics] = useState<string[]>([]);
-  const [kinds, setKinds] = useState<CreatorKind[]>([]);
-  const [platform, setPlatform] = useState('');
-  const [sort, setSort] = useState<'relevance' | 'new' | 'top'>('relevance');
+  const query = params.get('q')?.trim() ?? '';
+  const { state } = useApp();
+  // The settings of the search are kept for the whole session (until the tab closes).
+  const [settings, setSettings] = useState<SearchSettings>(loadSettings);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(settings));
+    } catch {
+      // Private mode: the settings then only live for this page.
+    }
+  }, [settings]);
+  const set = (patch: Partial<SearchSettings>) => setSettings((current) => ({ ...current, ...patch }));
+
+  const [showFilters, setShowFilters] = useState(false);
+  const [matches, setMatches] = useState<CreatorInfo[]>([]);
+  const [topics, setTopics] = useState<TopicInfo[]>([]);
+  const [suggested, setSuggested] = useState<CreatorInfo[]>([]);
+  const [page, setPage] = useState(0);
+
+  // The creators, groups and topics that match the query, and a few suggested creators
+  // and groups the search offers as picks when nothing is typed yet.
+  useEffect(() => {
+    let live = true;
+    api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(query)}`)
+      .then((result) => live && setMatches(result.creators))
+      .catch(() => live && setMatches([]));
+    api<{ topics: TopicInfo[] }>(`/api/topics?q=${encodeURIComponent(query)}`)
+      .then((result) => live && setTopics(result.topics))
+      .catch(() => live && setTopics([]));
+    api<{ creators: CreatorInfo[] }>('/api/creators?q=')
+      .then((result) => live && setSuggested(result.creators.slice(0, 8)))
+      .catch(() => live && setSuggested([]));
+    return () => {
+      live = false;
+    };
+  }, [query]);
+
+  const load = useCallback(
+    (cursor?: string) =>
+      api<FeedResponse>('/api/search', {
+        body: {
+          query,
+          sort: settings.sort,
+          cursor,
+          seed: settings.seed.trim() || undefined,
+          trace: settings.trace.trim() || undefined,
+          filters: {
+            formats: settings.formats.length ? settings.formats : undefined,
+            maxRating: settings.rating || undefined,
+            disregard: settings.disregard.length ? settings.disregard : undefined,
+            topics: settings.topics.length ? settings.topics : undefined,
+            onlyTopics: settings.topics.length ? true : undefined,
+            blockedTopics: settings.blockedTopics.length ? settings.blockedTopics : undefined,
+            creatorIds: settings.creators.length ? settings.creators : undefined,
+            onlyCreators: settings.creators.length ? true : undefined,
+            blockedCreators: settings.blockedCreators.length ? settings.blockedCreators : undefined,
+            creatorKinds: settings.kinds.length ? settings.kinds : undefined,
+            preferredPlatforms: settings.platforms.length ? settings.platforms : undefined,
+            platformLevel: settings.platforms.length ? 'only' : undefined,
+            blockedPlatforms: settings.blockedPlatforms.length ? settings.blockedPlatforms : undefined,
+          },
+        },
+      }),
+    [query, settings]
+  );
+
+  const size = Math.min(50, Math.max(3, Number(settings.pageSize) || 24));
+  const paged = usePaged(load, JSON.stringify([query, settings]), settings.paging === 'pages' ? 0 : state?.settings.loadPauseMs ?? 1500);
+
+  // Everything that matches, mixed into one list ordered by how well it matches — the
+  // format on the page never has to be all creators, then all groups, then all content.
+  const rows = useMemo(() => {
+    const mixed: Row[] = [];
+    if (settings.show.includes('creators')) {
+      for (const info of matches) {
+        if (info.kind === 'group') continue;
+        mixed.push({ type: 'creator', key: `c:${info.id}`, score: matchScore(info.name, query) + 15, info });
+      }
+    }
+    if (settings.show.includes('groups')) {
+      for (const info of matches) {
+        if (info.kind !== 'group') continue;
+        mixed.push({ type: 'group', key: `g:${info.id}`, score: matchScore(info.name, query) + 10, info });
+      }
+    }
+    if (settings.show.includes('topics')) {
+      for (const info of topics) mixed.push({ type: 'topic', key: `t:${info.id}`, score: matchScore(info.name, query) + 12, info });
+    }
+    const content = settings.show.includes('content')
+      ? paged.items.map((item, index) => ({ type: 'content' as const, key: `x:${item.id}`, score: 250 - index * 2, item }))
+      : [];
+    return [...mixed, ...content].sort((a, b) => b.score - a.score);
+  }, [matches, topics, paged.items, query, settings.show]);
+
+  // Pages: the kinds that matched lead the first page only; every page after it shows one
+  // screenful of content results.
+  const pageRows = useMemo(() => {
+    if (settings.paging !== 'pages') return rows;
+    const content = rows.filter((row) => row.type === 'content');
+    const start = page * size;
+    const window = content.slice(start, start + size);
+    return page === 0 ? [...rows.filter((row) => row.type !== 'content'), ...window].sort((a, b) => b.score - a.score) : window;
+  }, [rows, settings.paging, page, size]);
+
+  const sentinel = useSentinel(() => paged.loadMore(), settings.paging === 'lazy' && !paged.done, paged.items.length);
+  // A new search or a different page size starts over on the first page.
+  useEffect(() => setPage(0), [query, settings.paging, settings.pageSize, settings.sort]); // eslint-disable-line react-hooks/exhaustive-deps
+  const contentRows = rows.filter((row) => row.type === 'content').length;
+  const pager = settings.paging === 'pages' && contentRows > 0;
+  const lastPage = Math.max(0, Math.ceil(contentRows / size) - 1);
+  const goPage = (next: number) => {
+    if ((next + 1) * size > paged.items.length && !paged.done) paged.loadMore();
+    setPage(Math.max(0, next));
+  };
+  const pageNav = pager ? (
+    <div className="row between" style={{ margin: '10px 0' }}>
+      <button className="small" disabled={page === 0} onClick={() => goPage(page - 1)}>
+        ← Previous
+      </button>
+      <span className="small muted">
+        Page {page + 1}
+        {paged.done ? ` of ${lastPage + 1}` : ''}
+      </span>
+      <button className="small" disabled={paged.done && page >= lastPage} onClick={() => goPage(page + 1)}>
+        Next →
+      </button>
+    </div>
+  ) : null;
 
   return (
     <div className="page">
       <div className="page-header">
         <div>
-          <h1>{query ? `Results for “${query}”` : 'Explore'}</h1>
-          <p>
-            Try <code>#tag</code>, <code>@creator</code>, <code>format:music</code> or <code>topic:science</code>. Leave empty to browse everything.
-          </p>
+          <h1>{query ? `“${query}”` : 'Explore'}</h1>
+          <p className="small muted">Creators, groups, topics and content — mixed together by how well they match.</p>
         </div>
         <div className="row">
-          <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)} style={{ width: 'auto' }}>
-            <option value="relevance">Most relevant</option>
-            <option value="new">Newest</option>
-            <option value="top">Top rated</option>
-          </select>
+          <label className="field" style={{ marginBottom: 0 }}>
+            <span className="hint">Sort</span>
+            <select value={settings.sort} onChange={(e) => set({ sort: e.target.value as SearchSettings['sort'] })}>
+              <option value="relevance">Relevance</option>
+              <option value="new">Newest</option>
+              <option value="top">Top</option>
+            </select>
+          </label>
           <button onClick={() => setShowFilters(!showFilters)}>
             <SlidersHorizontal size={16} /> Filters
           </button>
@@ -218,20 +354,43 @@ export function SearchPage() {
         <div className="card form-stack" style={{ marginBottom: 24 }}>
           <div>
             <div className="hint" style={{ marginBottom: 8 }}>Show</div>
-            <Chips options={SHOW_KINDS} selected={show} labels={SHOW_LABELS} onToggle={(v) => setShow(toggle(show, v))} />
+            <Chips options={SHOW_KINDS} selected={settings.show} labels={SHOW_LABELS} onToggle={(v) => set({ show: toggle(settings.show, v) })} />
           </div>
           <div>
             <div className="hint" style={{ marginBottom: 8 }}>Format</div>
-            <Chips options={FORMATS} selected={formats} labels={FORMAT_LABELS} onToggle={(v) => setFormats(toggle(formats, v))} />
+            <Chips options={FORMATS} selected={settings.formats} labels={FORMAT_LABELS} onToggle={(v) => set({ formats: toggle(settings.formats, v) })} />
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Topic</div>
-            <Chips options={TOPICS} selected={topics} onToggle={(v) => setTopics(toggle(topics, v))} />
+            <div className="hint" style={{ marginBottom: 8 }}>Suggested creators and groups — click to search only them</div>
+            <div className="chips">
+              {suggested.map((creator) => (
+                <button
+                  key={creator.id}
+                  type="button"
+                  className={`chip ${settings.creators.includes(creator.id) ? 'on' : ''}`}
+                  onClick={() => set({ creators: toggle(settings.creators, creator.id) })}
+                >
+                  {creator.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="form-grid">
+            <ListField label="Creators or groups to show" value={settings.creators} onChange={(creators) => set({ creators })} placeholder="ids, comma separated" />
+            <ListField label="Creators or groups to hide" value={settings.blockedCreators} onChange={(blockedCreators) => set({ blockedCreators })} placeholder="ids, comma separated" />
+          </div>
+          <div>
+            <div className="hint" style={{ marginBottom: 8 }}>Suggested topics — click to search only them</div>
+            <Chips options={[...TOPICS].slice(0, 12)} selected={settings.topics} onToggle={(v) => set({ topics: toggle(settings.topics, v) })} />
+          </div>
+          <div className="form-grid">
+            <ListField label="Topics to show" value={settings.topics} onChange={(topics) => set({ topics })} placeholder="names or topic ids, comma separated" />
+            <ListField label="Topics to hide" value={settings.blockedTopics} onChange={(blockedTopics) => set({ blockedTopics })} placeholder="names or topic ids, comma separated" />
           </div>
           <div className="form-grid">
             <label className="field">
               Age rating up to
-              <select value={rating} onChange={(e) => setRating(e.target.value as Rating | '')}>
+              <select value={settings.rating} onChange={(e) => set({ rating: e.target.value as Rating | '' })}>
                 <option value="">My preference</option>
                 {RATINGS.map((r) => (
                   <option key={r} value={r}>
@@ -240,22 +399,49 @@ export function SearchPage() {
                 ))}
               </select>
             </label>
-            <label className="field">
-              Platform
-              <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
-                <option value="">Any platform</option>
-                {SOURCE_CATALOG.map((source) => (
-                  <option key={source.key} value={source.key}>
-                    {source.name}
-                  </option>
-                ))}
-              </select>
-            </label>
             <div className="field">
               Creator
-              <Chips options={CREATOR_KINDS.filter((k) => k !== 'unknown')} selected={kinds} labels={CREATOR_KIND_LABELS} onToggle={(v) => setKinds(toggle(kinds, v))} />
+              <Chips options={CREATOR_KINDS.filter((k) => k !== 'unknown')} selected={settings.kinds} labels={CREATOR_KIND_LABELS} onToggle={(v) => set({ kinds: toggle(settings.kinds, v as CreatorKind) })} />
             </div>
           </div>
+          <div>
+            <div className="hint" style={{ marginBottom: 8 }}>Content warnings — leave these out entirely</div>
+            <Chips options={[...RATING_REASONS]} selected={settings.disregard} onToggle={(v) => set({ disregard: toggle(settings.disregard, v) })} />
+          </div>
+          <div>
+            <div className="hint" style={{ marginBottom: 8 }}>Platforms — click to search one, click again to leave it out</div>
+            <PlatformPicker
+              included={settings.platforms}
+              excluded={settings.blockedPlatforms}
+              onChange={(platforms, blockedPlatforms) => set({ platforms, blockedPlatforms })}
+            />
+          </div>
+          <details>
+            <summary style={{ cursor: 'pointer' }}>Advanced — paging, seed and trace id</summary>
+            <div className="form-grid" style={{ marginTop: 10 }}>
+              <label className="field">
+                Results
+                <select value={settings.paging} onChange={(e) => set({ paging: e.target.value as SearchSettings['paging'] })}>
+                  <option value="lazy">Load as I scroll</option>
+                  <option value="pages">One page at a time</option>
+                </select>
+              </label>
+              <label className="field">
+                Items per page
+                <input type="number" min={3} max={50} value={settings.pageSize} onChange={(e) => set({ pageSize: Number(e.target.value) || 24 })} />
+              </label>
+              <label className="field">
+                Seed
+                <input type="text" value={settings.seed} placeholder="Anything — same seed, same order" onChange={(e) => set({ seed: e.target.value.slice(0, 200) })} />
+                <span className="hint">The node draws its non-deterministic steps from this instead of chance.</span>
+              </label>
+              <label className="field">
+                Trace id
+                <input type="text" value={settings.trace} placeholder="Your search version and parameters" onChange={(e) => set({ trace: e.target.value.slice(0, 200) })} />
+                <span className="hint">With the same trace id and the same parameters the node repeats the exact same search.</span>
+              </label>
+            </div>
+          </details>
           {query && (
             <div>
               <button className="small" onClick={() => setParams({})}>
@@ -265,32 +451,30 @@ export function SearchPage() {
           )}
         </div>
       )}
-      {show.includes('creators') && <CreatorResults query={query} />}
-      {show.includes('groups') && <GroupResults query={query} />}
-      {show.includes('topics') && <TopicResults query={query} />}
-      {show.includes('content') && (
-        <Feed
-          deps={[query, formats.join(), rating, topics.join(), kinds.join(), platform, sort]}
-          load={(cursor) =>
-            api<FeedResponse>('/api/search', {
-              body: {
-                query,
-                sort,
-                cursor,
-                filters: {
-                  formats: formats.length ? formats : undefined,
-                  maxRating: rating || undefined,
-                  topics: topics.length ? topics : undefined,
-                  onlyTopics: topics.length ? true : undefined,
-                  creatorKinds: kinds.length ? kinds : undefined,
-                  platform: platform || undefined,
-                },
-              },
-            })
-          }
-        />
+      {pageNav}
+      {paged.errors.map((failure) => (
+        <div key={failure.node + failure.error} className="banner danger small" style={{ marginBottom: 10 }}>
+          {failure.name}: {failure.error}
+        </div>
+      ))}
+      {pageRows.length === 0 && !paged.loading ? (
+        <div className="banner info small">
+          {query ? 'Nothing matches this search with the current filters.' : 'Search for something, or open Filters to pick creators and topics.'}
+        </div>
+      ) : (
+        <div className="page-list">
+          {pageRows.map((row) => (
+            <ResultRow key={row.key} row={row} />
+          ))}
+        </div>
       )}
-      {show.length === 0 && <div className="banner info small">Choose what to show above: content, creators, groups, topics, or all of them.</div>}
+      {paged.loading && (
+        <div className="row" style={{ justifyContent: 'center', padding: 14 }}>
+          <Spinner />
+        </div>
+      )}
+      {settings.paging === 'lazy' && !paged.done && <div ref={sentinel} style={{ height: 1 }} />}
+      {pageNav}
     </div>
   );
 }

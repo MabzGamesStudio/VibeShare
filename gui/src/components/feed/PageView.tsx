@@ -1,10 +1,8 @@
-import { AlertTriangle, Compass, Network, RefreshCw, Settings2, Sparkles, Users } from 'lucide-react';
+import { AlertTriangle, Compass, RefreshCw, Settings2, Sparkles, Users } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedResponse, PageConfig } from '../../../../src/shared/clientapi';
-import { pagePreferences } from '../../../../src/shared/clientdefaults';
-import type { Preferences } from '../../../../src/shared/protocol';
-import { FORMAT_LABELS, RATING_LABELS, type Format } from '../../../../src/shared/taxonomy';
+import { FORMAT_LABELS, type Format } from '../../../../src/shared/taxonomy';
 import { api } from '../../api';
 import { useApp } from '../../state';
 import { AddNodes } from '../AddNodes';
@@ -40,25 +38,6 @@ function Welcome() {
   );
 }
 
-/** One line on what a page shows. */
-function describe(page: PageConfig, preferences: Preferences, nodes: number, feedMode: string): string {
-  const formats = page.filters.formats.map((format) => FORMAT_LABELS[format]).join(', ');
-  const source =
-    page.source === 'search'
-      ? page.query
-        ? `results for “${page.query}”`
-        : 'everything, by search'
-      : page.source === 'subscriptions'
-        ? 'from your subscriptions'
-        : feedMode === 'blend'
-          ? `blending ${nodes} algorithm node${nodes === 1 ? '' : 's'}`
-          : 'from your first algorithm node';
-  const rating = pagePreferences(preferences, page.filters).maxRating ?? '16+';
-  return [formats || null, page.filters.topics.length ? page.filters.topics.slice(0, 3).join(', ') : null, `up to ${RATING_LABELS[rating]}`, source]
-    .filter(Boolean)
-    .join(' · ');
-}
-
 export function PageView({ page, embedded }: { page: PageConfig; embedded?: boolean }) {
   const { state, algorithms, providers } = useApp();
   const [format, setFormat] = useState<Format | null>(null);
@@ -66,12 +45,24 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
   const [editing, setEditing] = useState(false);
 
   const settings = state?.settings;
-  const filters = format ? { ...page.filters, formats: [format] } : page.filters;
+  // While the customize modal is open the feed keeps showing what it already loaded —
+  // the auto-saved edits only take effect (one reload) once the modal closes.
+  const [snapshot, setSnapshot] = useState<PageConfig | null>(null);
+  const feedPage = editing && snapshot ? snapshot : page;
+  const openEditor = () => {
+    setSnapshot(page);
+    setEditing(true);
+  };
+  const closeEditor = () => {
+    setEditing(false);
+    setSnapshot(null);
+  };
+  const filters = format ? { ...feedPage.filters, formats: [format] } : feedPage.filters;
   const enabled = algorithms.filter((node) => node.enabled);
   const subscriptions = state?.subscriptions ?? [];
   const key = JSON.stringify([
-    page.source,
-    page.query,
+    feedPage.source,
+    feedPage.query,
     filters,
     seed,
     settings?.preferences,
@@ -81,7 +72,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
   ]);
   const paged = usePaged(
     (cursor) =>
-      api<FeedResponse>('/api/browse', { body: { source: page.source, query: page.query, filters, sort: page.filters.sort, cursor, seed } }),
+      api<FeedResponse>('/api/browse', { body: { source: feedPage.source, query: feedPage.query, filters, sort: feedPage.filters.sort, cursor, seed } }),
     key,
     settings?.loadPauseMs ?? 1500
   );
@@ -95,7 +86,6 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
 
   const ipfsGateway = settings.ipfsGateway;
   const quick = page.filters.formats.length === 0 && page.layout !== 'shorts';
-  const summary = describe(page, settings.preferences, enabled.length, settings.feedMode);
 
   const empty: ReactNode =
     page.source === 'subscriptions' && subscriptions.length === 0 ? (
@@ -105,7 +95,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
     ) : (
       <Empty icon={<Compass size={42} />} title="Nothing here yet">
         <p>Your algorithm nodes returned nothing for this page. Try other filters, or add algorithm nodes that list more.</p>
-        <button onClick={() => setEditing(true)}>
+        <button onClick={openEditor}>
           <Settings2 size={16} /> Customize this page
         </button>
       </Empty>
@@ -118,7 +108,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
           <RefreshCw size={17} />
         </button>
       )}
-      <button onClick={() => setEditing(true)}>
+      <button onClick={openEditor}>
         <Settings2 size={16} /> Customize
       </button>
     </div>
@@ -138,7 +128,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
       </div>
     ) : null;
 
-  const editor = editing && <PageEditor page={page} onClose={() => setEditing(false)} />;
+  const editor = editing && <PageEditor page={page} onClose={closeEditor} />;
 
   if (page.layout === 'shorts') {
     return (
@@ -154,7 +144,7 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
                 <h1 className="row" style={{ gap: 8 }}>
                   <PageIconView icon={page.icon} size={20} /> {page.title}
                 </h1>
-                <button className="small" onClick={() => setEditing(true)}>
+                <button className="small" onClick={openEditor}>
                   <Settings2 size={14} /> Customize
                 </button>
               </>
@@ -176,12 +166,6 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
             <h1 className="row" style={{ gap: 10 }}>
               <PageIconView icon={page.icon} size={24} /> {page.title}
             </h1>
-            <p>
-              {summary} · <Link to="/settings" className="link">preferences</Link> ·{' '}
-              <Link to="/nodes" className="link">
-                <Network size={13} /> nodes
-              </Link>
-            </p>
           </div>
           {actions}
         </div>

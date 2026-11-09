@@ -9,6 +9,7 @@ export const FORMATS = [
   'audio',
   'podcast',
   'image',
+  'image-list',
   'article',
   'game',
   'software',
@@ -26,6 +27,7 @@ export const FORMAT_LABELS: Record<Format, string> = {
   audio: 'Audio',
   podcast: 'Podcast',
   image: 'Image',
+  'image-list': 'Image list',
   article: 'Article',
   game: 'Game',
   software: 'Software',
@@ -111,4 +113,43 @@ export function normalizeTag(tag: string): string {
     .replace(/\s+/g, '-')
     .replace(/[^\p{L}\p{N}_+-]/gu, '')
     .slice(0, 48);
+}
+
+/** The preset reason tags of an age rating. A page can disregard content about them. */
+export const RATING_REASONS = ['violence', 'language', 'sexual content', 'nudity', 'drugs', 'fear', 'gambling', 'hate speech'] as const;
+export type RatingReason = (typeof RATING_REASONS)[number];
+
+/**
+ * How strongly one set of picks (formats, topics or creators) weighs in the recommendations
+ * an algorithm node returns: from "only show these" down to "ignore them entirely".
+ */
+export const SUGGEST_LEVELS = ['only', 'strongly', 'suggest', 'weakly', 'ignore'] as const;
+export type SuggestLevel = (typeof SUGGEST_LEVELS)[number];
+
+export const SUGGEST_LEVEL_LABELS: Record<SuggestLevel, string> = {
+  only: 'Only show',
+  strongly: 'Strongly suggest',
+  suggest: 'Suggest',
+  weakly: 'Weakly suggest',
+  ignore: 'Ignore',
+};
+
+/**
+ * Whether anything in a content's metadata conflicts with the content types a viewer
+ * disregards: the age-rating reason notes algorithm nodes tag entries with (or any mention
+ * of the reason in the tags, topics or description). The client applies this itself on top
+ * of whatever the algorithm nodes already filtered.
+ */
+export function conflictsWithDisregard(
+  meta: { description?: string; tags?: string[]; topics?: string[]; notes?: { kind: string; value: string; reason: string }[] },
+  disregard: readonly string[]
+): boolean {
+  const reasons = disregard.map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+  if (!reasons.length) return false;
+  const mentioned = [
+    meta.description ?? '',
+    ...(meta.topics ?? []),
+    ...(meta.notes ?? []).flatMap((note) => [note.value, note.reason]),
+  ];
+  return mentioned.some((text) => Boolean(text) && reasons.some((reason) => text.toLowerCase().includes(reason)));
 }

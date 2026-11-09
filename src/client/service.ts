@@ -317,6 +317,21 @@ export class StorageWorker {
     await this.cleanup();
   }
 
+  /** Gives one assignment back to its provider and drops the data kept for it. */
+  async release(providerId: string, assignmentId: string): Promise<boolean> {
+    const state = this.state.get(providerId);
+    const node = this.nodes.get(providerId);
+    const assignment = state?.assignments.find((entry) => entry.id === assignmentId);
+    if (!state || !node || !assignment) return false;
+    if (assignment.status === 'active' || assignment.status === 'downloading') {
+      Object.assign(assignment, await this.nodes.client(node).json(`/v1/services/storage/assignments/${assignment.id}/release`, { method: 'POST' }));
+    } else {
+      assignment.status = 'released';
+    }
+    await this.cleanup();
+    return true;
+  }
+
   status(): ServiceStatus {
     // One scan of the data directory answers both "how much is on disk" and "what does
     // each job actually have" — used by the jobs view and the test button.

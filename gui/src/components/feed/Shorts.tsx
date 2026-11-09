@@ -1,35 +1,41 @@
-import { ChevronDown, ChevronUp, Info, Pause, ThumbsUp, Volume2, VolumeX } from 'lucide-react';
+import { ChevronDown, ChevronUp, Info, MessageCircle, Pause, ThumbsDown, ThumbsUp, Volume2, VolumeX } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import type { FeedItem, PageConfig } from '../../../../src/shared/clientapi';
+import { DEFAULT_SHORT_BUTTONS, SHORT_BUTTON_LABELS, type FeedItem, type PageConfig, type ShortButton } from '../../../../src/shared/clientapi';
 import { api, errorMessage } from '../../api';
 import { markPreviewed, useTrackingPreviews } from '../../bloom';
 import { useApp } from '../../state';
 import { watchPath } from '../../util';
+import { Comments } from '../Comments';
 import { ShareButton } from '../Share';
 import { Spinner } from '../ui';
 import { compact, Fields } from './Fields';
 import { MediaView, Poster } from './Player';
 import type { Paged } from './usePaged';
 
-/** Likes without asking the node for each short's vote first (no request per swipe). */
-function LikeButton({ item }: { item: FeedItem }) {
+/** Votes without asking the node for each short's vote first (no request per swipe). */
+export function VoteButton({ item, value }: { item: FeedItem; value: 1 | -1 }) {
   const { toast, refresh } = useApp();
   const [vote, setVote] = useState(0);
   const [likes, setLikes] = useState(item.stats.likes);
-  const count = likes || item.stats.platformLikes;
+  const [dislikes, setDislikes] = useState(item.stats.dislikes);
+  const count = value === 1 ? likes || item.stats.platformLikes : dislikes;
+  const Icon = value === 1 ? ThumbsUp : ThumbsDown;
   return (
     <button
       type="button"
-      className={`rail-button ${vote === 1 ? 'on' : ''}`}
-      aria-pressed={vote === 1}
-      aria-label="Like"
+      className={`rail-button ${vote === value ? 'on' : ''}`}
+      aria-pressed={vote === value}
+      aria-label={value === 1 ? 'Like' : 'Dislike'}
       onClick={async () => {
-        const next = vote === 1 ? 0 : 1;
+        const next = vote === value ? 0 : value;
         try {
-          const result = await api<{ likes: number; credited: number }>('/api/vote', { body: { nodeId: item.via, id: item.id, vote: next } });
+          const result = await api<{ likes: number; dislikes: number; credited: number }>('/api/vote', {
+            body: { nodeId: item.via, id: item.id, vote: next },
+          });
           setVote(next);
           setLikes(result.likes);
+          setDislikes(result.dislikes);
           if (result.credited) {
             toast(`+${result.credited} credits on ${item.viaName} for voting`, 'success');
             void refresh();
@@ -39,8 +45,8 @@ function LikeButton({ item }: { item: FeedItem }) {
         }
       }}
     >
-      <ThumbsUp size={22} fill={vote === 1 ? 'currentColor' : 'none'} />
-      <span>{count ? compact(count) : 'Like'}</span>
+      <Icon size={22} />
+      <span>{count ? compact(count) : value === 1 ? 'Like' : 'Dislike'}</span>
     </button>
   );
 }
@@ -66,11 +72,30 @@ function Short({
   onToggleMute: () => void;
   onTogglePause: () => void;
 }) {
+  const [comments, setComments] = useState(false);
+  const shown = new Set<ShortButton>(page.options.shortButtons ?? DEFAULT_SHORT_BUTTONS);
+  const mode = page.options.shortsComments === 'shrink' ? 'shrink' : 'cover';
+  const share = Math.min(90, Math.max(10, Number(page.options.shortsCommentsSize) || 50));
   return (
-    <div className="short-stage">
+    <div
+      className={`short-stage ${comments ? `comments-${mode}` : ''}`}
+      style={comments ? ({ '--comments-share': `${share}%` } as React.CSSProperties) : undefined}
+      onClick={(event) => {
+        // With the comments open, a click anywhere outside of them closes the section.
+        if (comments && !(event.target as HTMLElement).closest('.short-comments')) setComments(false);
+      }}
+    >
       <div className="short-frame">
         {near ? (
-          <MediaView item={item} active={active && page.options.autoplay} paused={paused} muted={muted} fit="contain" ipfsGateway={ipfsGateway} />
+          <MediaView
+            item={item}
+            active={active && page.options.autoplay}
+            paused={paused}
+            muted={muted}
+            loop={page.options.shortsLoop !== false}
+            fit="contain"
+            ipfsGateway={ipfsGateway}
+          />
         ) : (
           <Poster item={item} />
         )}
@@ -87,18 +112,40 @@ function Short({
           </div>
         )}
       </div>
-      <div className="short-rail">
-        <LikeButton item={item} />
-        <ShareButton target={{ id: item.id, title: item.title }} className="rail-button" label="Share" />
-        <button type="button" className="rail-button" onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
-          {muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
-          <span>{muted ? 'Sound' : 'Mute'}</span>
-        </button>
-        <Link to={watchPath(item.id)} className="rail-button" aria-label="Details">
-          <Info size={22} />
-          <span>Details</span>
-        </Link>
+      <div className={`short-rail rail-${page.options.shortsButtonSize ?? 'medium'}`}>
+        {shown.has('like') && <VoteButton item={item} value={1} />}
+        {shown.has('dislike') && <VoteButton item={item} value={-1} />}
+        {shown.has('comments') && (
+          <button
+            type="button"
+            className={`rail-button ${comments ? 'on' : ''}`}
+            aria-pressed={comments}
+            aria-label="Comments"
+            onClick={() => setComments((open) => !open)}
+          >
+            <MessageCircle size={22} />
+            <span>Comments</span>
+          </button>
+        )}
+        {shown.has('share') && <ShareButton target={{ id: item.id, title: item.title }} className="rail-button" label="Share" />}
+        {shown.has('sound') && (
+          <button type="button" className="rail-button" onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
+            {muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
+            <span>{muted ? 'Sound' : 'Mute'}</span>
+          </button>
+        )}
+        {shown.has('details') && (
+          <Link to={watchPath(item.id)} className="rail-button" aria-label="Details">
+            <Info size={22} />
+            <span>Details</span>
+          </Link>
+        )}
       </div>
+      {comments && (
+        <div className="short-comments">
+          <Comments contentId={item.contentId ?? item.id} />
+        </div>
+      )}
     </div>
   );
 }
@@ -112,7 +159,8 @@ export function ShortsLayout({ paged, page, ipfsGateway, header, empty }: { page
   const container = useRef<HTMLDivElement | null>(null);
   const [height, setHeight] = useState<number | undefined>();
   const [active, setActive] = useState(0);
-  const [muted, setMuted] = useState(page.options.muted);
+  // Shorts always start with their sound on; the speaker button mutes them again.
+  const [muted, setMuted] = useState(false);
   const [paused, setPaused] = useState(false);
   const activeRef = useRef(active);
   activeRef.current = active;

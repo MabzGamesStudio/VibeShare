@@ -93,7 +93,7 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
         {embedsBlocked() && (
           <p className="small faint embed-placeholder-text" style={{ position: 'absolute', bottom: 8, left: 10, right: 10, textAlign: 'center' }}>
             Third-party embeds are off (they carry third-party tracking cookies) — allow them in{' '}
-            <Link className="link" to="/settings#privacy">
+            <Link className="link" to="/settings?tab=privacy">
               Settings → Privacy
             </Link>
           </p>

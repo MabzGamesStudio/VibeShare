@@ -158,7 +158,6 @@ interface MetaState {
   format: Format;
   rating: Rating;
   topics: string[];
-  tags: string;
   language: string;
 }
 
@@ -203,10 +202,6 @@ function MetaFields({ meta, setMeta }: { meta: MetaState; setMeta: (meta: MetaSt
         <span>Topics</span>
         <Chips options={TOPICS} selected={meta.topics} onToggle={(t) => setMeta({ ...meta, topics: toggle(meta.topics, t) })} />
       </div>
-      <label className="field">
-        Tags <span className="hint">Comma separated</span>
-        <input type="text" value={meta.tags} onChange={(e) => setMeta({ ...meta, tags: e.target.value })} placeholder="tutorial, guitar, beginner" />
-      </label>
     </>
   );
 }
@@ -238,7 +233,7 @@ function NodePicker({
   );
 }
 
-const emptyMeta = (): MetaState => ({ title: '', description: '', format: 'video', rating: 'all', topics: [], tags: '', language: '' });
+const emptyMeta = (): MetaState => ({ title: '', description: '', format: 'video', rating: 'all', topics: [], language: '' });
 
 function describeProvider(node: NodeEntry): string {
   const info = node.info as ProviderInfo | undefined;
@@ -259,6 +254,8 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   const enabledProviders = providers.filter((n) => n.enabled && (n.info as ProviderInfo | undefined)?.pricing.upload.mode !== 'closed');
   const enabledAlgorithms = algorithms.filter((n) => n.enabled);
   const [file, setFile] = useState<File | null>(null);
+  // The rest of a photo list: every image publishes on its own, and the list itself last.
+  const [gallery, setGallery] = useState<File[]>([]);
   const [videoHint, setVideoHint] = useState(false);
   const [over, setOver] = useState(false);
   const [meta, setMeta] = useState<MetaState>(emptyMeta);
@@ -295,25 +292,86 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
     }
   };
 
+  /** Several images at once is a list of images: one content per image, one list of them. */
+  const chooseMany = async (picked: FileList | File[]) => {
+    const list = [...picked];
+    if (!list.length) return;
+    const images = list.filter((one) => (one.type || '').startsWith('image/'));
+    if (list.length > 1 && images.length === list.length) {
+      setGallery(images.slice(1, 64));
+      await choose(images[0]);
+      setMeta((m) => ({ ...m, format: 'image-list' }));
+      return;
+    }
+    setGallery([]);
+    await choose(list[0]);
+  };
+
   const publish = async () => {
     if (!file) return;
     try {
       setUploading(0);
-      const { fileId } = await uploadFile(file, setUploading);
+      // A list of images: every image publishes as its own content first (each gets its
+      // own id), and the list itself publishes last with all of those ids as its gallery.
+      const images = [file, ...gallery];
+      const galleryIds: string[] = [];
+      for (const [index, image] of images.entries()) {
+        if (gallery.length) setUploading(index / (images.length + 1));
+        const { fileId } = await uploadFile(image, gallery.length ? () => undefined : setUploading);
+        const one = await api<Job>('/api/publish', {
+          body: {
+            fileId,
+            name: image.name,
+            mime: image.type || 'application/octet-stream',
+            title: gallery.length ? `${meta.title} (${index + 1}/${images.length})` : meta.title,
+            description: meta.description,
+            format: gallery.length ? 'image' : meta.format,
+            rating: meta.rating,
+            topics: meta.topics,
+            language: meta.language || undefined,
+            durationSeconds: gallery.length ? undefined : duration,
+            sources: gallery.length ? undefined : splitList(sources),
+            providers: chosenProviders,
+            algorithms: chosenAlgorithms,
+            thumbnail: gallery.length ? undefined : thumbnail,
+            sign,
+          },
+        });
+        if (!gallery.length) {
+          watchJob(one.id);
+          return;
+        }
+        // The list needs the id of every image, so it waits for each image to finish.
+        let done = one;
+        for (let tick = 0; tick < 240 && done.status === 'running'; tick++) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          done = await api<Job>(`/api/jobs/${done.id}`);
+        }
+        if (done.status !== 'done' || !done.result?.id) throw new Error(done.error ?? `The upload of ${image.name} failed`);
+        galleryIds.push(done.result.id.split('~')[0]);
+      }
+      // The list itself: a tiny carrier file, with its images named in its own metadata.
+      const carrier = new File(
+        [
+          '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><rect width="1200" height="630" fill="#151821"/><text x="600" y="335" fill="#9aa1b5" font-size="52" text-anchor="middle" font-family="sans-serif">Photo list</text></svg>',
+        ],
+        'photo-list.svg',
+        { type: 'image/svg+xml' }
+      );
+      const { fileId } = await uploadFile(carrier, setUploading);
       setUploading(null);
       const created = await api<Job>('/api/publish', {
         body: {
           fileId,
-          name: file.name,
-          mime: file.type || 'application/octet-stream',
+          name: carrier.name,
+          mime: carrier.type,
           title: meta.title,
           description: meta.description,
-          format: meta.format,
+          format: 'image-list',
           rating: meta.rating,
           topics: meta.topics,
-          tags: splitList(meta.tags),
           language: meta.language || undefined,
-          durationSeconds: duration,
+          gallery: galleryIds,
           sources: splitList(sources),
           providers: chosenProviders,
           algorithms: chosenAlgorithms,
@@ -355,13 +413,13 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             onDrop={(e) => {
               e.preventDefault();
               setOver(false);
-              const picked = e.dataTransfer.files[0];
-              if (picked) void choose(picked);
+              void chooseMany(e.dataTransfer.files);
             }}
           >
             <UploadCloud size={44} />
             <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>Drop a file or click to choose</h2>
             <p>Video, music, podcasts, images, articles, games — any file. It is split into chunks and uploaded to the providers you pick.</p>
+            <p className="hint">Pick several images at once to publish them as a list of images: one content per image, plus the list itself.</p>
           </div>
         ) : (
           <div className="card row between">
@@ -370,9 +428,10 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
               <div className="small muted">
                 {file.type || 'unknown type'} · {formatBytes(file.size)}
                 {duration ? ` · ${formatDuration(duration)}` : ''}
+                {gallery.length ? ` · a list of ${gallery.length + 1} images` : ''}
               </div>
             </div>
-            <button className="small" onClick={() => (setFile(null), setMeta(emptyMeta()))}>
+            <button className="small" onClick={() => (setFile(null), setGallery([]), setMeta(emptyMeta()))}>
               Change
             </button>
           </div>
@@ -386,7 +445,13 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             </button>
           </div>
         )}
-        <input ref={input} type="file" hidden onChange={(e) => e.target.files?.[0] && choose(e.target.files[0])} />
+        <input
+          ref={input}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => e.target.files?.length && void chooseMany(e.target.files)}
+        />
         <MetaFields meta={meta} setMeta={setMeta} />
         <label className="field">
           Fallback links <span className="hint">Copies elsewhere (YouTube, archive.org, IPFS…), shown when no provider has the file. One per line.</span>
@@ -496,7 +561,6 @@ function LinkTab() {
           format: meta.format,
           rating: meta.rating,
           topics: meta.topics,
-          tags: splitList(meta.tags),
           language: meta.language || undefined,
           algorithms: chosen,
         },

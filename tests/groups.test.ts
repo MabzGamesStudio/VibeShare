@@ -105,7 +105,7 @@ describe('groups and topics', async () => {
       ['Bike ride', 'Black holes', 'Outside content']
     );
     const account = await suggester.json<{ account: { balance: number } }>('/v1/account');
-    assert.equal(account.account.balance, 4, 'the accepted suggestion paid the client');
+    assert.equal(account.account.balance, 104, 'the accepted suggestion paid the client 4 credits');
 
     // A suggestion that asks for nothing is refused, and so is one for a plain creator.
     await assert.rejects(suggester.json('/v1/groups/name:nightly/suggestion', { body: { reason: 'nothing' } }), /asks for members/);
@@ -206,7 +206,7 @@ describe('topics: the categories content is filed under', async () => {
     const page = await clientFor(url).json<{ topic: TopicInfo }>(`/v1/topics/${id}`, { auth: false });
     assert.equal(page.topic.description, 'Everything below the surface');
     const account = await author.json<{ account: { balance: number } }>('/v1/account');
-    assert.equal(account.account.balance, 3, 'the accepted topic suggestion paid the client');
+    assert.equal(account.account.balance, 103, 'the accepted topic suggestion paid the client 3 credits');
 
     await assert.rejects(clientFor(url).json(`/v1/topics/${topicIdOf('nowhere')}`, { auth: false }), /Unknown topic/);
     await assert.rejects(clientFor(url).json('/v1/groups/name:labs', { auth: false }), /not a group/);

@@ -97,11 +97,25 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
   const { state, providers } = useApp();
   const [mode, setMode] = useState<Mode>('link');
   const [copied, setCopied] = useState(false);
-  const [withProvider, setWithProvider] = useState(false);
-  const base = state?.settings.shareBaseUrl ?? '';
+  // The link defaults to the sharing address set in Settings — a hosted copy of the web
+  // client — with the content id appended; when that address is empty it is the copy of
+  // the client this page is open in. The
+  // field stays editable: the url (content id included) can be changed before sharing.
+  const defaultBase = (() => {
+    // The sharing address in Settings (a hosted copy of the web client) wins whenever it
+    // is set; where this page is served from only stands in when that address is empty.
+    const configured = state?.settings.shareBaseUrl?.trim() ?? '';
+    if (configured) return configured;
+    try {
+      return `${window.location.origin}${new URL('.', document.baseURI).pathname}`.replace(/\/+$/, '');
+    } catch {
+      return state?.settings.shareBaseUrl ?? '';
+    }
+  })();
+  const [edited, setEdited] = useState<string | null>(null);
   const native = Boolean(parseContentId(target.id)?.native);
   const provider = providers.find((node) => node.enabled);
-  const url = shareLink(base, target.id, withProvider && native && provider ? provider.ref : undefined);
+  const url = edited ?? shareLink(defaultBase, target.id);
   const title = target.title ?? 'Content on VibeShare';
   const text = encodeURIComponent(title);
   const link = encodeURIComponent(url);
@@ -109,7 +123,7 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
     try {
       return new URL(url).host;
     } catch {
-      return base;
+      return url;
     }
   })();
   const canShare = typeof navigator.share === 'function';
@@ -135,7 +149,7 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
       </div>
 
       <div className="share-link">
-        <input type="text" readOnly value={url} onFocus={(e) => e.target.select()} aria-label="Link" />
+        <input type="text" value={url} onFocus={(e) => e.target.select()} aria-label="Link" onChange={(e) => setEdited(e.target.value)} />
         <button className="primary" onClick={copy}>
           {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? 'Copied' : 'Copy link'}
         </button>
@@ -174,12 +188,9 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
       {mode === 'qr' && <QrPanel url={url} title={target.title} />}
 
       <div className="share-footer form-stack">
-        {native && provider && (
-          <Switch checked={withProvider} onChange={setWithProvider} label={`Point to my provider node (${provider.name})`} />
-        )}
         <p className="hint">
           The link opens the VibeShare web client at <strong>{host}</strong>, which plays the content from its own nodes.{' '}
-          <Link to="/settings#sharing" className="link" onClick={onClose}>
+          <Link to="/settings?tab=sharing" className="link" onClick={onClose}>
             Change the address
           </Link>
         </p>

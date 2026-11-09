@@ -3,7 +3,7 @@
 `web/` is the VibeShare client as a static website: the same app as the desktop client (pages, shorts, search, subscriptions, publishing, credits, sharing), with a hash router so any static host can serve it, GitHub Pages included. Shared links and QR codes open it on the shared content:
 
 ```
-https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/#/watch/<content id>
+https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web/watch/<content id>
 ```
 
 There is no server behind it. The client's backend runs in the visitor's browser, in a service worker: it keeps the visitor's keys, node list and settings in the browser, talks to provider and algorithm nodes directly, checks every chunk against its hash and streams video with seeking, exactly like the desktop client does.

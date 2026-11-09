@@ -341,6 +341,11 @@ export function SeenFiltersSection() {
       <div className="card form-stack" id="history">
         <h2>Search history</h2>
         <Switch
+          checked={s.watchHistory}
+          onChange={(watchHistory) => void updateSettings({ watchHistory })}
+          label="Keep a local log of what I watch (History page)"
+        />
+        <Switch
           checked={s.searchHistory}
           onChange={(searchHistory) => void updateSettings({ searchHistory })}
           label="Keep a history of what you search for"

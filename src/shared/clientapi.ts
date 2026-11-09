@@ -1,23 +1,34 @@
 // Types of the client daemon's local API (GUI ⇄ daemon). Browser-safe: no Node imports.
 import type { NodeType } from './noderef.js';
 import type { Manifest } from './content.js';
-import type { CommentBlock, CommentVotes } from './comments.js';
+import type { CommentBlock, CommentOrder, CommentVotes } from './comments.js';
 import type { ContentItem, CreatorInfo, GroupInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, TopicInfo, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
 import type { VvshFile } from './vvsh.js';
-import type { CreatorKind, Format, Rating } from './taxonomy.js';
+import type { CreatorKind, Format, Rating, SuggestLevel } from './taxonomy.js';
 
 export type AuthMode = 'identity' | 'pseudonym' | 'anonymous';
 
-/** The whole comment chain of a content page, and the viewer's own key. */
+/** The comment chain of a content page, its order, and the viewer's own key. */
 export interface CommentsResponse {
   /** The page's root (its cid, or its first link): what first level comments reply to. */
   root: string;
-  /** Every block of the chain; data is absent where the node keeps a comment back. */
+  /**
+   * Every block header of the chain, in chain order; the comment data rides along only
+   * for the comments loaded so far (the node marks the rest `pending`).
+   */
   blocks: CommentBlock[];
   votes: Record<string, CommentVotes>;
   /** Whether the section sends comment data at all (false: the block headers only). */
   shown: boolean;
+  /** The order the node decided on (the client only suggests one). */
+  order: CommentOrder;
+  /** The comment ids in the order the node wants them shown. */
+  rank: string[];
+  /** How many comments this chain resolves to (what the order ranks). */
+  total: number;
+  /** How many of them carry their data in this answer. */
+  loaded: number;
   /** The viewer's key id, to tell their own comments apart. */
   you: string;
 }
@@ -154,7 +165,6 @@ export const METADATA_FIELDS = [
   'duration',
   'format',
   'rating',
-  'tags',
   'topics',
   'via',
   'description',
@@ -172,7 +182,6 @@ export const METADATA_LABELS: Record<MetadataField, string> = {
   duration: 'Duration',
   format: 'Format',
   rating: 'Age rating',
-  tags: 'Tags',
   topics: 'Topics',
   via: 'Algorithm node',
   description: 'Description',
@@ -204,6 +213,22 @@ export type PageIcon = (typeof PAGE_ICONS)[number];
 
 export type PagePreset = 'videos' | 'shorts' | 'images';
 
+/** The buttons a short's rail can show; the page picks which ones are visible. */
+export const SHORT_BUTTONS = ['like', 'dislike', 'comments', 'share', 'sound', 'details'] as const;
+export type ShortButton = (typeof SHORT_BUTTONS)[number];
+
+/** What a short shows on its rail out of the box: like, comments and share. */
+export const DEFAULT_SHORT_BUTTONS: ShortButton[] = ['like', 'comments', 'share'];
+
+export const SHORT_BUTTON_LABELS: Record<ShortButton, string> = {
+  like: 'Like',
+  dislike: 'Dislike',
+  comments: 'Comments',
+  share: 'Share',
+  sound: 'Sound',
+  details: 'Details',
+};
+
 export interface PageFilters {
   /** Only these formats (empty = all). */
   formats: Format[];
@@ -221,6 +246,21 @@ export interface PageFilters {
   onlyCreators?: boolean;
   blockedCreatorIds?: string[];
   creatorKinds: CreatorKind[];
+  /**
+   * How strongly the format, topic and creator picks weigh in the recommendations an
+   * algorithm node returns (see SuggestLevel). A blacklist always wins over a slider.
+   */
+  formatLevel?: SuggestLevel;
+  topicLevel?: SuggestLevel;
+  creatorLevel?: SuggestLevel;
+  /** Age-rating reasons (violence, language, …) whose content to leave out entirely. */
+  disregard?: string[];
+  /** Platforms (content sources): whitelisted, blacklisted, or left unselected. */
+  platforms?: string[];
+  blockedPlatforms?: string[];
+  platformLevel?: SuggestLevel;
+  /** Whether the creators this account subscribes to join the creators picks (on by default). */
+  subscribedCreators?: boolean;
   /** Search pages: how results are ordered. */
   sort?: 'relevance' | 'new' | 'top';
 }
@@ -249,6 +289,16 @@ export interface PageConfig {
     /** Columns of grid and masonry layouts (0 = as many as fit). */
     columns: number;
     size: 'small' | 'medium' | 'large';
+    /** Shorts: loop each short when it ends (off = it stops on the last frame). */
+    shortsLoop?: boolean;
+    /** Shorts: how big the rail buttons are. */
+    shortsButtonSize?: 'small' | 'medium' | 'large';
+    /** Shorts: which of the rail buttons this page shows. */
+    shortButtons?: ShortButton[];
+    /** Shorts: how the comments section comes onto the screen. */
+    shortsComments?: 'cover' | 'shrink';
+    /** Shorts: the share of the screen the comments take up (10–90 percent). */
+    shortsCommentsSize?: number;
   };
   /** Show the page in the left panel. */
   sidebar: boolean;
@@ -309,6 +359,18 @@ export interface Settings {
   pauseHistory: boolean;
   /** Whether what the user searches for is kept as a search history at all. */
   searchHistory: boolean;
+  /** Keep a local log of what is watched (off by default; the History page can start it). */
+  watchHistory: boolean;
+  /** The subscriptions carousel order: subscribed date (the default), random, A–Z, Z–A, or last post. */
+  subscriptionOrder: 'subscribed' | 'random' | 'az' | 'za' | 'recent';
+  /** How many history rows one page shows. */
+  historyPageSize: number;
+  /** Drop local watch and search history older than this many days (0 = keep forever). */
+  historyClearDays: number;
+  /** Whether toast messages are saved at all (off by default: none are kept). */
+  toastHistory: boolean;
+  /** Whether the bell icon for past toast messages shows on every page. */
+  toastIcon: boolean;
   /** Whether the search bar shows matching past searches under the search box. */
   searchSuggestions: boolean;
   /**
@@ -353,6 +415,8 @@ export interface Subscription {
   /** Topics only: an icon, when the topic has one. */
   icon?: string;
   addedAt: string;
+  /** When the creator last posted something (the carousel can order by it). */
+  lastPostAt?: string;
 }
 
 export interface LibraryItem {
@@ -376,6 +440,14 @@ export interface HistoryItem {
 export interface SearchHistoryItem {
   query: string;
   at: string;
+}
+
+/** One toast message the client showed, kept when the user turns that on. */
+export interface ToastMessage {
+  id: string;
+  at: string;
+  text: string;
+  kind: 'info' | 'error' | 'success';
 }
 
 /** A collection of saved cids the user made (one saved cid may sit in several). */
@@ -538,6 +610,8 @@ export interface PublishRequest {
   tags?: string[];
   language?: string;
   durationSeconds?: number;
+  /** The images of a list-of-images content: the content ids of the published images. */
+  gallery?: string[];
   /** External copies to fall back to (links or `yt:…` sources). */
   sources?: string[];
   providers: string[];

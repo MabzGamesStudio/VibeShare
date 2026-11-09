@@ -18,6 +18,7 @@ describe('the search history', async () => {
   const history = () => api<{ items: SearchHistoryItem[] }>('/api/search-history');
 
   it('keeps what the user searches for, most recent first and without repeats', async () => {
+    await api('/api/settings', { method: 'PATCH', body: { searchHistory: true } });
     await search('black holes');
     await search('nebulae');
     await search('black holes');

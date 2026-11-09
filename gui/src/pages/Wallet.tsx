@@ -1,16 +1,89 @@
 import { Coins, ExternalLink, Gift, Wallet } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import type { AccountResponse, NodeEntry } from '../../../src/shared/clientapi';
 import type { Invoice, PaymentMethodInfo } from '../../../src/shared/protocol';
 import type { StoredReceipt } from '../../../src/client/receipts';
 import { api, errorMessage } from '../api';
 import { CodeBox, Empty, Loading, Spinner, StatusDot } from '../components/ui';
 import { CryptoSafetyNotice } from '../components/CryptoSafetyNotice';
-import { OfferLinksCard } from '../components/OfferLinks';
 import { useApp } from '../state';
 import { timeAgo } from '../util';
 import { AUTH_LABELS } from './Nodes';
+
+/** How many receipts one page shows. */
+const PAGE = 25;
+
+interface Pager {
+  mode: 'pages' | 'lazy';
+  setMode: (mode: 'pages' | 'lazy') => void;
+  page: number;
+  setPage: (update: (page: number) => number) => void;
+  setShown: (update: (shown: number) => number) => void;
+  sentinel: React.RefObject<HTMLDivElement | null>;
+  pages: number;
+  start: number;
+  end: number;
+}
+
+/** How the list loads: a page at a time, or as the inner card is scrolled. */
+function usePager(total: number): Pager {
+  const [mode, setMode] = useState<'pages' | 'lazy'>('pages');
+  const [page, setPage] = useState(0);
+  const [shown, setShown] = useState(PAGE);
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (mode !== 'lazy') return;
+    const node = sentinel.current;
+    if (!node) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setShown((n) => n + PAGE);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [mode, total]);
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  const start = mode === 'pages' ? Math.min(page, pages - 1) * PAGE : 0;
+  const end = mode === 'pages' ? start + PAGE : Math.min(total, shown);
+  return { mode, setMode, page, setPage, setShown, sentinel, pages, start, end };
+}
+
+function PagerBar({ pager, total }: { pager: Pager; total: number }) {
+  return (
+    <div className="row between" style={{ marginBottom: 8 }}>
+      <span className="tiny faint">
+        {total} items{pager.mode === 'pages' ? ` · page ${Math.min(pager.page, pager.pages - 1) + 1} of ${pager.pages}` : ''}
+      </span>
+      <select
+        className="small"
+        value={pager.mode}
+        aria-label="How the list loads"
+        onChange={(e) => {
+          pager.setMode(e.target.value as 'pages' | 'lazy');
+          pager.setPage(() => 0);
+          pager.setShown(() => PAGE);
+        }}
+      >
+        <option value="pages">By page</option>
+        <option value="lazy">As I scroll</option>
+      </select>
+    </div>
+  );
+}
+
+function PagerNav({ pager }: { pager: Pager }) {
+  if (pager.mode !== 'pages' || pager.pages <= 1) return null;
+  return (
+    <div className="row" style={{ marginTop: 8, gap: 8 }}>
+      <button className="small" disabled={pager.page <= 0} onClick={() => pager.setPage((p) => Math.max(0, p - 1))}>
+        Previous
+      </button>
+      <button className="small" disabled={pager.page >= pager.pages - 1} onClick={() => pager.setPage((p) => Math.min(pager.pages - 1, p + 1))}>
+        Next
+      </button>
+    </div>
+  );
+}
 
 function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMethodInfo; onPaid: () => void }) {
   const { toast } = useApp();
@@ -171,16 +244,20 @@ function TopUp({ node, method, onPaid }: { node: NodeEntry; method: PaymentMetho
 /**
  * Receipts this device saved automatically: for every payment request a node issued and
  * every transfer made, what was asked, what was paid (with the transaction id) and what
- * the node granted — signed by the node, kept locally, never uploaded.
+ * the node granted — signed by the node, kept locally, never uploaded. Only the receipts
+ * of the node being looked at show up here.
  */
-function Receipts() {
-  const [receipts, setReceipts] = useState<StoredReceipt[]>([]);
+function Receipts({ node }: { node: NodeEntry }) {
+  const [all, setAll] = useState<StoredReceipt[]>([]);
   const load = useCallback(() => {
     api<{ receipts: StoredReceipt[] }>('/api/receipts')
-      .then((r) => setReceipts(r.receipts ?? []))
+      .then((r) => setAll(r.receipts ?? []))
       .catch(() => undefined);
   }, []);
   useEffect(load, [load]);
+  // A receipt belongs to the node that signed it: it only ever shows on that node's wallet.
+  const receipts = all.filter((receipt) => receipt.nodeId === node.id);
+  const pager = usePager(receipts.length);
   if (!receipts.length) return null;
 
   return (
@@ -190,8 +267,10 @@ function Receipts() {
         Signed by the node and saved on this device only: the payment request, the transfer you made and the credits it bought. Keep them as
         proof of what each node owes you or has already credited.
       </p>
-      {receipts.map((receipt) => (
-        <div key={receipt.id} className="card form-stack">
+      <PagerBar pager={pager} total={receipts.length} />
+      <div style={{ maxHeight: 420, overflowY: 'auto' }}>
+        {receipts.slice(pager.start, pager.end).map((receipt) => (
+          <div key={receipt.id} className="card form-stack">
           <div className="row between">
             <strong>
               {receipt.credits.toLocaleString()} credits · {receipt.method}
@@ -239,8 +318,11 @@ function Receipts() {
               <CodeBox text={receipt.tx} />
             </div>
           )}
-        </div>
-      ))}
+          </div>
+        ))}
+        {pager.mode === 'lazy' && pager.end < receipts.length && <div ref={pager.sentinel} />}
+      </div>
+      <PagerNav pager={pager} />
     </div>
   );
 }
@@ -317,42 +399,16 @@ function NodeWallet({ node }: { node: NodeEntry }) {
           </>
         )}
       </div>
-
-      <div className="card">
-        <h3>History</h3>
-        {!account ? (
-          <Loading />
-        ) : account.history.length === 0 ? (
-          <p className="muted small">No activity yet.</p>
-        ) : (
-          <table className="table" style={{ marginTop: 10 }}>
-            <tbody>
-              {account.history.map((entry, i) => (
-                <tr key={i}>
-                  <td className="small">{entry.reason}</td>
-                  <td className="tiny faint">{timeAgo(entry.at)}</td>
-                  <td style={{ textAlign: 'right', color: entry.amount > 0 ? 'var(--ok)' : undefined, fontWeight: 600 }}>
-                    {entry.amount > 0 ? '+' : ''}
-                    {entry.amount}
-                  </td>
-                  <td className="tiny faint" style={{ textAlign: 'right' }}>
-                    {entry.balance}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
     </div>
   );
 }
 
 export function WalletPage() {
-  const { state } = useApp();
+  const { state, providers, algorithms } = useApp();
   const [params, setParams] = useSearchParams();
+  const [tab, setTab] = useState<'provider' | 'algorithm'>('provider');
   if (!state) return null;
-  const nodes = state.nodes;
+  const nodes = tab === 'provider' ? providers : algorithms;
   const selected = nodes.find((n) => n.id === params.get('node')) ?? nodes[0];
   return (
     <div className="page">
@@ -362,8 +418,20 @@ export function WalletPage() {
           <p>Every node runs its own credits. Balances here are separate and only spendable on the node that issued them.</p>
         </div>
       </div>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        <button className={`tab ${tab === 'provider' ? 'on' : ''}`} onClick={() => setTab('provider')}>
+          Content provider nodes
+        </button>
+        <button className={`tab ${tab === 'algorithm' ? 'on' : ''}`} onClick={() => setTab('algorithm')}>
+          Algorithm search nodes
+        </button>
+      </div>
       {!nodes.length ? (
-        <Empty icon={<Coins size={40} />} title="No nodes yet" />
+        <Empty icon={<Coins size={40} />} title={tab === 'provider' ? 'No content provider nodes' : 'No algorithm search nodes'}>
+          <p>
+            Add one on the <Link to="/nodes" className="link">Nodes page</Link>.
+          </p>
+        </Empty>
       ) : (
         <div className="wallet-layout">
           <div className="check-list">
@@ -389,8 +457,7 @@ export function WalletPage() {
         </div>
       )}
       <div style={{ height: 16 }} />
-      <Receipts />
-      <OfferLinksCard />
+      {selected && <Receipts key={`receipts-${selected.id}`} node={selected} />}
     </div>
   );
 }

@@ -10,6 +10,24 @@ export type CommentTimePrecision = 'datetime' | 'date' | 'year' | 'none';
 
 export const COMMENT_TIME_PRECISIONS: CommentTimePrecision[] = ['datetime', 'date', 'year', 'none'];
 
+/** How a comment section orders the comments it shows. */
+export type CommentOrder = 'relevant' | 'most-liked' | 'most-disliked' | 'newest' | 'oldest';
+
+export const COMMENT_ORDERS: CommentOrder[] = ['relevant', 'most-liked', 'most-disliked', 'newest', 'oldest'];
+
+export const COMMENT_ORDER_LABELS: Record<CommentOrder, string> = {
+  relevant: 'Relevant',
+  'most-liked': 'Most liked',
+  'most-disliked': 'Most disliked',
+  newest: 'Newest',
+  oldest: 'Oldest',
+};
+
+/** The ordering a client suggested, when the node knows it (anything else: relevant). */
+export function commentOrderOf(value: string | null | undefined): CommentOrder {
+  return (COMMENT_ORDERS as string[]).includes(value ?? '') ? (value as CommentOrder) : 'relevant';
+}
+
 /** The hashed content of one comment block. */
 export interface CommentData {
   /** Comment id: a uuid the node made up (or an existing one, when this block edits it). */
@@ -36,6 +54,8 @@ export interface CommentBlock {
   id: string;
   /** The comment data; absent when the node keeps only the header (removed or hidden). */
   data?: CommentData;
+  /** Set on the header of a comment whose data loads later (as the reader scrolls). */
+  pending?: boolean;
 }
 
 /** What one comment resolves to after the whole chain is verified. */
@@ -62,7 +82,13 @@ export interface RemovedEntry {
   id: string;
 }
 
-export type ChainEntry = CommentEntry | RemovedEntry;
+/** A block whose data the node sends later: the comment loads as the reader scrolls. */
+export interface PendingEntry {
+  pending: true;
+  id: string;
+}
+
+export type ChainEntry = CommentEntry | RemovedEntry | PendingEntry;
 
 export interface CommentVotes {
   likes: number;
@@ -132,7 +158,9 @@ export function checkCommentChain(
     prev = block.hash;
     const data = block.data;
     if (!data) {
-      entries.push({ removed: true, id: block.id });
+      // No data on the block: the node keeps this comment back (removed), or simply has
+      // not sent its data yet (pending — it loads as the reader scrolls).
+      entries.push(block.pending ? { pending: true, id: block.id } : { removed: true, id: block.id });
       continue;
     }
     if (data.id !== block.id) errors.push(`The data of block ${index + 1} is not about the comment its header names`);

@@ -1,7 +1,7 @@
 // Wire types of the VibeShare protocol (HTTP + JSON). Browser-safe: no Node imports.
 import type { BloomFilterData } from './bloom.js';
 import type { NodeType } from './noderef.js';
-import type { CreatorKind, Format, Rating } from './taxonomy.js';
+import type { CreatorKind, Format, Rating, SuggestLevel } from './taxonomy.js';
 
 export const PROTOCOL_VERSION = 1;
 export const SOFTWARE = 'vibeshare/0.1.0';
@@ -518,7 +518,6 @@ export interface ContentItem {
   topics: string[];
   /** The topic ids this content is filed under (each matches a topic record exactly). */
   topicIds?: string[];
-  tags: string[];
   language?: string;
   durationSeconds?: number;
   creator?: CreatorInfo;
@@ -531,6 +530,8 @@ export interface ContentItem {
   thumbnail?: string;
   /** Directly displayable media of external content (an image, an mp4…), when the platform offers it. */
   media?: ContentMedia;
+  /** The images of a list-of-images content, in the order they are shown. */
+  gallery?: ContentMedia[];
   /** The page of the content on its platform. */
   pageUrl?: string;
   /** How the algorithm node learnt about it. */
@@ -574,7 +575,6 @@ export interface Preferences {
   onlyTopics?: boolean;
   /** Topics never to show (by name or topic id). */
   blockedTopics?: string[];
-  blockedTags?: string[];
   blockedCreators?: string[];
   /** Only these creators (and group members) — a whitelist of creator ids. */
   creatorIds?: string[];
@@ -582,6 +582,24 @@ export interface Preferences {
   onlyCreators?: boolean;
   /** Only creators of these kinds (empty = all). */
   creatorKinds?: CreatorKind[];
+  /**
+   * How strongly the format, topic and creator picks below weigh in the recommendations
+   * (see SuggestLevel): "only" narrows to them, "ignore" leaves them out entirely, and the
+   * stops in between ask the node to favour them to that degree.
+   */
+  formatLevel?: SuggestLevel;
+  topicLevel?: SuggestLevel;
+  creatorLevel?: SuggestLevel;
+  /** The picks those levels refer to (they are only required at the "only show" level). */
+  preferredFormats?: Format[];
+  preferredTopics?: string[];
+  preferredCreators?: string[];
+  /** Age-rating reasons (violence, language, …) whose content to leave out entirely. */
+  disregard?: string[];
+  /** Platforms (content sources like youtube) to favour or exclude, and how strongly. */
+  preferredPlatforms?: string[];
+  blockedPlatforms?: string[];
+  platformLevel?: SuggestLevel;
   /**
    * Only these languages (codes like "en"; empty = all). Content that declares a language
    * must declare one of them; other content is kept when its title could be in one of them,
@@ -617,6 +635,11 @@ export interface SearchRequest {
   bloom?: BloomFilterData;
   /** Include preview image URLs in results (true unless explicitly false). */
   previews?: boolean;
+  /** The seed the node's non-deterministic steps draw from instead of chance. */
+  seed?: string;
+  /** The client's trace id: with the same one (and the same parameters) the node tries to
+   *  answer with the exact same results. */
+  trace?: string;
 }
 
 export interface Page<T> {
@@ -625,7 +648,7 @@ export interface Page<T> {
   total?: number;
 }
 
-export const SUGGESTION_KINDS = ['tag', 'topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate'] as const;
+export const SUGGESTION_KINDS = ['topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate'] as const;
 export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
 
 /**
@@ -871,7 +894,6 @@ export interface PeerEntry {
   format: Format;
   rating: Rating;
   topics: string[];
-  tags: string[];
   language?: string;
   durationSeconds?: number;
   creator?: CreatorInfo;
@@ -891,8 +913,8 @@ export interface PeerDiscoverCriteria {
   has?: 'any' | 'cid' | 'link' | 'both';
   /** Only content whose platform numbers (views, likes, comments…) are in these ranges. */
   metrics?: { key: string; min?: number; max?: number }[];
-  /** Content filters: formats, a rating ceiling, topics and tags. */
-  filters?: { formats?: Format[]; maxRating?: Rating; topics?: string[]; tags?: string[] };
+  /** Content filters: formats, a rating ceiling and topics. */
+  filters?: { formats?: Format[]; maxRating?: Rating; topics?: string[] };
   /** How the peer picks from what matches: its newest, its most popular, or at random. */
   algorithm?: 'new' | 'popular' | 'random';
   limit?: number;
@@ -947,6 +969,8 @@ export interface SubmissionRequest {
   tags?: string[];
   language?: string;
   durationSeconds?: number;
+  /** The images of a list-of-images content (their content ids or links), in order. */
+  gallery?: string[];
   creator?: { id?: string; name?: string; kind?: CreatorKind };
   /** data: URL of a small image (≤ 200 kB). */
   thumbnail?: string;

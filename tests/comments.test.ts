@@ -41,7 +41,7 @@ const resolved = (answer: CommentsAnswer) => {
 };
 
 const comment = (entries: ChainEntry[], text: string): CommentEntry => {
-  const found = entries.find((entry) => !('removed' in entry) && entry.text === text) as CommentEntry | undefined;
+  const found = entries.find((entry) => !('removed' in entry) && !('pending' in entry) && entry.text === text) as CommentEntry | undefined;
   assert.ok(found, `the comment "${text}" is in the chain`);
   return found!;
 };
@@ -134,7 +134,7 @@ describe('comments on a content page, as a hash chain', async () => {
     assert.equal(answer.blocks.filter((block) => block.data?.id === id).length, 0, 'the data is gone');
     const entries = resolved(answer);
     assert.ok(entries.some((entry) => 'removed' in entry), 'clients see that a comment was removed');
-    assert.equal(entries.some((entry) => !('removed' in entry) && entry.text === 'Goodbye'), false);
+    assert.equal(entries.some((entry) => !('removed' in entry) && !('pending' in entry) && entry.text === 'Goodbye'), false);
   });
 
   it('writes down only the date parts the commenter chose, and keeps anonymous comments unchangeable', async () => {
@@ -214,7 +214,7 @@ describe('the operator moderating comments', async () => {
     await admin(url, `/v1/admin/comments/${content}`, { method: 'PUT', body: { shown: true } });
     await admin(url, `/v1/admin/comments/${content}/${hiddenId}/show`, { method: 'POST', body: {} });
     const back = resolved(await asAlice.json<CommentsAnswer>(`/v1/comments/${content}`));
-    assert.deepEqual(back.map((entry) => ('removed' in entry ? 'removed' : entry.text)).sort(), ['Hide me', 'Keep me']);
+    assert.deepEqual(back.map((entry) => ('removed' in entry || 'pending' in entry ? 'removed' : entry.text)).sort(), ['Hide me', 'Keep me']);
   });
 });
 
@@ -364,7 +364,7 @@ describe('a client posting a comment and reloading the section from the node', a
     const answer = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${content}`, { auth: false });
     const chain = checkCommentChain(answer.blocks, answer.votes);
     assert.deepEqual(chain.errors, [], JSON.stringify(answer.blocks));
-    const posted = chain.entries.find((entry) => !('removed' in entry) && entry.text === 'Posted from the client') as CommentEntry | undefined;
+    const posted = chain.entries.find((entry) => !('removed' in entry) && !('pending' in entry) && entry.text === 'Posted from the client') as CommentEntry | undefined;
     assert.ok(posted, 'the posted comment is in the section the node sends back');
     assert.equal(posted.replyFrom, answer.root, 'it is a first level comment: it replies to the page root');
     assert.equal(
@@ -377,7 +377,7 @@ describe('a client posting a comment and reloading the section from the node', a
     await api(`/api/comments/${content}`, { body: { text: 'Quietly', anonymous: true, timePrecision: 'none' } });
     const withAnon = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${content}`, { auth: false });
     const anon = checkCommentChain(withAnon.blocks, withAnon.votes).entries.find(
-      (entry) => !('removed' in entry) && entry.text === 'Quietly'
+      (entry) => !('removed' in entry) && !('pending' in entry) && entry.text === 'Quietly'
     ) as CommentEntry | undefined;
     assert.ok(anon, 'the anonymous comment is there too');
     assert.equal(anon.anonymous, true);
@@ -393,7 +393,7 @@ describe('a client posting a comment and reloading the section from the node', a
     await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Top level', timePrecision: 'date' } });
     const before = await clientFor(node.url()).json<CommentsAnswer>(`/v1/comments/${encodeURIComponent(page)}`, { auth: false });
     const top = checkCommentChain(before.blocks, before.votes).entries.find(
-      (entry) => !('removed' in entry) && entry.text === 'Top level'
+      (entry) => !('removed' in entry) && !('pending' in entry) && entry.text === 'Top level'
     ) as CommentEntry;
     assert.ok(top, 'the first comment is in the section');
     assert.equal(top.replyFrom, before.root, 'a page with a link id roots its first level comments in that link');
@@ -438,6 +438,28 @@ describe('the client writing and reading comments through its daemon', async () 
     await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text: 'Fixed up ', editOf: first.id, replyFrom: first.replyFrom } });
     const answer = await api<CommentsResponse>(`/api/comments/${encodeURIComponent(page)}`);
     assert.deepEqual(checkCommentChain(answer.blocks, answer.votes).errors, [], JSON.stringify(answer.blocks));
+  });
+
+  it('sends every block header with only the first comments’ data, in the order asked for', async () => {
+    const page = 'vs1' + 'f'.repeat(52) + '~yt:orders';
+    for (const text of ['First', 'Second', 'Third']) {
+      await api(`/api/comments/${encodeURIComponent(page)}`, { body: { text, timePrecision: 'none' } });
+    }
+    // The suggested order comes back as the one the node decided on; all three headers go
+    // out at once, but only the first screen of comment data (the rest waits, pending).
+    const first = await api<CommentsResponse>(`/api/comments/${encodeURIComponent(page)}?order=newest&limit=2`);
+    assert.equal(first.order, 'newest');
+    assert.equal(first.total, 3);
+    assert.equal(first.loaded, 2);
+    assert.equal(first.blocks.length, 3, 'every block header of the chain is in the answer');
+    assert.equal(first.blocks.filter((block) => block.data).length, 2, 'only the loaded comments carry their data');
+    assert.ok(first.blocks.some((block) => block.pending), 'the others wait for the reader to scroll');
+
+    // Scrolling brings the data of the next comments, and the whole chain still verifies.
+    const more = await api<CommentsResponse>(`/api/comments/${encodeURIComponent(page)}?order=newest&limit=2&offset=2`);
+    assert.equal(more.loaded, 3);
+    assert.equal(more.blocks.filter((block) => block.data).length, 3);
+    assert.deepEqual(checkCommentChain(more.blocks, more.votes).errors, [], 'every header still links up');
   });
 });
 

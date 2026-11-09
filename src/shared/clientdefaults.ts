@@ -1,6 +1,6 @@
 // Default client settings, preset pages and helpers shared by the desktop/CLI client
 // and the static web client. Browser-safe: no Node imports.
-import type { BloomFilterSettings, PageConfig, PageFilters, PagePreset, Settings } from './clientapi.js';
+import { DEFAULT_SHORT_BUTTONS, SHORT_BUTTONS, type BloomFilterSettings, type PageConfig, type PageFilters, type PagePreset, type Settings } from './clientapi.js';
 import { BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX } from './bloom.js';
 import type { Preferences } from './protocol.js';
 import { baseLanguage } from './language.js';
@@ -40,7 +40,7 @@ export function presetPage(preset: PagePreset): PageConfig {
         filters: { ...NO_FILTERS, formats: ['short-video'] },
         thumbnail: true,
         fields: ['title', 'creator', 'likes', 'platform'],
-        options: { autoplay: true, muted: true, columns: 1, size: 'large' },
+        options: { autoplay: true, muted: false, columns: 1, size: 'large', shortsLoop: true, shortsButtonSize: 'medium', shortButtons: [...DEFAULT_SHORT_BUTTONS], shortsComments: 'cover', shortsCommentsSize: 50 },
         sidebar: true,
       };
     case 'images':
@@ -74,7 +74,7 @@ export function defaultSettings(): Settings {
     revision: SETTINGS_REVISION,
     pages: defaultPages(),
     shareBaseUrl: DEFAULT_SHARE_BASE_URL,
-    preferences: { maxRating: '16+', formats: [], topics: [], blockedTags: [], blockedCreators: [], creatorKinds: [], languages: ['en'] },
+    preferences: { maxRating: '16+', formats: [], topics: [], blockedTopics: [], blockedCreators: [], creatorKinds: [], languages: ['en'] },
     feedMode: 'blend',
     unknownContent: 'warn',
     blockExternalEmbeds: false,
@@ -95,7 +95,13 @@ export function defaultSettings(): Settings {
     theme: 'system',
     tor: { mode: 'onion', proxy: '' },
     pauseHistory: false,
-    searchHistory: true,
+    searchHistory: false,
+    watchHistory: false,
+    subscriptionOrder: 'subscribed',
+    historyPageSize: 25,
+    historyClearDays: 0,
+    toastHistory: false,
+    toastIcon: true,
     searchSuggestions: true,
     stateRefreshSeconds: 0,
     selectedBloom: { enabled: true, bits: 10_000, expected: BLOOM_EXPECTED_ITEMS },
@@ -160,6 +166,10 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   if (saved && (saved.revision ?? 1) < 2) {
     // Revision 2: titles are filtered by language, English only unless the user picked languages.
     if (!saved.preferences?.languages?.length) merged.preferences.languages = [...(base.preferences.languages ?? [])];
+    // Tags are gone from the content metadata: whatever was hidden as a tag hides as a topic.
+    merged.preferences.blockedTopics = [
+      ...new Set([...(merged.preferences.blockedTopics ?? []), ...(((saved.preferences as { blockedTags?: string[] } | undefined)?.blockedTags ?? []))]),
+    ];
   }
   // The preview filter's old hide/demote choice became the seen-content mode.
   const legacyMode = (saved?.previewBloom as { mode?: string } | undefined)?.mode;
@@ -206,6 +216,12 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   const old = merged as unknown as Record<string, unknown>;
   merged.vvshScrubWidth = Math.min(640, Math.max(80, Number(merged.vvshScrubWidth) || Number(old.vvshPreviewWidth) || 220));
   merged.historyMode = merged.historyMode === 'lazy' ? 'lazy' : 'pages';
+  merged.watchHistory = merged.watchHistory === true;
+  merged.subscriptionOrder = (['random', 'az', 'za', 'recent'] as const).includes(merged.subscriptionOrder as 'random')
+    ? merged.subscriptionOrder
+    : 'subscribed';
+  merged.historyPageSize = Math.min(200, Math.max(5, Math.round(merged.historyPageSize || 25)));
+  merged.historyClearDays = Math.min(3650, Math.max(0, Math.round(merged.historyClearDays || 0)));
   merged.debugLogs = merged.debugLogs === true;
   merged.showContentPreviews = merged.showContentPreviews !== false;
   merged.revision = SETTINGS_REVISION;
@@ -241,39 +257,64 @@ function lowerRating(a: Rating | undefined, b: Rating | undefined): Rating | und
 export function pagePreferences(preferences: Preferences, filters: Partial<PageFilters> | undefined): Preferences {
   if (!filters) return preferences;
   const out: Preferences = { ...preferences };
-  if (filters.formats?.length) out.formats = filters.formats;
-  if (filters.topics?.length) {
-    out.topics = filters.topics;
-    out.onlyTopics = Boolean(filters.onlyTopics);
+  // Formats: "only show" narrows to the picks (the classic filter), "ignore" leaves them out
+  // of the request, and the stops in between send them as a recommendation hint.
+  const formatLevel = filters.formatLevel ?? (filters.formats?.length ? 'only' : 'ignore');
+  if (filters.formats?.length && formatLevel !== 'ignore') {
+    out.preferredFormats = filters.formats;
+    out.formatLevel = formatLevel;
+    if (formatLevel === 'only') out.formats = filters.formats;
   }
   if (filters.creatorKinds?.length) out.creatorKinds = filters.creatorKinds;
-  // Creators, groups and topics a page picked with its + buttons: a whitelist narrows to
-  // them, a blacklist keeps them out. Group ids work everywhere a creator id does.
+  // Topics (by name or id): the level decides whether they are required, favoured to a
+  // degree, or left out; a blacklist always wins over the slider.
+  const topicPicks = [...(filters.topics ?? []), ...(filters.topicIds ?? [])];
+  const topicLevel = filters.topicLevel ?? (filters.onlyTopics ? 'only' : topicPicks.length ? 'suggest' : 'ignore');
+  if (topicPicks.length && topicLevel !== 'ignore') {
+    out.preferredTopics = [...new Set(topicPicks)];
+    out.topicLevel = topicLevel;
+    out.topics = [...new Set(topicPicks)];
+    if (topicLevel === 'only') out.onlyTopics = true;
+  }
+  // Creators and groups a page picked: only required or favoured at the slider's level.
+  const creatorPicks = filters.creatorIds ?? [];
+  const creatorLevel = filters.creatorLevel ?? (filters.onlyCreators ? 'only' : 'ignore');
+  if (creatorPicks.length && creatorLevel !== 'ignore') {
+    out.preferredCreators = [...new Set(creatorPicks)];
+    out.creatorLevel = creatorLevel;
+    if (creatorLevel === 'only') {
+      out.creatorIds = [...new Set([...(preferences.creatorIds ?? []), ...creatorPicks])];
+      out.onlyCreators = true;
+    }
+  }
+  // Creators, groups and topics a page picked with its + buttons: a blacklist keeps them out.
   const blocked = [...(filters.blockedCreatorIds ?? []), ...(filters.blockedTopicIds ?? [])];
   if (blocked.length) {
     out.blockedCreators = [...new Set([...(preferences.blockedCreators ?? []), ...blocked])];
     out.blockedTopics = [...new Set([...(preferences.blockedTopics ?? []), ...blocked])];
   }
-  // Whitelists stay apart: picking creators keeps their content (topics still count as a
-  // preference), picking topics requires them; picking both requires both, as the node
-  // applies its filters one after another.
-  if (filters.creatorIds?.length && filters.onlyCreators) {
-    out.creatorIds = [...new Set([...(preferences.creatorIds ?? []), ...filters.creatorIds])];
-    out.onlyCreators = true;
+  // Platforms (content sources like youtube): the level decides whether the picks are the
+  // only ones shown or favoured to a degree; a blacklist always excludes.
+  const platformPicks = filters.platforms ?? [];
+  const platformLevel = filters.platformLevel ?? 'ignore';
+  if (platformPicks.length && platformLevel !== 'ignore') {
+    out.preferredPlatforms = [...new Set(platformPicks)];
+    out.platformLevel = platformLevel;
   }
-  if (filters.topicIds?.length && filters.onlyTopicIds) {
-    out.topics = [...new Set([...(preferences.topics ?? []), ...filters.topicIds])];
-    out.onlyTopics = true;
+  if (filters.blockedPlatforms?.length) {
+    out.blockedPlatforms = [...new Set([...(preferences.blockedPlatforms ?? []), ...filters.blockedPlatforms])];
   }
+  // Content types to leave out entirely (age-rating reasons like "violence").
+  if (filters.disregard?.length) out.disregard = [...new Set([...(preferences.disregard ?? []), ...filters.disregard])];
   out.maxRating = lowerRating(preferences.maxRating, filters.maxRating);
   return out;
 }
 
-/** The link that opens a content id in a hosted web client (hash router). */
+/** The link that opens a content id in a hosted web client (normal routes). */
 export function shareLink(baseUrl: string, contentId: string, providerHint?: string): string {
-  const base = (baseUrl || DEFAULT_SHARE_BASE_URL).replace(/\/+$/, '').replace(/\/(index\.html)?#.*$/, '');
+  const base = (baseUrl || DEFAULT_SHARE_BASE_URL).replace(/#.*$/, '').replace(/\/index\.html$/, '').replace(/\/+$/, '');
   const hint = providerHint ? `?p=${encodeURIComponent(providerHint)}` : '';
-  return `${base}/#/watch/${encodeURIComponent(contentId)}${hint}`;
+  return `${base}/watch/${encodeURIComponent(contentId)}${hint}`;
 }
 
 /** A short random id for a new page. */
@@ -326,6 +367,9 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.pauseHistory = Boolean(next.pauseHistory);
   next.searchHistory = Boolean(next.searchHistory);
   next.searchSuggestions = Boolean(next.searchSuggestions);
+  // Toast messages: saved copies are off by default; the bell icon is on unless removed.
+  next.toastHistory = Boolean(next.toastHistory);
+  next.toastIcon = next.toastIcon !== false;
   // Seen-content bloom filters: the size is one of 1, 10, 100, … bits; the preview filter
   // either hides what was previewed or only pushes it down among the other previews.
   try {

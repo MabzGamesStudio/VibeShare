@@ -7,7 +7,9 @@ import { loadConfig } from './config';
 import { memoryKeyValue, openIndexedDb } from './store';
 
 export async function startInPage(): Promise<void> {
-  const base = new URL('./', location.href);
+  // The folder the client is served from — the document's base (the 404 page pins it on
+  // a deep link), never the route the client is currently on.
+  const base = new URL('./', document.baseURI);
   const config = await loadConfig(base.href);
   const kv = await openIndexedDb().catch(() => memoryKeyValue());
   const backend = await createBackend({ kv, config, appUrl: base.href, hostName: location.hostname });

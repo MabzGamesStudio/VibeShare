@@ -43,16 +43,38 @@ export function OfferLinksCard() {
   const submit = async () => {
     if (!target) return;
     const list: { cid?: string; url?: string; baseUrl?: string }[] = [];
+    // The same full URL or base URL is offered once: what the node already has and what
+    // the boxes repeat both count as duplicates.
+    const seen = new Set(
+      items.map((item) => (item.baseUrl ? `b:${item.baseUrl.replace(/\/+$/, '').toLowerCase()}` : `u:${item.cid}:${item.url}`))
+    );
+    const add = (entry: { cid?: string; url?: string; baseUrl?: string }) => {
+      const key = entry.baseUrl ? `b:${entry.baseUrl.replace(/\/+$/, '').toLowerCase()}` : `u:${entry.cid}:${entry.url}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push(entry);
+    };
+    let parsed = 0;
     for (const line of urls.split('\n')) {
       const [cid, url] = line.trim().split(/\s+/);
-      if (cid && url) list.push({ cid, url });
+      if (cid && url) {
+        parsed += 1;
+        add({ cid, url });
+      }
     }
     for (const line of bases.split('\n')) {
       const base = line.trim();
-      if (base) list.push({ baseUrl: base });
+      if (base) {
+        parsed += 1;
+        add({ baseUrl: base });
+      }
+    }
+    if (!parsed) {
+      toast('Add at least one content URL or base URL', 'error');
+      return;
     }
     if (!list.length) {
-      toast('Add at least one content URL or base URL', 'error');
+      toast('Every link you listed is already on this node — nothing to offer twice', 'info');
       return;
     }
     setBusy(true);
@@ -106,7 +128,7 @@ export function OfferLinksCard() {
         <button className="primary" disabled={busy || !target} onClick={submit}>
           <Download size={16} /> Offer links
         </button>
-        <span className="hint">Each accepted link can earn per download.</span>
+        <span className="hint">Each accepted link can earn per download. Links already on this node are never offered twice.</span>
       </div>
       {items.length > 0 && (
         <table className="table">

@@ -503,7 +503,7 @@ describe('crawler adapters for official APIs', async () => {
     assert.equal(last('api.twitter.com').headers.authorization, 'Bearer x-token');
 
     assert.equal(entry('ig:p/ABC123')!.format, 'image');
-    assert.deepEqual(entry('ig:p/ABC123')!.tags, ['aurora', 'norway']);
+    assert.deepEqual(entry('ig:p/ABC123')!.topics, ['aurora', 'norway']);
     assert.equal(entry('ig:reel/XYZ789')!.format, 'short-video');
     assert.equal(last('graph.facebook.com').query.get('user_id'), '1784');
 

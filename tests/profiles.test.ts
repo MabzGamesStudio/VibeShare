@@ -44,7 +44,7 @@ describe('client profiles', async () => {
     assert.notEqual(asWork.identity.id, initial.identity.id, 'every profile has its own client id');
 
     // Work's own settings and history.
-    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark' } });
+    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark', watchHistory: true } });
     await api('/api/history', { body: { id: 'yt:some-video', title: 'Watched at work' } });
 
     // Back to the public profile: its data is untouched.
@@ -129,7 +129,7 @@ describe('hidden profiles', async () => {
     assert.equal(open.name, 'Hidden profile');
     assert.equal(open.active, true);
 
-    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark' } });
+    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark', watchHistory: true } });
     await api('/api/history', { body: { id: 'yt:watched-in-secret', title: 'Watched in secret' } });
     await new Promise((resolve) => setTimeout(resolve, 400));
     await started.client.stop();

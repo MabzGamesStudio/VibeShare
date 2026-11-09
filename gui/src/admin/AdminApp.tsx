@@ -1227,12 +1227,13 @@ export function AdminApp() {
   const [status, setStatus] = useState<Status | null>(null);
   const [needsLogin, setNeedsLogin] = useState(!loadToken());
   // The tab lives in the URL hash: refreshing the page keeps the operator where they were.
-  const [tab, setTab] = useState(() => window.location.hash.replace(/^#/, '') || 'overview');
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('tab') || 'overview');
   const [tabMenu, setTabMenu] = useState<{ id: string; top: number; left: number } | null>(null);
   const [settingsOnly, setSettingsOnly] = useState<string | undefined>(undefined);
   useEffect(() => {
     const wanted = tab || 'overview';
-    if (window.location.hash.replace(/^#/, '') !== wanted) window.history.replaceState(null, '', `#${wanted}`);
+    const current = new URLSearchParams(window.location.search).get('tab') || 'overview';
+    if (current !== wanted) window.history.replaceState(null, '', `?tab=${wanted}`);
   }, [tab]);
 
   const load = useCallback(() => {
@@ -1272,22 +1273,20 @@ export function AdminApp() {
               ) : null}
             </>,
           ],
-          ['catalog', 'Catalog'],
+          // Catalog opens the catalog itself; its menu below also reaches the creators,
+          // groups and topics pages. A dot marks a page with something waiting.
+          [
+            'catalog',
+            <>
+              Catalog
+              {(status.pending?.groupSuggestions ?? 0) + (status.pending?.topicSuggestions ?? 0) > 0 ? <span className="tab-dot" /> : null}
+            </>,
+          ],
           ['claims', 'Claims'],
           ['peers', 'Peers'],
           ['crawler', 'Crawler'],
           ['apis', 'API keys'],
           ['sources', 'Sources'],
-          ['creators', 'Creators'],
-          // Groups and their topics: a group is a list of creators, a topic a category of
-          // content. Its menu (below) jumps between the two pages.
-          [
-            'groups',
-            <>
-              Groups & topics
-              {(status.pending?.groupSuggestions ?? 0) + (status.pending?.topicSuggestions ?? 0) > 0 ? <span className="tab-dot" /> : null}
-            </>,
-          ],
           ['comments', 'Comments'],
         ] as [string, ReactNode][])),
     ['accounts', 'Accounts'],
@@ -1320,11 +1319,12 @@ export function AdminApp() {
       </div>
       <div className="tabs">
         {tabs.map(([id, label]) =>
-          // Tabs with a hover menu below them: Review (the review pages), Content (add
-          // pages), Accounts (moderation) and Settings (the configuration groups). The
+          // Tabs with a hover menu below them: Review (the review pages), Catalog (the
+          // catalog, creators, groups and topics), Content (add pages), Accounts
+          // (moderation) and Settings (the configuration groups). The
           // menu is fixed-positioned so the scrolling tabs bar cannot clip it — it opens
           // over the content at the top.
-          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' || id === 'groups' ? (
+          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' || id === 'catalog' ? (
             <div
               key={id}
               className="tab-menu"
@@ -1340,7 +1340,7 @@ export function AdminApp() {
                   (id === 'content' && (tab === 'add-local' || tab === 'suggestions')) ||
                   (id === 'accounts' && tab === 'moderation') ||
                   (id === 'review' && tab.startsWith('review')) ||
-                  (id === 'groups' && (tab === 'groups' || tab === 'groups-topics'))
+                  (id === 'catalog' && (tab === 'creators' || tab === 'groups' || tab === 'groups-topics'))
                     ? 'on'
                     : ''
                 }`}
@@ -1385,8 +1385,10 @@ export function AdminApp() {
                       </button>
                     </>
                   )}
-                  {id === 'groups' && (
+                  {id === 'catalog' && (
                     <>
+                      <button onClick={() => (setTabMenu(null), setTab('catalog'), load())}>Catalog</button>
+                      <button onClick={() => (setTabMenu(null), setTab('creators'), load())}>Creators</button>
                       <button onClick={() => (setTabMenu(null), setTab('groups'), load())}>
                         Groups
                         {status.pending?.groupSuggestions ? <span className="tab-dot" /> : null}

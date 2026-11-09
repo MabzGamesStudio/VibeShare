@@ -12,7 +12,6 @@ import { Empty, Loading } from '../components/ui';
 import { useApp } from '../state';
 import { timeAgo, watchPath } from '../util';
 
-const PAGE = 25;
 
 /** The watched and searched histories, with how they are read built in. */
 export function HistorySection() {
@@ -21,8 +20,9 @@ export function HistorySection() {
   const [kind, setKind] = useState<'watched' | 'searches'>('watched');
   const [history, setHistory] = useState<HistoryItem[] | null>(null);
   const [searches, setSearches] = useState<SearchHistoryItem[] | null>(null);
+  const size = Math.min(200, Math.max(5, Number(state?.settings.historyPageSize) || 25));
   const [page, setPage] = useState(0);
-  const [shown, setShown] = useState(PAGE);
+  const [shown, setShown] = useState(size);
   const sentinel = useRef<HTMLDivElement | null>(null);
 
   const load = () => {
@@ -37,11 +37,11 @@ export function HistorySection() {
     const node = sentinel.current;
     if (!node) return;
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) setShown((n) => n + PAGE);
+      if (entries.some((entry) => entry.isIntersecting)) setShown((n) => n + size);
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [mode, kind, history, searches]);
+  }, [mode, kind, history, searches, size]);
 
   if (!history || !searches) return <Loading />;
 
@@ -84,28 +84,50 @@ export function HistorySection() {
           ),
         }));
 
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
-  const start = mode === 'pages' ? Math.min(page, pages - 1) * PAGE : 0;
-  const end = mode === 'pages' ? start + PAGE : Math.min(rows.length, shown);
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  const start = mode === 'pages' ? Math.min(page, pages - 1) * size : 0;
+  const end = mode === 'pages' ? start + size : Math.min(rows.length, shown);
   const shownRows = rows.slice(start, end);
   const clear = async () => {
     if (kind === 'watched') await api('/api/history', { method: 'DELETE' });
     else await api('/api/search-history', { method: 'DELETE', body: {} });
     setPage(0);
-    setShown(PAGE);
+    setShown(size);
     load();
   };
 
   return (
     <>
       <div className="row between" style={{ marginBottom: 12 }}>
-        <label className="field" style={{ marginBottom: 0 }}>
-          Show history
-          <select value={mode} onChange={(e) => void updateSettings({ historyMode: e.target.value as 'pages' | 'lazy' })}>
-            <option value="pages">By page</option>
-            <option value="lazy">As I scroll</option>
-          </select>
-        </label>
+        <div className="row" style={{ gap: 8 }}>
+          <label className="field" style={{ marginBottom: 0 }}>
+            Show history
+            <select value={mode} onChange={(e) => void updateSettings({ historyMode: e.target.value as 'pages' | 'lazy' })}>
+              <option value="pages">By page</option>
+              <option value="lazy">As I scroll</option>
+            </select>
+          </label>
+          <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+            Items per page
+            <select value={size} onChange={(e) => void updateSettings({ historyPageSize: Number(e.target.value) })}>
+              {[10, 25, 50, 100].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
+            Clear after (days)
+            <input
+              type="number"
+              min={0}
+              value={state?.settings.historyClearDays ?? 0}
+              title="Local watch and search history older than this is dropped; 0 keeps it forever"
+              onChange={(e) => void updateSettings({ historyClearDays: Math.max(0, Number(e.target.value) || 0) })}
+            />
+          </label>
+        </div>
         <div className="tabs">
           <button className={`tab ${kind === 'watched' ? 'on' : ''}`} onClick={() => setKind('watched')}>
             <HistoryIcon size={14} /> Watched
@@ -132,9 +154,18 @@ export function HistorySection() {
         <Empty
           icon={kind === 'watched' ? <HistoryIcon size={36} /> : <Search size={36} />}
           title={kind === 'watched' ? 'Nothing watched yet' : 'No searches yet'}
-        />
+        >
+          {!(kind === 'watched' ? state?.settings.watchHistory : state?.settings.searchHistory) && (
+            <button
+              className="primary"
+              onClick={() => void updateSettings(kind === 'watched' ? { watchHistory: true } : { searchHistory: true })}
+            >
+              Start logging {kind === 'watched' ? 'watched content' : 'searches'} locally
+            </button>
+          )}
+        </Empty>
       ) : (
-        <div className="card">
+        <div className="card" style={{ maxHeight: 480, overflowY: 'auto' }}>
           {shownRows.map((item) => (
             <div key={item.key} className="row between" style={{ padding: '6px 0' }}>
               {item.row}
@@ -153,6 +184,22 @@ export function HistorySection() {
           <button className="small" disabled={page >= pages - 1} onClick={() => setPage((p) => Math.min(pages - 1, p + 1))}>
             Next
           </button>
+          <label className="field row" style={{ marginBottom: 0, gap: 6, alignItems: 'center' }}>
+            <span className="tiny faint">Jump to page</span>
+            <input
+              type="number"
+              min={1}
+              max={pages}
+              style={{ width: 70 }}
+              placeholder={`${Math.min(page, pages - 1) + 1}`}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return;
+                const target = Math.min(pages, Math.max(1, Number((e.target as HTMLInputElement).value) || 1));
+                setPage(target - 1);
+                (e.target as HTMLInputElement).value = '';
+              }}
+            />
+          </label>
         </div>
       )}
     </>

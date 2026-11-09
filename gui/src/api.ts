@@ -5,7 +5,7 @@
 
 import type { NodeEntry } from '../../src/shared/clientapi';
 
-/** True in the static web build (hash router, backend in the browser). */
+/** True in the static web build (normal routes, backend in the browser). */
 export const IS_STATIC = __VIBESHARE_WEB__;
 
 type LocalHandler = (request: Request) => Promise<Response>;
@@ -16,7 +16,7 @@ export function setLocalHandler(handler: LocalHandler | null): void {
   localHandler = handler;
 }
 
-/** API and stream paths: absolute for the daemon, relative to the page in the static build. */
+/** API and stream paths: absolute for the daemon, relative to the app folder in the static build (the document's base is that folder). */
 export function resolvePath(path: string): string {
   return IS_STATIC ? path.replace(/^\//, '') : path;
 }

@@ -1,22 +1,11 @@
-import { Download, ExternalLink, Globe, Save, Trash2, Upload } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Download, Eye, EyeOff, ExternalLink, Globe, Save, Upload } from 'lucide-react';
+import { Fragment, useEffect, useState } from 'react';
 import { api, errorMessage, streamUrl } from '../api';
-import { OfferLinksCard } from '../components/OfferLinks';
-import { CodeBox, Switch } from '../components/ui';
+import { CodeBox } from '../components/ui';
+import { downloadBlob } from '../qr';
 import { useApp } from '../state';
-import {
-  HOSTING_PLATFORMS,
-  contentUrl,
-  hostingPlatform,
-  loadDrafts,
-  loadHosts,
-  newHostId,
-  pushHostedContent,
-  saveDrafts,
-  saveHosts,
-  type HostConfig,
-  type HostDraft,
-} from './hosting';
+import { baseKey, checkAccess, checkCids, checkFilled, checkSite, offerHost, type CheckResult } from './checks';
+import { buildZip, DUMMY_CID, HOSTING_PLATFORMS, contentUrl, hostingPlatform, loadDrafts, loadHosts, newHostId, platformGuide, pushHostedContent, recordUrlJobs, saveDrafts, saveHosts, type HostConfig, type HostDraft, type HostingField, type HostingStep } from './hosting';
 
 /** The platform setup as a guided flow: one step per screen instead of all at once. */
 const PLATFORM_STEPS: [string, string][] = [
@@ -24,7 +13,123 @@ const PLATFORM_STEPS: [string, string][] = [
   ['access', '2. Access details'],
   ['url', '3. Base URL & content ids'],
   ['save', '4. Save & offer'],
+  ['review', '5. Review'],
 ];
+
+/** Copy values may name a field (`<site>`): the current answer shows instead of the token. */
+function substitute(text: string, values: Record<string, string>): string {
+  return text.replace(/<([a-zA-Z][\w-]*)>/g, (whole, id: string) => (values[id] ?? '').trim() || whole);
+}
+
+/** One platform field: its label, its input — and an eye to show or hide a secret value. */
+function FieldInput({ field, value, onChange }: { field: HostingField; value: string; onChange: (value: string) => void }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <label className="field" style={{ marginBottom: 0 }}>
+      {field.label}
+      <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+        <input
+          type={field.secret && !shown ? 'password' : 'text'}
+          value={value}
+          placeholder={field.placeholder}
+          autoComplete={field.secret ? 'off' : undefined}
+          style={{ flex: 1 }}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        {field.secret && (
+          <button
+            type="button"
+            className="small"
+            title={shown ? 'Hide the token' : 'Show the token'}
+            aria-label={shown ? 'Hide the token' : 'Show the token'}
+            onClick={() => setShown((on) => !on)}
+          >
+            {shown ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+        )}
+      </span>
+      {field.hint && <span className="hint">{field.hint}</span>}
+    </label>
+  );
+}
+
+/** Downloads the starter folder a step hands out (a zip of its files). */
+function downloadZip(action: { zip: string; entries: { path: string; text: string }[] }) {
+  const zip = buildZip(action.entries);
+  downloadBlob(new Blob([zip as unknown as BlobPart], { type: 'application/zip' }), action.zip);
+}
+
+/**
+ * One setup step as a card: the ordered lines, the values to copy, the links, the field
+ * inputs this step fills in — and the check the reader ticks off at the end.
+ */
+function StepCard({
+  step,
+  number,
+  total,
+  done,
+  onToggle,
+  fields,
+  values,
+  onField,
+}: {
+  step: HostingStep;
+  number: number;
+  total: number;
+  done: boolean;
+  onToggle: () => void;
+  fields: HostingField[];
+  values: Record<string, string>;
+  onField: (id: string, value: string) => void;
+}) {
+  const mine = (step.fields ?? [])
+    .map((id) => fields.find((field) => field.id === id))
+    .filter((field): field is HostingField => Boolean(field));
+  const action = step.download;
+  return (
+    <div className="card form-stack" style={{ padding: 12 }}>
+      <div className="row between">
+        <strong>
+          {number}. {step.title}
+        </strong>
+        <span className="hint">{done ? '✓ Done' : `Step ${number} of ${total}`}</span>
+      </div>
+      <ol className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
+        {step.lines.map((line, index) => (
+          <li key={index}>{line}</li>
+        ))}
+      </ol>
+      {step.links?.map((link) => (
+        <a key={link.url} className="link small" href={link.url} target="_blank" rel="noreferrer">
+          {link.label} <ExternalLink size={12} />
+        </a>
+      ))}
+      {step.copies?.map((copy) => (
+        <div key={copy.label} className="field" style={{ marginBottom: 0 }}>
+          <span className="hint">{copy.label}</span>
+          <CodeBox text={substitute(copy.value, values)} />
+        </div>
+      ))}
+      {action && (
+        <div className="row">
+          <button className="small" onClick={() => downloadZip(action)}>
+            <Download size={13} /> {action.label}
+          </button>
+        </div>
+      )}
+      {mine.map((field) => (
+        <FieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => onField(field.id, value)} />
+      ))}
+      <label className="row small" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+        <input type="checkbox" checked={done} onChange={onToggle} />
+        <span>
+          {done ? '✓ You have: ' : 'Check: '}
+          {step.check}
+        </span>
+      </label>
+    </div>
+  );
+}
 
 /**
  * The provider jobs tab: configure base URLs on free static hosting platforms. Each
@@ -42,9 +147,6 @@ export function ProviderJobsTab() {
   // closing the page keeps all of it.
   const [drafts, setDrafts] = useState<Record<string, HostDraft>>(() => loadDrafts());
   useEffect(() => saveDrafts(drafts), [drafts]);
-  const [pushHostId, setPushHostId] = useState('');
-  const [pushCid, setPushCid] = useState('');
-  const [pushFile, setPushFile] = useState<File | null>(null);
   const [pushing, setPushing] = useState(false);
   // Provider jobs to host: the wizard fetches a job's content id from a provider here.
   const [jobNode, setJobNode] = useState('');
@@ -60,6 +162,104 @@ export function ProviderJobsTab() {
   };
   const edited = Boolean(draft.baseUrl);
   const baseUrl = (draft.baseUrl || platform.buildBaseUrl(values)).trim();
+  // The steps behind tabs 2–4: where the access details come from, how this platform
+  // serves <base>/<cid>, and what saving and offering it does.
+  const guide = platformGuide(platform.id);
+  /** Fields no access step asks for, so nothing of the platform disappears from the form. */
+  const covered = new Set(guide.access.flatMap((instruction) => instruction.fields ?? []));
+  const leftoverFields = platform.fields.filter((field) => !covered.has(field.id));
+  /**
+   * Which steps of a group are ticked. Older saved drafts hold a plain array (the
+   * account steps only), so both shapes are read.
+   */
+  const ticked = (group: string, index: number): boolean => {
+    const stored: unknown = draft.done;
+    if (Array.isArray(stored)) return group === 'account' && Boolean(stored[index]);
+    return Boolean((stored as Record<string, boolean[]> | undefined)?.[group]?.[index]);
+  };
+  const toggle = (group: string, index: number) => {
+    const stored: unknown = draft.done;
+    const legacy = Array.isArray(stored) ? { account: stored as boolean[] } : (stored as Record<string, boolean[]> | undefined);
+    const current = [...(legacy?.[group] ?? [])];
+    current[index] = !current[index];
+    update({ done: { ...legacy, [group]: current } });
+  };
+  /** A group of steps as cards, each with its own check, in one list. */
+  const stepCards = (group: string, steps: HostingStep[], after?: (index: number) => React.ReactNode) => (
+    <div className="form-stack">
+      {steps.map((instruction, index) => (
+        <Fragment key={index}>
+          <StepCard
+            step={instruction}
+            number={index + 1}
+            total={steps.length}
+            done={ticked(group, index)}
+            onToggle={() => toggle(group, index)}
+            fields={platform.fields}
+            values={values}
+            onField={(id, value) => update({ values: { ...values, [id]: value } })}
+          />
+          {after?.(index)}
+        </Fragment>
+      ))}
+      {steps.every((_, index) => ticked(group, index)) && <p className="small">✓ Every step in this tab is ticked — you have what it asks for.</p>}
+    </div>
+  );
+  // "Check this step": what each panel promises, verified for real. The reachability
+  // checks go through the daemon; the write test talks to the platform itself.
+  const [checking, setChecking] = useState<string | null>(null);
+  const [result, setResult] = useState<CheckResult | null>(null);
+  useEffect(() => {
+    setResult(null);
+    setChecking(null);
+  }, [step, platformId]);
+  // Panel 1 promises the site itself is up — its root, even before the content folder exists.
+  const siteUrl = platform.buildSiteUrl ? platform.buildSiteUrl(values) : baseUrl;
+  const stepsOf = (group: string): HostingStep[] =>
+    group === 'account' ? platform.steps : group === 'access' ? guide.access : group === 'url' ? guide.url : guide.save;
+  // "Next" stays disabled until every step of the current tab is ticked off (hover it to
+  // see why); the step tabs at the top still let the reader jump ahead by hand.
+  const currentGroup = PLATFORM_STEPS[step][0];
+  const allChecked = currentGroup === 'review' || stepsOf(currentGroup).every((_, index) => ticked(currentGroup, index));
+  const runCheck = async (kind: 'site' | 'access' | 'filled' | 'final') => {
+    setChecking(kind);
+    setResult(null);
+    try {
+      const cids = [draft.cid, ...jobItems.map((item) => item.cid)];
+      const answer =
+        kind === 'site'
+          ? await checkSite(siteUrl)
+          : kind === 'access'
+            ? await checkAccess(platform.id, values)
+            : kind === 'filled'
+              ? checkFilled(platform.fields, values, baseUrl, draft.cid)
+              : (await checkSite(baseUrl)).ok
+                ? await checkCids(baseUrl, cids)
+                : await checkSite(baseUrl);
+      setResult(answer);
+    } finally {
+      setChecking(null);
+    }
+  };
+  /** The button every panel ends with, and the answer it printed — below it, green or red. */
+  const checkRow = (kind: 'site' | 'access' | 'filled' | 'final', label = 'Check this step') => (
+    <div className="form-stack" style={{ gap: 6 }}>
+      <div className="row">
+        <button className="small" disabled={checking !== null} onClick={() => void runCheck(kind)}>
+          {checking === kind ? 'Checking…' : label}
+        </button>
+      </div>
+      {result && <span className={`small ${result.ok ? 'check-ok' : 'check-bad'}`}>{result.message}</span>}
+    </div>
+  );
+  /** Shown at the top of a panel whose own steps are all ticked off. */
+  const completeBanner = (group: string) =>
+    platform.steps.length > 0 &&
+    (group === 'account' ? platform.steps : group === 'access' ? guide.access : group === 'url' ? guide.url : guide.save).every((_, index) =>
+      ticked(group, index)
+    ) ? (
+      <div className="banner info small">This step appears to be complete — move on to the next step unless you want to change anything.</div>
+    ) : null;
 
   const commit = (list: HostConfig[]) => {
     setHosts(list);
@@ -80,7 +280,10 @@ export function ProviderJobsTab() {
       autoPush: false,
       createdAt: new Date().toISOString(),
     };
-    commit([...hosts, host]);
+    // The same base URL is saved once: saving it again updates that entry in place.
+    const key = baseKey(host.baseUrl);
+    const existing = hosts.find((entry) => baseKey(entry.baseUrl) === key);
+    commit(existing ? hosts.map((entry) => (entry.id === existing.id ? { ...host, id: entry.id, createdAt: entry.createdAt } : entry)) : [...hosts, host]);
     update({ label: '' });
     toast(`Saved ${host.label}`, 'success');
     return host;
@@ -92,45 +295,12 @@ export function ProviderJobsTab() {
       return;
     }
     try {
-      for (const node of providers) {
-        await api(`/api/nodes/${node.id}/content-urls`, { method: 'POST', body: { items: [{ baseUrl: host.baseUrl }] } });
-      }
-      toast(`Offered ${host.baseUrl} to ${providers.length} provider node${providers.length === 1 ? '' : 's'}`, 'success');
+      // The node's own list is asked first, so the same base URL is never offered twice.
+      const who = await offerHost(providers, host);
+      toast(who ? `Offered ${host.baseUrl} to ${who}` : `${host.baseUrl} was already offered — nothing to offer twice`, who ? 'success' : 'info');
     } catch (e) {
       toast(errorMessage(e), 'error');
     }
-  };
-
-  const push = async () => {
-    const host = hosts.find((h) => h.id === pushHostId) ?? hosts[0];
-    if (!host) {
-      toast('Save a host first', 'error');
-      return;
-    }
-    const id = pushCid.trim();
-    if (!id && !pushFile) {
-      toast('Give a content id or pick a file', 'error');
-      return;
-    }
-    setPushing(true);
-    try {
-      let data: Uint8Array;
-      if (pushFile) data = new Uint8Array(await pushFile.arrayBuffer());
-      else {
-        const response = await fetch(streamUrl(id, true));
-        if (!response.ok) throw new Error(`Could not download ${id} from your providers`);
-        data = new Uint8Array(await response.arrayBuffer());
-      }
-      const result = await pushHostedContent(host, id || pushFile!.name, data);
-      toast(result.message, result.ok ? 'success' : 'info');
-      if (result.ok) {
-        setPushCid('');
-        setPushFile(null);
-      }
-    } catch (e) {
-      toast(errorMessage(e), 'error');
-    }
-    setPushing(false);
   };
 
   /** Saves the host and pushes the fetched job's content id to it with the access key. */
@@ -149,6 +319,20 @@ export function ProviderJobsTab() {
       const data = new Uint8Array(await response.arrayBuffer());
       const result = await pushHostedContent(host, cid, data);
       toast(result.message, result.ok ? 'success' : 'info');
+      if (result.ok) {
+        // The job is now a URL job: created here by hand, hosted at this URL, nothing local.
+        recordUrlJobs([
+          {
+            id: `j-${Math.random().toString(36).slice(2, 10)}`,
+            cid,
+            title: jobItems.find((entry) => entry.cid === cid)?.title,
+            source: providers.find((node) => node.id === jobNode)?.name ?? 'your provider',
+            hosts: [host.label],
+            url: contentUrl(host.baseUrl, cid),
+            at: new Date().toISOString(),
+          },
+        ]);
+      }
     } catch (e) {
       toast(errorMessage(e), 'error');
     } finally {
@@ -156,6 +340,150 @@ export function ProviderJobsTab() {
     }
   };
 
+  // The same fields and buttons in several places — under their own step, in the review
+  // tab, and at the bottom of the page. One state backs them all, so every copy of a
+  // field or a button is always in sync with the others.
+  const baseUrlField = (
+    <label className="field">
+      Base URL
+      <input
+        type="text"
+        className="mono"
+        value={baseUrl}
+        placeholder="https://you.example/baseUrl/"
+        onChange={(e) => update({ baseUrl: e.target.value })}
+      />
+      <span className="hint">
+        Built from the fields above; edit it if the platform shows a different URL.{' '}
+        {edited && (
+          <button type="button" className="small" onClick={() => update({ baseUrl: '' })}>
+            Suggest from fields
+          </button>
+        )}
+      </span>
+    </label>
+  );
+  const nameField = (
+    <label className="field">
+      Name this host
+      <input type="text" value={draft.label} placeholder={platform.name} onChange={(e) => update({ label: e.target.value })} />
+    </label>
+  );
+  const saveOfferButton = (
+    <div className="row">
+      <button
+        className="primary small"
+        disabled={!/^https?:\/\//.test(baseUrl)}
+        onClick={() => {
+          const host = save();
+          if (host) void offer(host);
+        }}
+      >
+        <Save size={14} /> Save this host and offer it to your provider nodes
+      </button>
+      <span className="hint">Saves the host on this device and gives its base URL to every provider node you have.</span>
+    </div>
+  );
+  const publishButton = (
+    <div className="form-stack" style={{ gap: 6 }}>
+      <div className="row">
+        <button className="primary small" disabled={pushing || !draft.cid.trim()} onClick={() => void publishJob()}>
+          <Upload size={14} /> Publish the job's content id to this host & save
+        </button>
+        <span className="hint">Downloads the content id from your providers and pushes it to the site with the access key.</span>
+      </div>
+      <span className="hint">It might take a few minutes for the content to become available.</span>
+    </div>
+  );
+  const cidBlock = (
+    <>
+      {/^https?:\/\//.test(baseUrl) && (
+        <label className="field">
+          Content id
+          <input type="text" className="mono" value={draft.cid} placeholder="vs1… or a source id" onChange={(e) => update({ cid: e.target.value })} />
+          <span className="hint">Appended to the base URL automatically — this is the URL providers download from.</span>
+          <CodeBox text={contentUrl(baseUrl, draft.cid.trim() || '<content-id>')} />
+        </label>
+      )}
+
+      <div className="field">
+        <span>From a provider job — fetch a content id to host</span>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
+            Content provider
+            <select value={jobNode || providers[0]?.id || ''} onChange={(e) => setJobNode(e.target.value)}>
+              {providers.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="small"
+            disabled={!providers.length}
+            onClick={async () => {
+              const node = jobNode || providers[0]?.id;
+              if (!node) return;
+              try {
+                const answer = await api<{ items: { cid: string; title?: string; source: string }[] }>(`/api/nodes/${node}/storage-jobs`);
+                // A job's content id is only accepted when an algorithm search node knows it.
+                const ids = (answer.items ?? []).map((item) => item.cid);
+                const { known } = ids.length
+                  ? await api<{ known: Record<string, boolean> }>('/api/lookup', { body: { ids } })
+                  : { known: {} as Record<string, boolean> };
+                const items = (answer.items ?? []).filter((item) => known[item.cid]);
+                setJobItems(items);
+                if (items.length) update({ cid: items[0].cid });
+                // No jobs on that node is not a dead end: the default article's id is always here.
+                else update({ cid: DUMMY_CID });
+                toast(
+                  items.length
+                    ? `Found ${items.length} job content id${items.length === 1 ? '' : 's'} the search nodes know`
+                    : answer.items?.length
+                      ? 'That provider has open jobs, but no algorithm search node knows their content ids — none of them accepted'
+                      : 'No jobs found on that provider — using the default article describing VibeShare instead',
+                  items.length ? 'success' : 'info'
+                );
+              } catch (e) {
+                toast(errorMessage(e), 'error');
+              }
+            }}
+          >
+            <Download size={13} /> Fetch job content ids
+          </button>
+          {jobItems.length > 0 && (
+            <label className="field" style={{ marginBottom: 0, minWidth: 220 }}>
+              Job content id
+              <select value={draft.cid} onChange={(e) => update({ cid: e.target.value })}>
+                {jobItems.map((item) => (
+                  <option key={item.cid} value={item.cid}>
+                    {(item.title ?? item.cid.slice(0, 20) + '…') + ` — ${item.source}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        <span className="hint">
+          The provider's jobs name the content they want hosted — fetch one and its content id fills in above. "Publish" then pushes those
+          bytes to this host with the access key and saves it.
+        </span>
+      </div>
+
+      <div className="field">
+        <span className="hint">
+          No job handy? Use the default article describing VibeShare — its content id is stored in this app, so there is nothing to find:
+        </span>
+        <CodeBox text={DUMMY_CID} />
+        <div className="row">
+          <button className="small" onClick={() => update({ cid: DUMMY_CID })}>
+            Use this content id
+          </button>
+        </div>
+      </div>
+    </>
+  );
   return (
     <>
       <div className="card form-stack">
@@ -202,6 +530,7 @@ export function ProviderJobsTab() {
 
         {step === 0 && (
           <>
+            {completeBanner('account')}
             <p className="small muted">{platform.about}</p>
             <div className="row">
               <a className="link small" href={platform.signup} target="_blank" rel="noreferrer">
@@ -210,133 +539,107 @@ export function ProviderJobsTab() {
               <a className="link small" href={platform.docs} target="_blank" rel="noreferrer">
                 Docs <ExternalLink size={12} />
               </a>
+              <button className="small" title="Forget which steps are ticked" onClick={() => update({ done: {} })}>
+                Reset checks
+              </button>
             </div>
-            <ol className="small muted">
-              {platform.steps.map((instruction, i) => (
-                <li key={i}>{instruction}</li>
-              ))}
-            </ol>
+            <p className="hint">
+              One step at a time: read it, click or copy what it says, then tick the check at the end. When every check is ticked, the site is
+              serving files and you can go to the next step of this panel.
+            </p>
+            {stepCards('account', platform.steps)}
+            {checkRow('site')}
           </>
         )}
 
         {step === 1 && (
-        <div className="form-grid">
-          {platform.fields.map((field) => (
-            <label key={field.id} className="field">
-              {field.label}
-              <input
-                type={field.secret ? 'password' : 'text'}
-                value={values[field.id] ?? ''}
-                placeholder={field.placeholder}
-                autoComplete={field.secret ? 'off' : undefined}
-                onChange={(e) => update({ values: { ...values, [field.id]: e.target.value } })}
-              />
-              {field.hint && <span className="hint">{field.hint}</span>}
-            </label>
-          ))}
-        </div>
+          <>
+            {completeBanner('access')}
+            <p className="hint">
+              Copy what a step gives you and paste it into the field inside that same step: every answer this platform needs sits in one of the
+              steps below — nothing to hunt for.
+            </p>
+            {stepCards('access', guide.access)}
+            {leftoverFields.length > 0 && (
+              <div className="form-grid">
+                {leftoverFields.map((field) => (
+                  <FieldInput
+                    key={field.id}
+                    field={field}
+                    value={values[field.id] ?? ''}
+                    onChange={(value) => update({ values: { ...values, [field.id]: value } })}
+                  />
+                ))}
+              </div>
+            )}
+            {checkRow('access')}
+          </>
         )}
 
         {step === 2 && (
           <>
-        <label className="field">
-          Base URL
-          <input
-            type="text"
-            className="mono"
-            value={baseUrl}
-            placeholder="https://you.example/baseUrl/"
-            onChange={(e) => update({ baseUrl: e.target.value })}
-          />
-          <span className="hint">
-            Built from the fields above; edit it if the platform shows a different URL.{' '}
-            {edited && (
-              <button type="button" className="small" onClick={() => update({ baseUrl: '' })}>
-                Suggest from fields
-              </button>
-            )}
-          </span>
-        </label>
-
-        {/^https?:\/\//.test(baseUrl) && (
-          <label className="field">
-            Content id
-            <input type="text" className="mono" value={draft.cid} placeholder="vs1… or a source id" onChange={(e) => update({ cid: e.target.value })} />
-            <span className="hint">Appended to the base URL automatically — this is the URL providers download from.</span>
-            <CodeBox text={contentUrl(baseUrl, draft.cid.trim() || '<content-id>')} />
-          </label>
-        )}
-
-        <div className="field">
-          <span>From a provider job — fetch a content id to host</span>
-          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
-              Content provider
-              <select value={jobNode || providers[0]?.id || ''} onChange={(e) => setJobNode(e.target.value)}>
-                {providers.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className="small"
-              disabled={!providers.length}
-              onClick={async () => {
-                const node = jobNode || providers[0]?.id;
-                if (!node) return;
-                try {
-                  const answer = await api<{ items: { cid: string; title?: string; source: string }[] }>(`/api/nodes/${node}/storage-jobs`);
-                  setJobItems(answer.items ?? []);
-                  if (answer.items?.length) update({ cid: answer.items[0].cid });
-                  toast(answer.items?.length ? `Found ${answer.items.length} job content id${answer.items.length === 1 ? '' : 's'}` : 'No jobs found on that provider', answer.items?.length ? 'success' : 'info');
-                } catch (e) {
-                  toast(errorMessage(e), 'error');
-                }
-              }}
-            >
-              <Download size={13} /> Fetch job content ids
-            </button>
-            {jobItems.length > 0 && (
-              <label className="field" style={{ marginBottom: 0, minWidth: 220 }}>
-                Job content id
-                <select value={draft.cid} onChange={(e) => update({ cid: e.target.value })}>
-                  {jobItems.map((item) => (
-                    <option key={item.cid} value={item.cid}>
-                      {(item.title ?? item.cid.slice(0, 20) + '…') + ` — ${item.source}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </div>
-          <span className="hint">
-            The provider's jobs name the content they want hosted — fetch one and its content id fills in above. "Publish" then pushes
-            those bytes to this host with the access key and saves it.
-          </span>
-        </div>
+            {completeBanner('url')}
+            {stepCards('url', guide.url, (index) => (index === 0 ? baseUrlField : null))}
+            {cidBlock}
+            {checkRow('filled')}
           </>
         )}
 
         {step === 3 && (
           <>
-            <label className="field">
-              Name this host
-              <input type="text" value={draft.label} placeholder={platform.name} onChange={(e) => update({ label: e.target.value })} />
-            </label>
+            {completeBanner('save')}
+            {stepCards('save', guide.save, (index) =>
+              index === 0 ? (
+                <>
+                  {nameField}
+                  {saveOfferButton}
+                </>
+              ) : (
+                publishButton
+              )
+            )}
             <p className="small muted">
               Saving keeps the base URL and its access details on this device. Then offer it to your provider nodes — they query{' '}
-              <code>&lt;base&gt;/&lt;cid&gt;</code> for any content id and pay per download from it. Pushing job data to the site is in
-              “Push job data to a host” below.
+              <code>&lt;base&gt;/&lt;cid&gt;</code> for any content id and pay per download from it. Pushing more content later lives in
+              <em> the URL jobs card under Provider nodes</em>.
             </p>
-            {/^https?:\/\//.test(baseUrl) && <CodeBox text={baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`} />}
-            <div className="row">
-              <button className="primary small" disabled={pushing || !draft.cid.trim()} onClick={() => void publishJob()}>
-                <Upload size={14} /> Publish the job's content id to this host & save
-              </button>
-              <span className="hint">Downloads the content id from your providers and pushes it to the site with the access key.</span>
+            {checkRow('final')}
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <p className="hint">
+              Everything this platform needs on one screen — the same fields and buttons as the tabs before, in one place.
+            </p>
+            <div className="form-stack">
+              {guide.access
+                .flatMap((instruction) => instruction.copies ?? [])
+                .map((copy) => (
+                  <div key={copy.label} className="field" style={{ marginBottom: 0 }}>
+                    <span className="hint">{copy.label === 'Token name' ? 'Access token name' : copy.label}</span>
+                    <CodeBox text={substitute(copy.value, values)} />
+                  </div>
+                ))}
+              {platform.fields.map((field) => (
+                <FieldInput
+                  key={field.id}
+                  field={field}
+                  value={values[field.id] ?? ''}
+                  onChange={(value) => update({ values: { ...values, [field.id]: value } })}
+                />
+              ))}
+              <div className="field" style={{ marginBottom: 0 }}>
+                <span className="hint">Site url</span>
+                <CodeBox text={siteUrl} />
+              </div>
+              {baseUrlField}
+              {cidBlock}
+              {nameField}
+              {saveOfferButton}
+              {publishButton}
             </div>
+            {checkRow('final', 'Check the file hosting status')}
           </>
         )}
 
@@ -345,7 +648,12 @@ export function ProviderJobsTab() {
             ← Back
           </button>
           {step < PLATFORM_STEPS.length - 1 ? (
-            <button className="primary small" onClick={() => setStep(step + 1)}>
+            <button
+              className="primary small"
+              disabled={!allChecked}
+              title={allChecked ? undefined : 'All steps must be checked to continue'}
+              onClick={() => setStep(step + 1)}
+            >
               Next →
             </button>
           ) : (
@@ -355,125 +663,9 @@ export function ProviderJobsTab() {
           )}
           <span className="hint">Access tokens stay on this device only.</span>
         </div>
+
       </div>
 
-      <div className="card form-stack">
-        <div className="row">
-          <Download size={22} />
-          <div>
-            <h2>Your base URLs</h2>
-            <p className="small muted">
-              Saved hosts offer their base URL to your provider nodes — the nodes then query <code>&lt;base&gt;/&lt;cid&gt;</code> for any
-              content id and pay per download from it.
-            </p>
-          </div>
-        </div>
-        {hosts.length === 0 ? (
-          <p className="small muted">Nothing saved yet — configure a platform above and save it.</p>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Host</th>
-                <th>Base URL</th>
-                <th>Auto-push</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {hosts.map((host) => (
-                <tr key={host.id}>
-                  <td className="small">
-                    {host.label}
-                    <div className="tiny faint">{hostingPlatform(host.platform).name}</div>
-                  </td>
-                  <td className="small mono">{host.baseUrl}</td>
-                  <td>
-                    <Switch
-                      checked={host.autoPush}
-                      onChange={(autoPush) => commit(hosts.map((h) => (h.id === host.id ? { ...h, autoPush } : h)))}
-                      label={<span className="tiny">skeleton</span>}
-                    />
-                  </td>
-                  <td>
-                    <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-                      <button className="small" onClick={() => void offer(host)}>
-                        Offer to providers
-                      </button>
-                      <button
-                        className="small"
-                        onClick={() => {
-                          setPushHostId(host.id);
-                          setPushCid(draft.cid.trim());
-                        }}
-                      >
-                        <Upload size={13} /> Push content
-                      </button>
-                      <button
-                        className="small"
-                        aria-label={`Remove ${host.label}`}
-                        onClick={() => commit(hosts.filter((h) => h.id !== host.id))}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <div className="card form-stack">
-        <div className="row">
-          <Upload size={22} />
-          <div>
-            <h2>Push job data to a host</h2>
-            <p className="small muted">
-              Takes a content id (downloaded from your providers) or a picked file and pushes it to the host at{' '}
-              <code>&lt;folder&gt;/&lt;cid&gt;</code>, so the site serves it under the base URL. GitHub Pages is wired up end to end; the
-              other platforms are skeletons whose tabs say which call their pipeline makes. Automatically taking every provider job and
-              pushing it runs in the client daemon and is a skeleton here.
-            </p>
-          </div>
-        </div>
-        <div className="form-grid">
-          <label className="field">
-            Host
-            <select value={pushHostId || hosts[0]?.id || ''} onChange={(e) => setPushHostId(e.target.value)}>
-              {hosts.map((host) => (
-                <option key={host.id} value={host.id}>
-                  {host.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            Content id
-            <input type="text" className="mono" value={pushCid} placeholder="vs1…" onChange={(e) => setPushCid(e.target.value)} />
-          </label>
-          <label className="field">
-            Or a file to push
-            <input
-              type="file"
-              onChange={(e) => {
-                setPushFile(e.target.files?.[0] ?? null);
-                if (e.target.files?.[0]) setPushCid('');
-              }}
-            />
-          </label>
-        </div>
-        <div className="row">
-          <button className="primary" disabled={pushing || hosts.length === 0} onClick={() => void push()}>
-            <Upload size={16} /> {pushing ? 'Pushing…' : 'Push now'}
-          </button>
-          <span className="hint">Each pushed id becomes &lt;base&gt;/&lt;cid&gt; on the site.</span>
-        </div>
-      </div>
-
-      <div style={{ height: 16 }} />
-      <OfferLinksCard />
     </>
   );
 }

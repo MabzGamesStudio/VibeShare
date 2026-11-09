@@ -1,6 +1,6 @@
 // What a client keeps, independent of where it keeps it: files for the desktop and
 // command-line client, IndexedDB for the web client. Browser-safe.
-import type { HistoryItem, LibraryItem, NodeEntry, SavedState, SearchHistoryItem, Settings, Subscription } from '../shared/clientapi.js';
+import type { HistoryItem, LibraryItem, NodeEntry, SavedState, SearchHistoryItem, Settings, Subscription, ToastMessage } from '../shared/clientapi.js';
 import type { BloomFilterData } from '../shared/bloom.js';
 import { defaultSettings } from '../shared/clientdefaults.js';
 import type { Identity } from '../shared/crypto.js';
@@ -51,6 +51,8 @@ export interface ProfileRecord {
   saved: SavedState;
   /** The profile's search history (what the search bar suggests from). */
   searchHistory: SearchHistoryItem[];
+  /** The profile's saved toast messages (kept only while the user wants it). */
+  toasts: ToastMessage[];
   /** The profile's bloom filters of seen content. */
   blooms: BloomData;
 }
@@ -66,6 +68,8 @@ export interface ProfilePayload {
   history: HistoryItem[];
   saved: SavedState;
   searchHistory: SearchHistoryItem[];
+  /** Saved toast messages (only kept while the user has that on). */
+  toasts: ToastMessage[];
   blooms: BloomData;
 }
 
@@ -80,6 +84,8 @@ export interface ClientData {
   saved: SavedState;
   /** The active profile's search history (what the search bar suggests from). */
   searchHistory: SearchHistoryItem[];
+  /** The active profile's saved toast messages (kept only while the user wants it). */
+  toasts: ToastMessage[];
   /** The active profile's bloom filters of seen content. */
   blooms: BloomData;
   /** Every profile of this client. Empty = the implicit single profile. */
@@ -97,6 +103,7 @@ export function emptyClientData(): ClientData {
     history: [],
     saved: emptySavedState(),
     searchHistory: [],
+    toasts: [],
     blooms: {},
     profiles: [],
     activeProfile: 'main',
@@ -120,6 +127,7 @@ export function prepareClientSave(data: ClientData): ClientData {
     history: hiddenActive ? [] : data.history,
     saved: hiddenActive ? emptySavedState() : (data.saved ?? emptySavedState()),
     searchHistory: hiddenActive ? [] : (data.searchHistory ?? []),
+    toasts: hiddenActive ? [] : (data.toasts ?? []),
     blooms: hiddenActive ? {} : data.blooms,
     profiles: (data.profiles ?? []).map((profile) =>
       profile.hidden
@@ -134,6 +142,7 @@ export function prepareClientSave(data: ClientData): ClientData {
             history: [],
             saved: emptySavedState(),
             searchHistory: [],
+            toasts: [],
             blooms: {},
           }
         : profile

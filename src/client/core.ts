@@ -18,7 +18,7 @@ import type {
   Subscription,
   TopicView,
 } from '../shared/clientapi.js';
-import type { BloomStatus, CommentPostRequest, CommentsResponse, SavedState, SearchHistoryItem } from '../shared/clientapi.js';
+import type { BloomStatus, CommentPostRequest, CommentsResponse, SavedState, SearchHistoryItem, ToastMessage } from '../shared/clientapi.js';
 import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
@@ -47,6 +47,8 @@ import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest
 import { assembleVvshWebm, DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
 import type { CreatorKind } from '../shared/taxonomy.js';
+import { conflictsWithDisregard } from '../shared/taxonomy.js';
+import { sourceKeyOf } from '../algorithm/sources.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
 import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
@@ -158,8 +160,15 @@ export class ClientCore {
     // Thumbnails the algorithm node stores come through the client; those of discovered content are on the platform.
     const remote = item.thumbnail && /^https?:\/\//.test(item.thumbnail) ? item.thumbnail : undefined;
     const key = !remote ? item.thumbnail?.split('/').pop() : undefined;
+    // The images of a list-of-images content: an image published on VibeShare is named by
+    // its content id and plays through this client like any other native content.
+    const gallery = item.gallery?.map((media) => {
+      const parsed = parseContentId(media.url);
+      return parsed?.native ? { ...media, url: this.options.streamUrl(parsed.base, false) } : media;
+    });
     return {
       ...item,
+      gallery,
       via: node.id,
       viaName: node.name,
       thumbnailUrl: remote ?? (key ? this.options.thumbnailUrl(node, key) : undefined),
@@ -319,18 +328,53 @@ export class ClientCore {
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */
-  browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
+  async browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
     const preferences = pagePreferences(this.settings.preferences, body.filters);
+    // The creators the user subscribes to join the page's creator picks (on unless the page
+    // turned its "Subscribed creators" button off) — sent at the creators slider's level.
+    if (body.filters?.subscribedCreators !== false && preferences.creatorLevel && preferences.creatorLevel !== 'ignore') {
+      const subscribed = this.store.data.data.subscriptions.filter((entry) => entry.kind !== 'topic').map((entry) => entry.id);
+      if (subscribed.length) {
+        preferences.preferredCreators = [...new Set([...(preferences.preferredCreators ?? []), ...subscribed])];
+        if (preferences.onlyCreators) preferences.creatorIds = [...new Set([...(preferences.creatorIds ?? []), ...subscribed])];
+      }
+    }
+    // On top of whatever the nodes filtered, the client itself drops any item whose
+    // metadata conflicts with the content types this page disregards.
+    const platformPicks = new Set(preferences.preferredPlatforms ?? []);
+    const platformBlocked = new Set(preferences.blockedPlatforms ?? []);
+    const keep = (response: FeedResponse): FeedResponse => ({
+      ...response,
+      items: response.items.filter((item) => {
+        if (conflictsWithDisregard(item, preferences.disregard ?? [])) return false;
+        // The platforms a page whitelists and blacklists are enforced here as well, so the
+        // choice works even before every algorithm node weighs them.
+        const source = sourceKeyOf({ id: item.id });
+        if (platformBlocked.has(source)) return false;
+        if (preferences.platformLevel === 'only' && platformPicks.size && !platformPicks.has(source)) return false;
+        return true;
+      }),
+    });
     if (body.source === 'search') {
       const sort = body.sort ?? body.filters?.sort;
-      return this.collect('search', { query: String(body.query ?? ''), filters: preferences, sort }, body.cursor);
+      return this.collect('search', { query: String(body.query ?? ''), filters: preferences, sort }, body.cursor).then(keep);
     }
     if (body.source === 'subscriptions') {
       const creators = this.store.data.data.subscriptions.map((s) => s.id);
       if (!creators.length) return Promise.resolve({ items: [], errors: [] });
-      return this.collect('latest', { creators, preferences }, body.cursor);
+      return this.collect('latest', { creators, preferences }, body.cursor).then((response) => {
+        // The carousel can order by the newest posting: remember when each creator last posted.
+        for (const item of response.items) {
+          const entry = this.store.data.data.subscriptions.find((s) => s.id === item.creator?.id);
+          if (entry && item.publishedAt && (!entry.lastPostAt || Date.parse(item.publishedAt) > Date.parse(entry.lastPostAt))) {
+            entry.lastPostAt = item.publishedAt;
+            this.store.changed();
+          }
+        }
+        return keep(response);
+      });
     }
-    return this.collect('feed', { preferences, seed: body.seed }, body.cursor);
+    return this.collect('feed', { preferences, seed: body.seed }, body.cursor).then(keep);
   }
 
   async content(id: string): Promise<ContentView> {
@@ -581,11 +625,23 @@ export class ClientCore {
     return this.nodes.active('algorithm')[0];
   }
 
-  /** The whole comment chain of a content page, with the viewer's own votes and key. */
-  async comments(id: string): Promise<CommentsResponse> {
+  /**
+   * The comment chain of a content page, with the viewer's own votes and key. The client
+   * suggests an order and how far the reader has scrolled; the node decides the order and
+   * sends all the block headers, with the comment data of the first loaded comments only.
+   */
+  async comments(id: string, options: { order?: string; offset?: number; limit?: number } = {}): Promise<CommentsResponse> {
     const node = this.commentNode();
     if (!node) throw new Error('No algorithm node is enabled');
-    const data = await this.nodes.client(node).json<Omit<CommentsResponse, 'you'>>(`/v1/comments/${encodeURIComponent(id)}`, { timeoutMs: 8000 });
+    const query = new URLSearchParams();
+    if (options.order) query.set('order', options.order);
+    if (options.offset) query.set('offset', String(Math.max(0, Math.trunc(options.offset))));
+    if (options.limit) query.set('limit', String(Math.max(1, Math.trunc(options.limit))));
+    const suffix = query.toString();
+    const data = await this.nodes.client(node).json<Omit<CommentsResponse, 'you'>>(
+      `/v1/comments/${encodeURIComponent(id)}${suffix ? `?${suffix}` : ''}`,
+      { timeoutMs: 8000 }
+    );
     return { ...data, you: this.store.identity.id };
   }
 
@@ -731,6 +787,7 @@ export class ClientCore {
       history: data.history,
       saved: data.saved ?? emptySavedState(),
       searchHistory: data.searchHistory ?? [],
+      toasts: data.toasts ?? [],
       blooms: data.blooms ?? {},
     });
   }
@@ -751,6 +808,7 @@ export class ClientCore {
       history: data.history,
       saved: data.saved ?? emptySavedState(),
       searchHistory: data.searchHistory ?? [],
+      toasts: data.toasts ?? [],
       blooms: data.blooms ?? {},
     };
     if (record.hidden) {
@@ -766,6 +824,7 @@ export class ClientCore {
       record.history = [];
       record.saved = emptySavedState();
       record.searchHistory = [];
+      record.toasts = [];
       record.blooms = {};
       void this.store.hideIdentity?.();
     } else {
@@ -777,6 +836,7 @@ export class ClientCore {
       record.history = payload.history;
       record.saved = payload.saved;
       record.searchHistory = payload.searchHistory;
+      record.toasts = payload.toasts ?? [];
       record.blooms = payload.blooms;
     }
   }
@@ -793,6 +853,7 @@ export class ClientCore {
       history: record.history,
       saved: record.saved ?? emptySavedState(),
       searchHistory: record.searchHistory ?? [],
+      toasts: record.toasts ?? [],
       blooms: record.blooms ?? {},
     };
   }
@@ -809,6 +870,7 @@ export class ClientCore {
     record.history = payload.history;
     record.saved = payload.saved ?? emptySavedState();
     record.searchHistory = payload.searchHistory ?? [];
+    record.toasts = payload.toasts ?? [];
     record.blooms = payload.blooms ?? {};
     data.nodes = payload.nodes;
     data.settings = normalizeSettings(payload.settings);
@@ -817,6 +879,7 @@ export class ClientCore {
     data.history = payload.history;
     data.saved = payload.saved ?? emptySavedState();
     data.searchHistory = payload.searchHistory ?? [];
+    data.toasts = payload.toasts ?? [];
     data.blooms = payload.blooms ?? {};
     data.activeProfile = record.id;
     this.blooms.reloaded();
@@ -856,6 +919,7 @@ export class ClientCore {
         history: data.history,
         saved: data.saved ?? emptySavedState(),
         searchHistory: data.searchHistory ?? [],
+        toasts: data.toasts ?? [],
         blooms: data.blooms ?? {},
       },
       key
@@ -926,6 +990,7 @@ export class ClientCore {
       history: [],
       saved: emptySavedState(),
       searchHistory: [],
+      toasts: [],
       blooms: {},
     };
     if (hidden) {
@@ -948,6 +1013,7 @@ export class ClientCore {
         history: [],
         saved: emptySavedState(),
         searchHistory: [],
+        toasts: [],
         blooms: {},
       });
     } else {
@@ -1065,6 +1131,7 @@ export class ClientCore {
           history: [],
           saved: emptySavedState(),
           searchHistory: [],
+          toasts: [],
           blooms: {},
         };
         // The fresh start is an ordinary public profile (drop any hidden/locked state).
@@ -1243,9 +1310,12 @@ export class ClientCore {
     // History paused: what the user views now leaves no trace in the history or the
     // bloom filters — both stand still until the pause is lifted.
     if (this.settings.pauseHistory) return { ok: true, paused: true };
-    const history = this.store.data.data.history.filter((h) => h.id !== body.id);
-    history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
-    this.store.data.data.history = history.slice(0, 200);
+    // Watching is written to the local history log only when the user turned that on.
+    if (this.settings.watchHistory) {
+      const history = this.store.data.data.history.filter((h) => h.id !== body.id && this.keptInHistory(h.at));
+      history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
+      this.store.data.data.history = history.slice(0, 200);
+    }
     // Selected content: its cid and each link go into the bloom filters that remember
     // what the user has seen (locally, and the copy sent to search algorithm nodes).
     this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.selected);
@@ -1262,7 +1332,14 @@ export class ClientCore {
   /** The queries the user searched for, most recent first (the search bar suggests from these). */
   searchHistoryItems(): SearchHistoryItem[] {
     this.store.data.data.searchHistory ??= [];
-    return this.store.data.data.searchHistory;
+    return this.store.data.data.searchHistory.filter((item) => this.keptInHistory(item.at));
+  }
+
+  /** Whether a history entry is still inside the clearing window the user set (0 = forever). */
+  private keptInHistory(at: string): boolean {
+    const days = this.settings.historyClearDays;
+    if (!days) return true;
+    return Date.now() - Date.parse(at) < days * 86_400_000;
   }
 
   /** Remembers one search — only while the user keeps a search history (and it is not paused). */
@@ -1281,6 +1358,41 @@ export class ClientCore {
     data.searchHistory = query ? (data.searchHistory ?? []).filter((item) => item.query !== query) : [];
     this.store.changed();
     return { items: data.searchHistory };
+  }
+
+  // -------------------------------------------------------------------------
+  // Toast messages: the same log as the nodes' consoles keep, on the client —
+  // kept only when the user turns that on (off by default).
+
+  /** The saved toast messages, newest first, matching the words searched for. */
+  toastsItems(query?: string): { items: ToastMessage[]; saved: boolean } {
+    const saved = this.settings.toastHistory;
+    const needle = (query ?? '').trim().toLowerCase();
+    const items = (this.store.data.data.toasts ?? [])
+      .filter((item) => this.keptInHistory(item.at))
+      .filter((item) => !needle || item.text.toLowerCase().includes(needle));
+    return { items, saved };
+  }
+
+  /** Remembers one toast message — only while the user keeps them (and history is not paused). */
+  rememberToast(body: { text?: string; kind?: string; at?: string }): { items: ToastMessage[]; saved: boolean } {
+    const text = String(body.text ?? '').trim().slice(0, 500);
+    if (text && this.settings.toastHistory && !this.settings.pauseHistory) {
+      const kind: ToastMessage['kind'] = body.kind === 'error' || body.kind === 'success' ? body.kind : 'info';
+      const items = (this.store.data.data.toasts ?? []).filter((item) => this.keptInHistory(item.at));
+      items.unshift({ id: String(Date.now().toString(36) + Math.random().toString(36).slice(2, 8)), at: body.at ?? new Date().toISOString(), text, kind });
+      this.store.data.data.toasts = items.slice(0, 200);
+      this.store.changed();
+    }
+    return this.toastsItems();
+  }
+
+  /** Drops saved toast messages — all of them, or just the one with this id. */
+  forgetToasts(id?: string): { items: ToastMessage[]; saved: boolean } {
+    const data = this.store.data.data;
+    data.toasts = id ? (data.toasts ?? []).filter((item) => item.id !== id) : [];
+    this.store.changed();
+    return this.toastsItems();
   }
 
   // -------------------------------------------------------------------------

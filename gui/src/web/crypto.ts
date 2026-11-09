@@ -4,6 +4,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { hmac } from '@noble/hashes/hmac.js';
+import { sha1 as nobleSha1 } from '@noble/hashes/legacy.js';
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
 import { base32Decode, base32Encode, base64url, fromBase64url } from '../../../src/shared/encoding.js';
 
@@ -78,6 +79,11 @@ function hex(data: Uint8Array): string {
 
 export function sha256hex(data: string | Uint8Array): string {
   return hex(nobleSha256(bytes(data)));
+}
+
+/** SHA-1 hex digest — what Netlify's deploy files API expects for its file records. */
+export function sha1hex(data: string | Uint8Array): string {
+  return hex(nobleSha1(bytes(data)));
 }
 
 export function hmacHex(secret: string | Buffer, data: string | Uint8Array): string {

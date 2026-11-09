@@ -560,6 +560,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   /** Accepted links that may serve a cid: its own URL, or a base URL to query. */
   private linksFor(cid: string): ContentLink[] {
     const out: ContentLink[] = [];
+    // A copy this node already pulled from a client's link is kept here — its own address
+    // for it comes first, so the bytes are served even when the offered URLs are down.
+    if (this.downloads.data.items[cid]) out.push({ cid, url: `${this.sharedUrl()}/v1/downloads/${encodeURIComponent(cid)}` });
     for (const record of Object.values(this.contentUrls.data.items)) {
       if (record.status !== 'accepted') continue;
       if (record.cid && record.cid === cid && record.url) out.push({ cid, url: record.url });

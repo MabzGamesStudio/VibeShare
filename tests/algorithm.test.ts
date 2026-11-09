@@ -67,7 +67,7 @@ describe('algorithm node', async () => {
     const family = await client.json<Page<ContentItem>>('/v1/feed', { body: { preferences: { maxRating: '13+' } }, auth: false });
     assert.ok(!family.items.some((item) => item.rating === '18+'));
     const videos = await client.json<Page<ContentItem>>('/v1/feed', {
-      body: { preferences: { formats: ['video'], blockedTags: ['animation'] } },
+      body: { preferences: { formats: ['video'], blockedTopics: ['animation'] } },
       auth: false,
     });
     assert.deepEqual(videos.items.map((item) => item.title), ['How black holes work']);
@@ -101,17 +101,17 @@ describe('algorithm node', async () => {
     assert.equal(capped.credited, 0, 'daily cap reached');
   });
 
-  it('accepts a tag once enough accounts agree, keeping the evidence', async () => {
+  it('accepts a topic once enough accounts agree, keeping the evidence', async () => {
     const a = clientFor(url);
     const b = clientFor(url);
-    const body = { id: 'vimeo:42', kind: 'tag', value: 'Jump Scares', reason: 'Loud jump scare', timestamp: 63.4 };
+    const body = { id: 'vimeo:42', kind: 'topic', value: 'Jump Scares', reason: 'Loud jump scare', timestamp: 63.4 };
     const first = await a.json<{ status: string; agreeing: number }>('/v1/suggestions', { body });
     assert.equal(first.status, 'pending');
     const second = await b.json<{ status: string }>('/v1/suggestions', { body: { ...body, reason: 'Yes, at 1:03' } });
     assert.equal(second.status, 'accepted');
     const item = (await a.json<ContentItem>('/v1/content/vimeo:42'));
-    assert.ok(item.tags.includes('jump-scares'));
-    assert.deepEqual(item.notes?.[0], { kind: 'tag', value: 'jump-scares', reason: 'Loud jump scare', timestamp: 63.4 });
+    assert.ok(item.topics.includes('jump-scares'));
+    assert.deepEqual(item.notes?.[0], { kind: 'topic', value: 'jump-scares', reason: 'Loud jump scare', timestamp: 63.4 });
     const account = await b.json<{ account: { balance: number } }>('/v1/account');
     assert.equal(account.account.balance, 100 + 5);
   });

@@ -521,8 +521,7 @@ function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: 
               <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>storage job {job.status}</span>
               {job.managed ? <span className="badge">automatic</span> : null}
               <span className="tiny faint">
-                {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.perChallenge}/challenge ·{' '}
-                {job.rewards.completion} end · challenge every {Math.round((job.challengeIntervalSeconds ?? 900) / 60)}m · test endpoints every{' '}
+                {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.completion} end · test the URL every{' '}
                 {Math.round((job.retrievalIntervalSeconds ?? 0) / 60)}m · {Math.round(job.durationSeconds / 86400)} days
               </span>
               <span className="row" style={{ marginLeft: 'auto', gap: 6 }}>
@@ -573,10 +572,17 @@ function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: 
                       <span className="tiny faint">{holder.earned} credits earned</span>
                     </div>
                     {links.length ? (
-                      links.map((link, index) => <EndpointRow key={link.id} cid={cid} link={link} index={index} />)
+                      <>
+                        <div className="tiny faint" style={{ paddingLeft: 28 }}>
+                          URL to get the full retrieved data
+                        </div>
+                        {links.map((link, index) => (
+                          <EndpointRow key={link.id} cid={cid} link={link} index={index} />
+                        ))}
+                      </>
                     ) : (
                       <div className="tiny faint" style={{ paddingLeft: 28 }}>
-                        No endpoints offered by this account.
+                        No URL offered for this job yet — this account has not given one.
                       </div>
                     )}
                     {jobTests[`${job.id}:${holder.accountId}`] ? (
@@ -1457,7 +1463,7 @@ function Tiers() {
             for the node's defaults.
           </p>
           {config.media.map((medium, index) => (
-            <div className="row" key={index} style={{ gap: 8 }}>
+            <div className="row" key={index} style={{ gap: 8, marginBottom: 8 }}>
               <input
                 type="text"
                 value={medium.label}
@@ -1499,8 +1505,12 @@ function Tiers() {
         </div>
       </div>
 
-      <div className="card form-stack">
+<div className="card form-stack">
         <h3>Tiers</h3>
+        <p className="tiny faint">
+          One row per tier: how many copies sit on each medium and how many URL backups it wants, what it costs, how long it lasts, and what
+          the storage job pays. Retrieval is the URL: the full data is fetched from each holder's URL and there are no challenge options.
+        </p>
         {config.tiers.map((tier, index) => {
           const job: TierJobRow = {
             upfrontCredits: 20,
@@ -1515,70 +1525,109 @@ function Tiers() {
           };
           const saveJob = (patch: Partial<TierJobRow>) =>
             void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, job: { ...job, ...patch } } : t)) });
+          const patch = (values: Partial<(typeof config.tiers)[number]>) =>
+            void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, ...values } : t)) });
           return (
-            <div key={tier.id} className="tier-block">
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                <input
-                  type="text"
-                  value={tier.label}
-                  style={{ maxWidth: 120 }}
-                  onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, label: e.target.value } : t)) })}
-                />
+            <div key={tier.id} className="form-stack" style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 280 }}>
+                  Tier name
+                  <input type="text" value={tier.label} onChange={(e) => patch({ label: e.target.value })} />
+                </label>
+              </div>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
                 {config.media.map((medium) => (
-                  <label key={medium.id} className="row tiny" style={{ gap: 4 }}>
+                  <label className="field" style={{ marginBottom: 0, maxWidth: 110 }} key={medium.id}>
                     {medium.label}
                     <input
                       type="number"
                       min={0}
                       value={tier.media[medium.id] ?? 0}
-                      style={{ width: 52 }}
-                      onChange={(e) =>
-                        void save({
-                          ...config,
-                          tiers: config.tiers.map((t, i) =>
-                            i === index ? { ...t, media: { ...t.media, [medium.id]: Math.max(0, Number(e.target.value) || 0) } } : t
-                          ),
-                        })
-                      }
+                      onChange={(e) => patch({ media: { ...tier.media, [medium.id]: Math.max(0, Number(e.target.value) || 0) } })}
                     />
                   </label>
                 ))}
-                <label className="row tiny" style={{ gap: 4 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 110 }}>
                   URL backups
                   <input
                     type="number"
                     min={0}
                     value={tier.externalUrls}
-                    style={{ width: 52 }}
-                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, externalUrls: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                    onChange={(e) => patch({ externalUrls: Math.max(0, Number(e.target.value) || 0) })}
                   />
                 </label>
-                <label className="row tiny" style={{ gap: 4 }}>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 130 }}>
                   Credits/MiB
                   <input
                     type="number"
                     min={0}
                     value={tier.pricePerMiB}
-                    style={{ width: 60 }}
-                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, pricePerMiB: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                    onChange={(e) => patch({ pricePerMiB: Math.max(0, Number(e.target.value) || 0) })}
                   />
                 </label>
-                <label className="row tiny" style={{ gap: 4 }}>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 130 }}>
                   Lifecycle (days)
                   <input
                     type="number"
                     min={0}
                     value={tier.lifecycleDays}
-                    style={{ width: 60 }}
-                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, lifecycleDays: Math.max(0, Number(e.target.value) || 0) } : t)) })}
+                    onChange={(e) => patch({ lifecycleDays: Math.max(0, Number(e.target.value) || 0) })}
                   />
                 </label>
-                <label className="row tiny" style={{ gap: 4 }}>
+              </div>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                  Upfront credits
+                  <input type="number" min={0} value={job.upfrontCredits} onChange={(e) => saveJob({ upfrontCredits: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                  Per MiB retrieval
+                  <input type="number" min={0} value={job.perMbRetrieval} onChange={(e) => saveJob({ perMbRetrieval: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 120 }}>
+                  End of term
+                  <input type="number" min={0} value={job.endOfTerm} onChange={(e) => saveJob({ endOfTerm: Math.max(0, Number(e.target.value) || 0) })} />
+                </label>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 170 }}>
+                  Retrieval every (min, 0 = off)
+                  <input
+                    type="number"
+                    min={0}
+                    value={job.retrievalTestEveryMinutes}
+                    onChange={(e) => saveJob({ retrievalTestEveryMinutes: Math.max(0, Number(e.target.value) || 0) })}
+                  />
+                </label>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 160 }}>
+                  Maximum latency (ms)
+                  <input
+                    type="number"
+                    min={50}
+                    value={job.maxLatencyMs}
+                    onChange={(e) => saveJob({ maxLatencyMs: Math.max(50, Number(e.target.value) || 50) })}
+                  />
+                </label>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
+                  Failed requests before failure
+                  <input
+                    type="number"
+                    min={1}
+                    value={job.failedRequestsBeforeFailure}
+                    onChange={(e) => saveJob({ failedRequestsBeforeFailure: Math.max(1, Number(e.target.value) || 1) })}
+                  />
+                </label>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <label className="field" style={{ marginBottom: 0, maxWidth: 200 }}>
                   Expires to
-                  <select
-                    value={tier.downgradeTo ?? ''}
-                    onChange={(e) => void save({ ...config, tiers: config.tiers.map((t, i) => (i === index ? { ...t, downgradeTo: e.target.value || null } : t)) })}
-                  >
+                  <select value={tier.downgradeTo ?? ''} onChange={(e) => patch({ downgradeTo: e.target.value || null })}>
                     <option value="">(nothing)</option>
                     {config.tiers
                       .filter((other) => other.id !== tier.id)
@@ -1589,48 +1638,15 @@ function Tiers() {
                       ))}
                   </select>
                 </label>
+              </div>
+              <div className="row">
                 <button className="small danger" onClick={() => void save({ ...config, tiers: config.tiers.filter((_, i) => i !== index) })}>
                   Remove
                 </button>
               </div>
-              <div className="row tiny job-settings" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 6 }}>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Upfront credits (20)
-                  <input type="number" min={0} value={job.upfrontCredits} style={{ width: 56 }} onChange={(e) => saveJob({ upfrontCredits: Math.max(0, Number(e.target.value) || 0) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Per mb retrieval (5)
-                  <input type="number" min={0} value={job.perMbRetrieval} style={{ width: 56 }} onChange={(e) => saveJob({ perMbRetrieval: Math.max(0, Number(e.target.value) || 0) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Per mb challenge (1)
-                  <input type="number" min={0} value={job.perMbChallenge} style={{ width: 56 }} onChange={(e) => saveJob({ perMbChallenge: Math.max(0, Number(e.target.value) || 0) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  End of term (20)
-                  <input type="number" min={0} value={job.endOfTerm} style={{ width: 56 }} onChange={(e) => saveJob({ endOfTerm: Math.max(0, Number(e.target.value) || 0) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Maximum latency in ms (2000)
-                  <input type="number" min={50} value={job.maxLatencyMs} style={{ width: 68 }} onChange={(e) => saveJob({ maxLatencyMs: Math.max(50, Number(e.target.value) || 50) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Challenge every (minutes) (10)
-                  <input type="number" min={1} value={job.challengeEveryMinutes} style={{ width: 56 }} onChange={(e) => saveJob({ challengeEveryMinutes: Math.max(1, Number(e.target.value) || 1) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Retrieval test every (minutes, 0 = off) (60)
-                  <input type="number" min={0} value={job.retrievalTestEveryMinutes} style={{ width: 56 }} onChange={(e) => saveJob({ retrievalTestEveryMinutes: Math.max(0, Number(e.target.value) || 0) })} />
-                </label>
-                <label className="row tiny" style={{ gap: 4 }}>
-                  Failed requests before failure (3)
-                  <input type="number" min={1} value={job.failedRequestsBeforeFailure} style={{ width: 56 }} onChange={(e) => saveJob({ failedRequestsBeforeFailure: Math.max(1, Number(e.target.value) || 1) })} />
-                </label>
-              </div>
             </div>
           );
-        })}
-        <button
+        })}        <button
           className="small"
           onClick={() =>
             void save({

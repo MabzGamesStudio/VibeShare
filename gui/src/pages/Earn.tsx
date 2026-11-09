@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { AlgorithmJobsTab } from '../earn/AlgorithmJobsTab';
 import { AlgorithmNodesTab } from '../earn/AlgorithmNodesTab';
 import { ProviderJobsTab } from '../earn/ProviderJobsTab';
@@ -15,7 +15,11 @@ type EarnTab = (typeof EARN_TABS)[number][0];
 
 /** The earn page: what each kind of node pays for, and the jobs that earn it. */
 export function EarnPage() {
-  const [tab, setTab] = useState<EarnTab>('algorithms');
+  // The tab lives in the URL (?tab=…), so cards elsewhere can link straight to one.
+  const [params, setParams] = useSearchParams();
+  const wanted = params.get('tab');
+  const tab: EarnTab = EARN_TABS.some(([id]) => id === wanted) ? (wanted as EarnTab) : 'algorithms';
+  const setTab = (id: EarnTab) => setParams({ tab: id });
   return (
     <div className="page page-narrow">
       <div className="page-header">

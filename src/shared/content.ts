@@ -25,6 +25,8 @@ export interface ManifestMeta {
   tags?: string[];
   language?: string;
   durationSeconds?: number;
+  /** The images of a list-of-images content (their content ids or links), in order. */
+  gallery?: string[];
 }
 
 export interface ManifestCreator {
@@ -153,7 +155,7 @@ export function validateManifest(value: unknown): Manifest {
     optionalString(meta.description, 'meta.description', 5000);
     optionalString(meta.language, 'meta.language', 16);
     optionalStringList(meta.topics, 'meta.topics');
-    optionalStringList(meta.tags, 'meta.tags');
+    optionalStringList(meta.gallery, 'meta.gallery');
     if (meta.format !== undefined && !FORMATS.includes(meta.format)) fail('bad meta.format');
     if (meta.rating !== undefined && !RATINGS.includes(meta.rating)) fail('bad meta.rating');
     if (meta.durationSeconds !== undefined && !(typeof meta.durationSeconds === 'number' && meta.durationSeconds >= 0)) {

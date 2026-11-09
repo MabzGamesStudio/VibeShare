@@ -1,7 +1,8 @@
 import { ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Subscription } from '../../../src/shared/clientapi';
+import { useApp } from '../state';
 import { profilePath } from '../util';
 import { Avatar } from './ui';
 
@@ -11,6 +12,23 @@ import { Avatar } from './ui';
  * through, removed and added.
  */
 export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] }) {
+  const { state } = useApp();
+  const order = state?.settings.subscriptionOrder ?? 'subscribed';
+  // The order the carousel shows its tiles in: subscribed date by default, anything else
+  // from the settings. Random is stable for a list (the same ids keep the same order).
+  const ordered = useMemo(() => {
+    const byId = (id: string) => {
+      let hash = 0;
+      for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+      return hash;
+    };
+    const list = [...subscriptions];
+    if (order === 'az') return list.sort((a, b) => a.name.localeCompare(b.name));
+    if (order === 'za') return list.sort((a, b) => b.name.localeCompare(a.name));
+    if (order === 'recent') return list.sort((a, b) => Date.parse(b.lastPostAt ?? b.addedAt) - Date.parse(a.lastPostAt ?? a.addedAt));
+    if (order === 'random') return list.sort((a, b) => byId(a.id) - byId(b.id));
+    return list.sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
+  }, [subscriptions, order]);
   const rowRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ start: true, end: true });
 
@@ -49,7 +67,7 @@ export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] 
           </span>
           <span className="carousel-name">All</span>
         </Link>
-        {subscriptions.map((subscription) => (
+        {ordered.map((subscription) => (
           <Link key={subscription.id} to={profilePath(subscription.kind, subscription.id)} className="carousel-tile" aria-label={subscription.name}>
             <Avatar name={subscription.name} id={subscription.id} icon={subscription.icon} />
             <span className="carousel-name">{subscription.name}</span>

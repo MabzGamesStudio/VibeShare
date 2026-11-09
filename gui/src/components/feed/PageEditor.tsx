@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, GalleryVertical, LayoutDashboard, LayoutGrid, List, RotateCcw, Smartphone, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   METADATA_FIELDS,
@@ -7,26 +7,34 @@ import {
   PAGE_ICONS,
   PAGE_LAYOUT_LABELS,
   PAGE_LAYOUTS,
+  DEFAULT_SHORT_BUTTONS,
+  SHORT_BUTTONS,
+  SHORT_BUTTON_LABELS,
   type FeedItem,
   type MetadataField,
   type PageConfig,
   type PageFilters,
   type PageLayout,
   type PageSource,
+  type ShortButton,
 } from '../../../../src/shared/clientapi';
 import { presetPage } from '../../../../src/shared/clientdefaults';
 import type { CreatorInfo, TopicInfo } from '../../../../src/shared/protocol';
 import {
-  CREATOR_KIND_LABELS,
-  CREATOR_KINDS,
   FORMAT_LABELS,
   FORMATS,
   RATING_LABELS,
+  RATING_REASONS,
   RATINGS,
+  SUGGEST_LEVEL_LABELS,
+  SUGGEST_LEVELS,
   TOPICS,
-  type CreatorKind,
+  topicIdOf,
   type Rating,
+  type SuggestLevel,
 } from '../../../../src/shared/taxonomy';
+import { SOURCE_CATALOG } from '../../../../src/algorithm/sources';
+import { SOURCE_LABELS as PLATFORM_LABELS } from '../../../../src/shared/sources';
 import { useApp } from '../../state';
 import { api } from '../../api';
 import { gradientFor } from '../../util';
@@ -34,7 +42,6 @@ import { FormatIcon } from '../ContentCard';
 import { Chips, Modal, Spinner, Switch, toggle } from '../ui';
 import { Fields } from './Fields';
 import { PAGE_ICON_COMPONENTS } from './icons';
-
 /** Resolves what the user typed to a creator, group or topic one of the nodes knows. */
 async function resolvePick(kind: 'creator' | 'topic', text: string): Promise<{ id: string; name: string } | null> {
   const query = text.trim();
@@ -52,96 +59,81 @@ async function resolvePick(kind: 'creator' | 'topic', text: string): Promise<{ i
   return creator ? { id: creator.id, name: creator.kind === 'group' ? `${creator.name} · group` : creator.name } : null;
 }
 
-/**
- * The creators, groups or topics a page picked with its + button: every one of them is
- * either on the whitelist ("only these") or the blacklist. Membership is by id, so a
- * group id works wherever a creator id does.
- */
-function PickList({
-  kind,
-  ids,
-  blocked,
-  only,
-  labels,
-  onOnly,
-  onAdd,
-  onRemove,
-}: {
-  kind: 'creator' | 'topic';
-  ids: string[];
-  blocked: string[];
-  only: boolean;
-  labels: Record<string, string>;
-  onOnly: (only: boolean) => void;
-  onAdd: (pick: { id: string; name: string }, list: 'allow' | 'block') => void;
-  onRemove: (id: string, list: 'allow' | 'block') => void;
-}) {
+
+/** A slider for one section's level: only show, strongly suggest, suggest, weakly suggest, ignore. */
+function LevelSlider({ label, value, onChange }: { label: string; value: SuggestLevel; onChange: (level: SuggestLevel) => void }) {
+  return (
+    <label className="field" style={{ marginTop: 10 }}>
+      <span>
+        {label} <span className="hint">{SUGGEST_LEVEL_LABELS[value]}</span>
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={SUGGEST_LEVELS.length - 1}
+        step={1}
+        value={SUGGEST_LEVELS.indexOf(value)}
+        onChange={(e) => onChange(SUGGEST_LEVELS[Number(e.target.value)] ?? 'ignore')}
+      />
+    </label>
+  );
+}
+
+type PickEntry = { id: string; label: string; state: 'on' | 'off' | 'block' };
+
+/** The buttons of one pick list: white (on), deselected, or blacklisted (red); each click cycles. */
+function PickButtons({ entries, onCycle }: { entries: PickEntry[]; onCycle: (id: string) => void }) {
+  return (
+    <div className="chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      {entries.map((entry) => (
+        <button
+          key={entry.id}
+          type="button"
+          className={`chip ${entry.state === 'on' ? 'on' : entry.state === 'block' ? 'blocked' : ''}`}
+          title={entry.state === 'on' ? 'Selected — click to deselect' : entry.state === 'off' ? 'Deselected — click to blacklist' : 'Blacklisted — click to select'}
+          onClick={() => onCycle(entry.id)}
+        >
+          {entry.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The row that adds one more pick: a name or an id the user types. */
+function AddPickRow({ kind, onAdd }: { kind: 'topic' | 'creator'; onAdd: (pick: { id: string; name: string }) => void }) {
   const { toast } = useApp();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
-  const label = kind === 'topic' ? 'Topic' : 'Creator or group';
-  const missing = kind === 'topic' ? 'No topic matches that name yet' : 'No creator or group matches that name';
-
-  const add = async (list: 'allow' | 'block') => {
+  const add = async () => {
+    const query = text.trim();
+    if (!query) return;
     setBusy(true);
     try {
-      const pick = await resolvePick(kind, text);
-      if (!pick) {
-        toast(missing, 'error');
-        return;
-      }
-      onAdd(pick, list);
+      const missing = kind === 'topic' ? 'No topic matches that name' : 'No creator matches that name';
+      const pick = await resolvePick(kind, query);
+      if (pick) onAdd(pick);
+      else if (kind === 'topic') onAdd({ id: query.startsWith('tp1') ? query : topicIdOf(query), name: query });
+      else if (!/\s/.test(query) && /^[a-z0-9]+[:._~-]/i.test(query)) onAdd({ id: query, name: query });
+      else toast(missing, 'error');
       setText('');
     } finally {
       setBusy(false);
     }
   };
-
   return (
-    <div className="form-stack" style={{ marginTop: 8 }}>
-      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-        <input
-          type="text"
-          placeholder={`${label} name or id`}
-          value={text}
-          maxLength={128}
-          onChange={(e) => setText(e.target.value)}
-          style={{ maxWidth: 260 }}
-        />
-        <button type="button" className="small" disabled={busy || !text.trim()} onClick={() => void add('allow')} title="Only content of this one">
-          + Whitelist
-        </button>
-        <button type="button" className="small" disabled={busy || !text.trim()} onClick={() => void add('block')} title="Never content of this one">
-          + Blacklist
-        </button>
-      </div>
-      {ids.length > 0 && (
-        <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-          <span className="hint">Whitelist</span>
-          {ids.map((id) => (
-            <button key={id} type="button" className="badge ok" onClick={() => onRemove(id, 'allow')} title="Remove from the whitelist">
-              {labels[id] ?? id} ×
-            </button>
-          ))}
-        </div>
-      )}
-      {blocked.length > 0 && (
-        <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-          <span className="hint">Blacklist</span>
-          {blocked.map((id) => (
-            <button key={id} type="button" className="badge danger" onClick={() => onRemove(id, 'block')} title="Remove from the blacklist">
-              {labels[id] ?? id} ×
-            </button>
-          ))}
-        </div>
-      )}
-      {ids.length > 0 && (
-        <Switch
-          checked={only}
-          onChange={onOnly}
-          label={kind === 'topic' ? 'Only content filed under these topics' : 'Only these creators (and everyone in these groups)'}
-        />
-      )}
+    <div className="row" style={{ gap: 8, marginTop: 10 }}>
+      <input
+        type="text"
+        value={text}
+        placeholder={kind === 'topic' ? 'Add a topic or topic id' : 'Add a creator or creator id'}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && void add()}
+        style={{ flex: 1 }}
+      />
+      <button className="small" disabled={busy || !text.trim()} onClick={() => void add()}>
+        {busy ? <Spinner /> : null} Add
+      </button>
     </div>
   );
 }
@@ -172,7 +164,6 @@ const SAMPLE: FeedItem = {
   format: 'video',
   rating: 'all',
   topics: ['science', 'nature'],
-  tags: ['timelapse', 'space'],
   durationSeconds: 634,
   creator: { id: 'sample-creator', name: 'Creator name', kind: 'person' },
   publishedAt: new Date(Date.now() - 3 * 86400_000).toISOString(),
@@ -241,27 +232,70 @@ function Preview({ page }: { page: PageConfig }) {
   );
 }
 
-/** Edits a page: what it shows (source and filters) and how (layout, metadata, options). */
+/** Edits a page: what it shows and how — every change is saved immediately and automatically. */
 export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig; isNew?: boolean; onClose: () => void }) {
-  const { state, updateSettings } = useApp();
+  const { state, updateSettings, toast } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
-  const [draft, setDraft] = useState<PageConfig>(() => structuredClone(page));
-  const [busy, setBusy] = useState(false);
-  if (!state) return null;
-  const limit: Rating = state.settings.preferences.maxRating ?? '16+';
-
+  const [draft, setDraft] = useState<PageConfig>(() => ({ ...page, filters: { ...page.filters }, options: { ...page.options } }));
   const [labels, setLabels] = useState<Record<string, string>>({});
-  const set = (patch: Partial<PageConfig>) => setDraft((current) => ({ ...current, ...patch }));
-  const setFilters = (patch: Partial<PageFilters>) => setDraft((current) => ({ ...current, filters: { ...current.filters, ...patch } }));
-  const setOptions = (patch: Partial<PageConfig['options']>) => setDraft((current) => ({ ...current, options: { ...current.options, ...patch } }));
+  // Topics and creators deselected in this modal: shown dimmed so a click can still cycle
+  // them to blacklisted, but never written to the page — a deselected pick is forgotten.
+  const [dropped, setDropped] = useState<{ topic: string[]; creator: string[] }>({ topic: [], creator: [] });
+  const [tab, setTab] = useState<'appearance' | 'content' | 'display'>('appearance');
+  const [busy, setBusy] = useState(false);
+  const [suggested, setSuggested] = useState<{ topics: { id: string; name: string }[]; creators: { id: string; name: string }[] }>({ topics: [], creators: [] });
 
-  // Names for the creators, groups and topics the page already picked (they are stored as ids).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const dirty = useRef(false);
+  const created = useRef(false);
+  const timer = useRef<number | undefined>(undefined);
+
+  // There is no Save button: each change is written through shortly after it is made.
+  const persist = async () => {
+    if (!state) return;
+    const next = draftRef.current;
+    const pages = isNew && !created.current ? [...state.settings.pages, next] : state.settings.pages.map((p) => (p.id === next.id ? next : p));
+    setBusy(true);
+    const ok = await updateSettings({ pages });
+    setBusy(false);
+    if (ok) created.current = true;
+  };
+  const scheduleSave = () => {
+    dirty.current = true;
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => void persist(), 300);
+  };
+  // Closing the modal flushes whatever is still pending.
+  useEffect(() => () => {
+    window.clearTimeout(timer.current);
+    if (dirty.current) void persist();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const set = (patch: Partial<PageConfig>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+    scheduleSave();
+  };
+  const setFilters = (patch: Partial<PageFilters>) => {
+    setDraft((current) => ({ ...current, filters: { ...current.filters, ...patch } }));
+    scheduleSave();
+  };
+  const setOptions = (patch: Partial<PageConfig['options']>) => {
+    setDraft((current) => ({ ...current, options: { ...current.options, ...patch } }));
+    scheduleSave();
+  };
+
+  // Names for the creators, groups and topics the page picked (they are stored as ids).
   const pickedKey = [
-    ...(draft.filters.creatorIds ?? []),
-    ...(draft.filters.blockedCreatorIds ?? []),
+    ...(draft.filters.topics ?? []),
     ...(draft.filters.topicIds ?? []),
     ...(draft.filters.blockedTopicIds ?? []),
+    ...(draft.filters.creatorIds ?? []),
+    ...(draft.filters.blockedCreatorIds ?? []),
+    ...dropped.topic,
+    ...dropped.creator,
   ].join(' ');
   useEffect(() => {
     const unknown = (pickedKey ? pickedKey.split(' ') : []).filter((id) => !labels[id]);
@@ -279,211 +313,303 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
     return () => {
       live = false;
     };
-  }, [pickedKey, labels]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickedKey]);
 
-  /** Adds one picked creator, group or topic to the whitelist or the blacklist. */
-  const addPick = (kind: 'creator' | 'topic', list: 'allow' | 'block', pick: { id: string; name: string }) => {
+  // What the algorithm search nodes suggest: a few topics and creators to pick from.
+  useEffect(() => {
+    let live = true;
+    void api<{ topics: TopicInfo[] }>('/api/topics?q=')
+      .then((found) => {
+        if (!live) return;
+        const list = found.topics.slice(0, 8).map((topic) => ({ id: topic.id, name: topic.name }));
+        setSuggested((current) => ({ ...current, topics: list.length ? list : TOPICS.slice(0, 8).map((name) => ({ id: topicIdOf(name), name })) }));
+      })
+      .catch(() => {
+        if (live) setSuggested((current) => ({ ...current, topics: TOPICS.slice(0, 8).map((name) => ({ id: topicIdOf(name), name })) }));
+      });
+    void api<{ creators: CreatorInfo[] }>('/api/creators?q=')
+      .then((found) => {
+        if (live) setSuggested((current) => ({ ...current, creators: found.creators.slice(0, 8).map((creator) => ({ id: creator.id, name: creator.name })) }));
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+  const entriesOf = (kind: 'topic' | 'creator'): PickEntry[] => {
+    const f = draft.filters;
+    const label = (id: string) => labels[id] ?? id;
+    const on = kind === 'topic' ? [...(f.topics ?? []), ...(f.topicIds ?? [])] : [...(f.creatorIds ?? [])];
+    const off = dropped[kind];
+    const block = kind === 'topic' ? (f.blockedTopicIds ?? []) : (f.blockedCreatorIds ?? []);
+    return [
+      ...on.map((id) => ({ id, label: label(id), state: 'on' as const })),
+      ...off.map((id) => ({ id, label: label(id), state: 'off' as const })),
+      ...block.map((id) => ({ id, label: label(id), state: 'block' as const })),
+    ];
+  };
+  const topicPicked = entriesOf('topic');
+  const creatorPicked = entriesOf('creator');
+  // Suggestions from the algorithm search nodes sit inline after the picked ones, shown
+  // unselected; clicking one selects it (then it cycles like any other pick).
+  const isPicked = (kind: 'topic' | 'creator', id: string) => (kind === 'topic' ? topicPicked : creatorPicked).some((entry) => entry.id === id);
+  const suggestName = (kind: 'topic' | 'creator', id: string) =>
+    (kind === 'topic' ? suggested.topics : suggested.creators).find((entry) => entry.id === id)?.name ?? labels[id] ?? id;
+  const topicEntries: PickEntry[] = [
+    ...topicPicked,
+    ...suggested.topics.filter((entry) => !isPicked('topic', entry.id)).map((entry) => ({ id: entry.id, label: entry.name, state: 'off' as const })),
+  ];
+  const creatorEntries: PickEntry[] = [
+    ...creatorPicked,
+    ...suggested.creators.filter((entry) => !isPicked('creator', entry.id)).map((entry) => ({ id: entry.id, label: entry.name, state: 'off' as const })),
+  ];
+  const cycleOrPick = (kind: 'topic' | 'creator', id: string) => {
+    if (isPicked(kind, id)) cyclePick(kind, id);
+    else addPick(kind, { id, name: suggestName(kind, id) });
+  };
+
+  /** One click cycles a pick: selected → deselected → blacklisted → selected. */
+  const cyclePick = (kind: 'topic' | 'creator', id: string) => {
+    const f = draft.filters;
+    const on = kind === 'topic' ? [...(f.topics ?? []), ...(f.topicIds ?? [])] : [...(f.creatorIds ?? [])];
+    const off = dropped[kind];
+    const block = kind === 'topic' ? (f.blockedTopicIds ?? []) : (f.blockedCreatorIds ?? []);
+    const drop = (list: string[]) => list.filter((value) => value !== id);
+    if (on.includes(id)) {
+      setDropped((current) => ({ ...current, [kind]: [...current[kind], id] }));
+      if (kind === 'topic') setFilters({ topics: drop(f.topics ?? []), topicIds: drop(f.topicIds ?? []) });
+      else setFilters({ creatorIds: drop(f.creatorIds ?? []) });
+    } else if (off.includes(id)) {
+      setDropped((current) => ({ ...current, [kind]: drop(current[kind]) }));
+      if (kind === 'topic') setFilters({ blockedTopicIds: [...new Set([...(f.blockedTopicIds ?? []), id])] });
+      else setFilters({ blockedCreatorIds: [...new Set([...(f.blockedCreatorIds ?? []), id])] });
+    } else if (block.includes(id)) {
+      if (kind === 'topic') setFilters({ blockedTopicIds: drop(f.blockedTopicIds ?? []), topicIds: [...new Set([...(f.topicIds ?? []), id])] });
+      else setFilters({ blockedCreatorIds: drop(f.blockedCreatorIds ?? []), creatorIds: [...new Set([...(f.creatorIds ?? []), id])] });
+    }
+  };
+
+  const addPick = (kind: 'topic' | 'creator', pick: { id: string; name: string }) => {
     setLabels((current) => ({ ...current, [pick.id]: pick.name }));
-    const add = (list2: string[] | undefined) => [...new Set([...(list2 ?? []), pick.id])];
-    if (kind === 'topic') setFilters(list === 'allow' ? { topicIds: add(draft.filters.topicIds) } : { blockedTopicIds: add(draft.filters.blockedTopicIds) });
-    else setFilters(list === 'allow' ? { creatorIds: add(draft.filters.creatorIds) } : { blockedCreatorIds: add(draft.filters.blockedCreatorIds) });
+    setDropped((current) => ({ ...current, [kind]: current[kind].filter((id) => id !== pick.id) }));
+    const f = draft.filters;
+    const keep = (list: string[] | undefined) => (list ?? []).filter((id) => id !== pick.id);
+    if (kind === 'topic') {
+      setFilters({
+        topics: keep(f.topics),
+        topicIds: [...new Set([...keep(f.topicIds), pick.id])],
+        blockedTopicIds: keep(f.blockedTopicIds),
+      });
+    } else {
+      setFilters({
+        creatorIds: [...new Set([...keep(f.creatorIds), pick.id])],
+        blockedCreatorIds: keep(f.blockedCreatorIds),
+      });
+    }
   };
 
-  const removePick = (kind: 'creator' | 'topic', list: 'allow' | 'block', id: string) => {
-    const drop = (list2: string[] | undefined) => (list2 ?? []).filter((value) => value !== id);
-    if (kind === 'topic') setFilters(list === 'allow' ? { topicIds: drop(draft.filters.topicIds) } : { blockedTopicIds: drop(draft.filters.blockedTopicIds) });
-    else setFilters(list === 'allow' ? { creatorIds: drop(draft.filters.creatorIds) } : { blockedCreatorIds: drop(draft.filters.blockedCreatorIds) });
+  const handleReset = () => {
+    const preset = page.preset;
+    if (!preset) return;
+    setDraft((current) => ({ ...presetPage(preset), id: current.id }));
+    scheduleSave();
   };
 
-  const commit = async (pages: PageConfig[], then?: string) => {
-    setBusy(true);
-    const ok = await updateSettings({ pages });
-    setBusy(false);
-    if (!ok) return;
-    onClose();
-    if (then !== undefined) navigate(then);
-  };
-  const save = () => {
-    const pages = isNew ? [...state.settings.pages, draft] : state.settings.pages.map((p) => (p.id === draft.id ? draft : p));
-    void commit(pages, isNew ? pagePath(draft) : undefined);
-  };
   const remove = () => {
-    if (!confirm(`Delete the page “${page.title}”?`)) return;
-    const here = location.pathname === pagePath(page);
-    void commit(
-      state.settings.pages.filter((p) => p.id !== page.id),
-      here ? '/' : undefined
-    );
+    if (!state || !confirm(`Delete the page “${page.title}”?`)) return;
+    void (async () => {
+      setBusy(true);
+      const ok = await updateSettings({ pages: state.settings.pages.filter((p) => p.id !== page.id) });
+      setBusy(false);
+      if (!ok) return;
+      dirty.current = false;
+      onClose();
+      if (location.pathname === pagePath(page)) navigate('/');
+    })();
   };
-
   const layout = draft.layout;
   const usesColumns = layout === 'grid' || layout === 'masonry';
   const plays = layout === 'shorts' || layout === 'stream';
+  const formatLevel: SuggestLevel = draft.filters.formatLevel ?? 'only';
+  const topicLevel: SuggestLevel = draft.filters.topicLevel ?? (draft.filters.onlyTopics ? 'only' : 'ignore');
+  const creatorLevel: SuggestLevel = draft.filters.creatorLevel ?? (draft.filters.onlyCreators ? 'only' : 'ignore');
+  const platformLevel: SuggestLevel = draft.filters.platformLevel ?? 'ignore';
+  // Platforms (content sources like youtube): whitelist → blacklist → unselected, cycling.
+  const platformState = (id: string): 'on' | 'off' | 'block' =>
+    (draft.filters.platforms ?? []).includes(id) ? 'on' : (draft.filters.blockedPlatforms ?? []).includes(id) ? 'block' : 'off';
+  const platformEntries: PickEntry[] = SOURCE_CATALOG.map((source) => ({
+    id: source.key,
+    label: (PLATFORM_LABELS as Record<string, string>)[source.key] ?? source.key,
+    state: platformState(source.key),
+  }));
+  const cyclePlatform = (id: string) => {
+    const f = draft.filters;
+    const keep = (list: string[] | undefined) => (list ?? []).filter((value) => value !== id);
+    const state = platformState(id);
+    if (state === 'on') setFilters({ platforms: keep(f.platforms), blockedPlatforms: [...new Set([...keep(f.blockedPlatforms), id])] });
+    else if (state === 'block') setFilters({ blockedPlatforms: keep(f.blockedPlatforms) });
+    else setFilters({ platforms: [...new Set([...keep(f.platforms), id])], blockedPlatforms: keep(f.blockedPlatforms) });
+  };
 
   return (
-    <Modal
-      title={isNew ? 'New page' : `Customize “${page.title}”`}
-      onClose={onClose}
-      wide
-      actions={
-        <>
-          {!isNew && page.preset && (
-            <button className="ghost" onClick={() => setDraft({ ...presetPage(page.preset!), sidebar: draft.sidebar })} title="Back to how this page came">
-              <RotateCcw size={15} /> Reset to default
-            </button>
-          )}
-          {!isNew && !page.preset && (
-            <button className="ghost danger" onClick={remove}>
-              <Trash2 size={15} /> Delete page
-            </button>
-          )}
-          <div className="spacer" />
-          <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={save} disabled={busy || !draft.title.trim()}>
-            {busy && <Spinner />} {isNew ? 'Add page' : 'Save'}
+    <Modal title={isNew ? 'New page' : `Customize “${page.title}”`} onClose={onClose} wide>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        {([['appearance', 'Appearance'], ['content', 'Content'], ['display', 'Display']] as const).map(([id, label]) => (
+          <button key={id} className={`tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+            {label}
           </button>
-        </>
-      }
-    >
-      <div className="editor">
+        ))}
+        <div className="spacer" />
+        <span className="hint">{busy ? 'Saving…' : 'Changes are saved automatically'}</span>
+      </div>
+
+      {tab === 'appearance' && (
         <section className="editor-section">
-          <h3>Page</h3>
-          <div className="form-grid">
+          <h3>Appearance</h3>
+          <div className="form-stack">
             <label className="field">
               Title
-              <input type="text" value={draft.title} maxLength={40} onChange={(e) => set({ title: e.target.value })} autoFocus={isNew} />
+              <input value={draft.title} maxLength={40} onChange={(e) => set({ title: e.target.value })} />
             </label>
             <div className="field">
-              <span>Left panel</span>
-              <Switch checked={draft.sidebar} onChange={(sidebar) => set({ sidebar })} label="Show this page in the left panel" />
+              <span>Show in left panel</span>
+              <Switch checked={draft.sidebar} onChange={(sidebar) => set({ sidebar })} label="Listed among the pages on the left" />
             </div>
-          </div>
-          <div className="field">
-            <span>Icon</span>
-            <div className="icon-picker">
-              {PAGE_ICONS.map((icon) => {
-                const Icon = PAGE_ICON_COMPONENTS[icon];
-                return (
-                  <button
-                    key={icon}
-                    type="button"
-                    className={`ghost icon ${draft.icon === icon ? 'on' : ''}`}
-                    aria-label={icon}
-                    aria-pressed={draft.icon === icon}
-                    onClick={() => set({ icon })}
-                  >
-                    <Icon size={18} />
-                  </button>
-                );
-              })}
+            <div className="field">
+              <span>Icon</span>
+              <div className="icon-grid">
+                {PAGE_ICONS.map((icon) => {
+                  const Icon = PAGE_ICON_COMPONENTS[icon];
+                  return (
+                    <button key={icon} type="button" title={icon} className={`icon-option ${draft.icon === icon ? 'on' : ''}`} onClick={() => set({ icon })}>
+                      <Icon size={20} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="field">
+              <span>Layout</span>
+              <div className="icon-grid">
+                {PAGE_LAYOUTS.map((name) => {
+                  const Icon = LAYOUT_ICONS[name];
+                  return (
+                    <button key={name} type="button" title={PAGE_LAYOUT_LABELS[name]} className={`icon-option ${layout === name ? 'on' : ''}`} onClick={() => set({ layout: name })}>
+                      <Icon size={20} /> {PAGE_LAYOUT_LABELS[name]}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </section>
-
-        <section className="editor-section">
-          <h3>Layout</h3>
-          <div className="layout-picker">
-            {PAGE_LAYOUTS.map((option) => {
-              const Icon = LAYOUT_ICONS[option];
-              return (
-                <button key={option} type="button" className={`layout-option ${layout === option ? 'on' : ''}`} onClick={() => set({ layout: option })} aria-pressed={layout === option}>
-                  <Icon size={20} />
-                  <span>{PAGE_LAYOUT_LABELS[option]}</span>
-                </button>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="editor-section">
-          <h3>Content</h3>
-          <div className="form-grid">
-            <label className="field">
-              Comes from
-              <select value={draft.source} onChange={(e) => set({ source: e.target.value as PageSource })}>
-                {(Object.keys(SOURCE_LABELS) as PageSource[]).map((source) => (
-                  <option key={source} value={source}>
-                    {SOURCE_LABELS[source]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              Age rating up to
-              <select value={draft.filters.maxRating ?? ''} onChange={(e) => setFilters({ maxRating: (e.target.value || undefined) as Rating | undefined })}>
-                <option value="">My limit ({RATING_LABELS[limit]})</option>
-                {RATINGS.slice(0, RATINGS.indexOf(limit) + 1).map((rating) => (
-                  <option key={rating} value={rating}>
-                    {RATING_LABELS[rating]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {draft.source === 'search' && (
+      )}
+      {tab === 'content' && (
+        <>
+          <section className="editor-section">
+            <h3>Comes from</h3>
             <div className="form-grid">
               <label className="field">
-                Search for <span className="hint">Words, #tags, @creators — empty lists everything</span>
-                <input type="text" value={draft.query ?? ''} maxLength={200} onChange={(e) => set({ query: e.target.value })} placeholder="#timelapse @NASA space" />
-              </label>
-              <label className="field">
-                Order
-                <select value={draft.filters.sort ?? 'relevance'} onChange={(e) => setFilters({ sort: e.target.value as PageFilters['sort'] })}>
-                  <option value="relevance">Most relevant</option>
-                  <option value="new">Newest</option>
-                  <option value="top">Top rated</option>
+                Content
+                <select value={draft.source} onChange={(e) => set({ source: e.target.value as PageSource })}>
+                  {Object.entries(SOURCE_LABELS).map(([id, label]) => (
+                    <option key={id} value={id}>
+                      {label}
+                    </option>
+                  ))}
                 </select>
               </label>
+              {draft.source === 'search' && (
+                <>
+                  <label className="field">
+                    Search for
+                    <input value={draft.query ?? ''} placeholder="#topics, @creators, words" onChange={(e) => set({ query: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    Order
+                    <select value={draft.filters.sort ?? 'relevance'} onChange={(e) => setFilters({ sort: e.target.value as PageFilters['sort'] })}>
+                      <option value="relevance">Most relevant</option>
+                      <option value="new">Newest</option>
+                      <option value="top">Most liked</option>
+                    </select>
+                  </label>
+                </>
+              )}
             </div>
-          )}
-          <div className="field">
-            <span>
-              Formats <span className="hint">None selected = every format</span>
-            </span>
-            <Chips options={FORMATS} selected={draft.filters.formats} labels={FORMAT_LABELS} onToggle={(f) => setFilters({ formats: toggle(draft.filters.formats, f) })} />
-          </div>
-          <div className="field">
-            <span>
-              Topics <span className="hint">None selected = your favourite topics</span>
-            </span>
-            <Chips options={TOPICS} selected={draft.filters.topics} onToggle={(t) => setFilters({ topics: toggle(draft.filters.topics, t) })} />
-            {draft.filters.topics.length > 0 && (
-              <Switch checked={draft.filters.onlyTopics} onChange={(onlyTopics) => setFilters({ onlyTopics })} label="Only these topics" />
-            )}
-            <PickList
-              kind="topic"
-              ids={draft.filters.topicIds ?? []}
-              blocked={draft.filters.blockedTopicIds ?? []}
-              only={draft.filters.onlyTopicIds ?? false}
-              labels={labels}
-              onOnly={(onlyTopicIds) => setFilters({ onlyTopicIds })}
-              onAdd={(pick, list) => addPick('topic', list, pick)}
-              onRemove={(id, list) => removePick('topic', list, id)}
-            />
-          </div>
-          <div className="field">
-            <span>
-              Creators <span className="hint">None selected = everyone</span>
-            </span>
-            <Chips
-              options={CREATOR_KINDS.filter((k) => k !== 'unknown')}
-              selected={draft.filters.creatorKinds}
-              labels={CREATOR_KIND_LABELS}
-              onToggle={(k) => setFilters({ creatorKinds: toggle(draft.filters.creatorKinds, k as CreatorKind) })}
-            />
-            <PickList
-              kind="creator"
-              ids={draft.filters.creatorIds ?? []}
-              blocked={draft.filters.blockedCreatorIds ?? []}
-              only={draft.filters.onlyCreators ?? false}
-              labels={labels}
-              onOnly={(onlyCreators) => setFilters({ onlyCreators })}
-              onAdd={(pick, list) => addPick('creator', list, pick)}
-              onRemove={(id, list) => removePick('creator', list, id)}
-            />
-          </div>
-        </section>
+          </section>
 
+          <section className="editor-section">
+            <h3>Age rating</h3>
+            <div className="form-stack">
+              <label className="field">
+                Highest age rating
+                <select value={draft.filters.maxRating ?? '16+'} onChange={(e) => setFilters({ maxRating: e.target.value as Rating })}>
+                  {RATINGS.map((rating) => (
+                    <option key={rating} value={rating}>
+                      {RATING_LABELS[rating]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="field">
+                <span>
+                  Disregard <span className="hint">Never show content about these</span>
+                </span>
+                <Chips
+                  options={RATING_REASONS}
+                  selected={draft.filters.disregard ?? []}
+                  onToggle={(reason) => setFilters({ disregard: toggle(draft.filters.disregard ?? [], reason) })}
+                />
+              </div>
+            </div>
+            <p className="hint" style={{ marginTop: 8 }}>
+              The content types to disregard go to your algorithm search nodes with the request, and the client itself checks every item's metadata
+              against them before showing it.
+            </p>
+          </section>
+
+          <section className="editor-section">
+            <h3>Formats</h3>
+            <Chips options={FORMATS} selected={draft.filters.formats} labels={FORMAT_LABELS} onToggle={(format) => setFilters({ formats: toggle(draft.filters.formats, format) })} />
+            <LevelSlider label="Weigh the chosen formats" value={formatLevel} onChange={(level) => setFilters({ formatLevel: level })} />
+          </section>
+
+          <section className="editor-section">
+            <h3>Platforms</h3>
+            <PickButtons entries={platformEntries} onCycle={cyclePlatform} />
+            <LevelSlider
+              label="Include or exclude the chosen platforms"
+              value={platformLevel}
+              onChange={(level) => setFilters({ platformLevel: level })}
+            />
+          </section>
+          <section className="editor-section">
+            <h3>Topics</h3>
+            <PickButtons entries={topicEntries} onCycle={(id) => cycleOrPick('topic', id)} />
+            <AddPickRow kind="topic" onAdd={(pick) => addPick('topic', pick)} />
+            <LevelSlider label="Weigh the chosen topics" value={topicLevel} onChange={(level) => setFilters({ topicLevel: level })} />
+          </section>
+
+          <section className="editor-section">
+            <h3>Creators</h3>
+            <PickButtons
+              entries={[
+                { id: '__subscribed__', label: 'Subscribed creators', state: draft.filters.subscribedCreators !== false ? 'on' : 'off' },
+                ...creatorEntries,
+              ]}
+              onCycle={(id) => {
+                if (id === '__subscribed__') setFilters({ subscribedCreators: draft.filters.subscribedCreators === false });
+                else cycleOrPick('creator', id);
+              }}
+            />
+            <AddPickRow kind="creator" onAdd={(pick) => addPick('creator', pick)} />
+            <LevelSlider label="Weigh the chosen creators" value={creatorLevel} onChange={(level) => setFilters({ creatorLevel: level })} />
+          </section>
+        </>
+      )}
+
+      {tab === 'display' && (
         <section className="editor-section">
           <h3>Display</h3>
           <div className="editor-display">
@@ -537,9 +663,76 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
                   <p className="hint">Browsers only start videos by themselves when they are muted; unmute with one tap.</p>
                 </>
               )}
+              {(layout === 'shorts' || layout === 'stream') && (
+                <>
+                  {layout === 'shorts' && (
+                    <Switch
+                      checked={draft.options.shortsLoop !== false}
+                      onChange={(shortsLoop) => setOptions({ shortsLoop })}
+                      label="Loop each short (off = stop when it ends)"
+                    />
+                  )}
+                  <div className="field">
+                    <span>
+                      Rail buttons <span className="hint">Which ones this page shows</span>
+                    </span>
+                    <Chips
+                      options={SHORT_BUTTONS}
+                      selected={draft.options.shortButtons ?? [...DEFAULT_SHORT_BUTTONS]}
+                      labels={SHORT_BUTTON_LABELS}
+                      onToggle={(button) => setOptions({ shortButtons: toggle(draft.options.shortButtons ?? [...DEFAULT_SHORT_BUTTONS], button as ShortButton) })}
+                    />
+                  </div>
+                  <label className="field">
+                    Button size
+                    <select
+                      value={draft.options.shortsButtonSize ?? 'medium'}
+                      onChange={(e) => setOptions({ shortsButtonSize: e.target.value as PageConfig['options']['shortsButtonSize'] })}
+                    >
+                      <option value="small">Small</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    Comments over the short
+                    <select
+                      value={draft.options.shortsComments ?? 'cover'}
+                      onChange={(e) => setOptions({ shortsComments: e.target.value as 'cover' | 'shrink' })}
+                    >
+                      <option value="cover">Cover the short</option>
+                      <option value="shrink">Shrink the short</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    Comments share of the screen
+                    <input
+                      type="range"
+                      min={10}
+                      max={90}
+                      step={5}
+                      value={draft.options.shortsCommentsSize ?? 50}
+                      onChange={(e) => setOptions({ shortsCommentsSize: Number(e.target.value) })}
+                    />
+                    <span className="hint">{draft.options.shortsCommentsSize ?? 50}% of the screen</span>
+                  </label>
+                </>
+              )}
             </div>
           </div>
         </section>
+      )}
+      <div className="row" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+        {page.preset && (
+          <button className="small" onClick={handleReset}>
+            <RotateCcw size={14} /> Reset all settings to preset
+          </button>
+        )}
+        {!isNew && !page.preset && (
+          <button className="small danger" onClick={remove}>
+            <Trash2 size={14} /> Delete page
+          </button>
+        )}
       </div>
     </Modal>
   );

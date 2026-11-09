@@ -1,5 +1,5 @@
 import { Bookmark, Plus, Trash2, Upload } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { HistoryItem, LibraryItem, SavedState } from '../../../src/shared/clientapi';
 import { api, errorMessage } from '../api';
@@ -7,6 +7,79 @@ import { SaveCidButton } from '../components/SaveCid';
 import { CopyButton, Empty, Loading } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, timeAgo, watchPath } from '../util';
+
+const PAGE = 25;
+
+interface Pager {
+  mode: 'pages' | 'lazy';
+  setMode: (mode: 'pages' | 'lazy') => void;
+  page: number;
+  setPage: (update: (page: number) => number) => void;
+  setShown: (update: (shown: number) => number) => void;
+  sentinel: React.RefObject<HTMLDivElement | null>;
+  pages: number;
+  start: number;
+  end: number;
+}
+
+/** How one list loads: a page at a time, or as the inner card is scrolled. */
+function usePager(total: number): Pager {
+  const [mode, setMode] = useState<'pages' | 'lazy'>('pages');
+  const [page, setPage] = useState(0);
+  const [shown, setShown] = useState(PAGE);
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (mode !== 'lazy') return;
+    const node = sentinel.current;
+    if (!node) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setShown((n) => n + PAGE);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [mode, total]);
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  const start = mode === 'pages' ? Math.min(page, pages - 1) * PAGE : 0;
+  const end = mode === 'pages' ? start + PAGE : Math.min(total, shown);
+  return { mode, setMode, page, setPage, setShown, sentinel, pages, start, end };
+}
+
+function PagerBar({ pager, total }: { pager: Pager; total: number }) {
+  return (
+    <div className="row between" style={{ marginBottom: 8 }}>
+      <span className="tiny faint">
+        {total} items{pager.mode === 'pages' ? ` · page ${Math.min(pager.page, pager.pages - 1) + 1} of ${pager.pages}` : ''}
+      </span>
+      <select
+        className="small"
+        value={pager.mode}
+        aria-label="How the list loads"
+        onChange={(e) => {
+          pager.setMode(e.target.value as 'pages' | 'lazy');
+          pager.setPage(() => 0);
+          pager.setShown(() => PAGE);
+        }}
+      >
+        <option value="pages">By page</option>
+        <option value="lazy">As I scroll</option>
+      </select>
+    </div>
+  );
+}
+
+function PagerNav({ pager }: { pager: Pager }) {
+  if (pager.mode !== 'pages' || pager.pages <= 1) return null;
+  return (
+    <div className="row" style={{ marginTop: 8, gap: 8 }}>
+      <button className="small" disabled={pager.page <= 0} onClick={() => pager.setPage((p) => Math.max(0, p - 1))}>
+        Previous
+      </button>
+      <button className="small" disabled={pager.page >= pager.pages - 1} onClick={() => pager.setPage((p) => Math.min(pager.pages - 1, p + 1))}>
+        Next
+      </button>
+    </div>
+  );
+}
 
 export function LibraryPage() {
   const { state, toast } = useApp();
@@ -23,11 +96,14 @@ export function LibraryPage() {
   };
   useEffect(load, []);
 
+  const savedItems =
+    filter === 'all' ? (saved?.items ?? []) : filter === 'none' ? (saved?.items ?? []).filter((item) => item.collections.length === 0) : (saved?.items ?? []).filter((item) => item.collections.includes(filter));
+  const publishedPager = usePager(data?.published.length ?? 0);
+  const savedPager = usePager(savedItems.length);
+
   if (!data || !state) return <div className="page"><Loading /></div>;
   const nodeName = (id: string) => state.nodes.find((n) => n.id === id)?.name ?? id.slice(0, 10);
   const collectionName = (id: string) => saved?.collections.find((c) => c.id === id)?.name ?? id;
-  const savedItems =
-    filter === 'all' ? (saved?.items ?? []) : filter === 'none' ? (saved?.items ?? []).filter((item) => item.collections.length === 0) : (saved?.items ?? []).filter((item) => item.collections.includes(filter));
 
   return (
     <div className="page page-narrow">
@@ -47,7 +123,9 @@ export function LibraryPage() {
             </Link>
           </Empty>
         ) : (
-          <div className="card" style={{ padding: 0 }}>
+          <>
+          <PagerBar pager={publishedPager} total={data.published.length} />
+          <div className="card" style={{ padding: 0, maxHeight: 420, overflowY: 'auto' }}>
             <table className="table">
               <thead>
                 <tr>
@@ -58,7 +136,7 @@ export function LibraryPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.published.map((item) => (
+                {data.published.slice(publishedPager.start, publishedPager.end).map((item) => (
                   <tr key={item.id + item.publishedAt}>
                     <td>
                       <Link to={watchPath(item.id)} className="link">
@@ -85,7 +163,12 @@ export function LibraryPage() {
                 ))}
               </tbody>
             </table>
+            {publishedPager.mode === 'lazy' && publishedPager.end < data.published.length && (
+              <div ref={publishedPager.sentinel} style={{ height: 1 }} />
+            )}
           </div>
+          <PagerNav pager={publishedPager} />
+          </>
         )}
         <p className="hint" style={{ marginTop: 8 }}>
           Review status on each algorithm node is shown under <Link to="/earn" className="link">Earn → Algorithm nodes</Link>.
@@ -135,17 +218,16 @@ export function LibraryPage() {
               {collection.name}
             </button>
           ))}
-          <button className={filter === 'none' ? 'small primary' : 'small'} onClick={() => setFilter('none')}>
-            Unsorted
-          </button>
         </div>
         {savedItems.length === 0 ? (
           <Empty icon={<Bookmark size={36} />} title="Nothing saved here">
             <p className="small muted">Save a cid from any content with the bookmark button, and sort it into your collections.</p>
           </Empty>
         ) : (
-          <div className="card">
-            {savedItems.map((item) => (
+          <>
+          <PagerBar pager={savedPager} total={savedItems.length} />
+          <div className="card" style={{ maxHeight: 420, overflowY: 'auto' }}>
+            {savedItems.slice(savedPager.start, savedPager.end).map((item) => (
               <div key={item.id} className="row between" style={{ padding: '6px 0', gap: 10 }}>
                 <div style={{ minWidth: 0 }}>
                   <Link to={watchPath(item.id)} className="link">
@@ -178,7 +260,10 @@ export function LibraryPage() {
                 </div>
               </div>
             ))}
+            {savedPager.mode === 'lazy' && savedPager.end < savedItems.length && <div ref={savedPager.sentinel} style={{ height: 1 }} />}
           </div>
+          <PagerNav pager={savedPager} />
+          </>
         )}
         {(saved?.collections ?? []).length > 0 && (
           <div className="card" style={{ marginTop: 10 }}>

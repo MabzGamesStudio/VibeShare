@@ -2,10 +2,13 @@ import {
   AlertTriangle,
   Ban,
   BarChart3,
+  ChevronDown,
+  ChevronRight,
   Download,
   ExternalLink,
   Flag,
   HelpCircle,
+  Info,
   Plus,
   Server,
   ShieldCheck,
@@ -27,6 +30,7 @@ import {
   FORMAT_LABELS,
   FORMATS,
   RATING_LABELS,
+  RATING_REASONS,
   RATINGS,
   TOPICS,
   topicIdOf,
@@ -41,12 +45,11 @@ import { DownloadButton } from '../components/Download';
 import { SaveCidButton } from '../components/SaveCid';
 import { ShareButton } from '../components/Share';
 import { StorageTierCard } from '../components/StorageTier';
-import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
+import { Avatar, Chips, CopyButton, Loading, Modal, Spinner, WatchedBadge, toggle } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, groupPath, profilePath, timeAgo, topicPath } from '../util';
 
 const KIND_LABELS: Record<SuggestionKind, string> = {
-  tag: 'Add a tag',
   topic: 'Add a topic',
   format: 'Correct the format',
   rating: 'Correct the age rating',
@@ -99,11 +102,13 @@ function useRatio(view: ContentView): [number, (width: number, height: number) =
   return [ratio, measured];
 }
 
-/** A player box with the content's proportions, as large as fits the window. */
+/** A player box with the content's proportions, as large as fits the window. Tall content
+ *  (a short, a portrait picture) never takes more than 80% of the screen height and is
+ *  scaled to fit — never cut off. */
 function Fit({ ratio, children }: { ratio: number; children: React.ReactNode }) {
   const clamped = Math.min(4, Math.max(0.25, ratio));
   return (
-    <div className="player fit" style={{ '--ratio': clamped } as React.CSSProperties}>
+    <div className={`player fit ${clamped <= 1 ? 'fit-tall' : ''}`} style={{ '--ratio': clamped } as React.CSSProperties}>
       {children}
     </div>
   );
@@ -583,6 +588,43 @@ function ClaimDialog({ view, onClose }: { view: ContentView; onClose: () => void
   );
 }
 
+/** One foldable section of the suggest modal: its description, inputs, and a note for the operator. */
+function SuggestFold({
+  title,
+  open,
+  onToggle,
+  description,
+  children,
+  note,
+  onNote,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  description: string;
+  children?: React.ReactNode;
+  note: string;
+  onNote: (note: string) => void;
+}) {
+  return (
+    <div className="suggest-fold">
+      <button type="button" className="suggest-fold-head" onClick={onToggle} aria-expanded={open}>
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />} <strong>{title}</strong>
+      </button>
+      {open && (
+        <div className="form-stack" style={{ marginTop: 8 }}>
+          <p className="small muted">{description}</p>
+          {children}
+          <label className="field">
+            Note for the operator (optional)
+            <textarea value={note} onChange={(e) => onNote(e.target.value)} placeholder="Anything else the operator should know." />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SuggestDialog({
   view,
   nodeId,
@@ -598,16 +640,20 @@ function SuggestDialog({
   const [tab, setTab] = useState<'provider' | 'algorithm'>(view.decidedBy ? 'algorithm' : 'provider');
   const [providerId, setProviderId] = useState(providers.find((node) => node.enabled)?.id ?? providers[0]?.id ?? '');
   const [algorithmId, setAlgorithmId] = useState(nodeId || algorithms.find((node) => node.enabled)?.id || algorithms[0]?.id || '');
+  const [open, setOpen] = useState<Record<string, boolean>>({ sources: true });
   const [rows, setRows] = useState<SourceRow[]>([{ platform: 'youtube', url: '' }]);
   const [duplicateOf, setDuplicateOf] = useState('');
-  const [note, setNote] = useState('');
-  const [kind, setKind] = useState<SuggestionKind>('tag');
+  const [notes, setNotes] = useState<Record<string, string>>({ sources: '', duplicate: '', upload: '', meta: '', warnings: '' });
+  const [kind, setKind] = useState<SuggestionKind>('topic');
   const [value, setValue] = useState('');
   const [reason, setReason] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
   const media = mediaRef.current;
   const [atTime, setAtTime] = useState(Boolean(media && media.currentTime > 0));
   const time = media?.currentTime ?? 0;
   const [busy, setBusy] = useState(false);
+  const setNote = (key: string, note: string) => setNotes((current) => ({ ...current, [key]: note }));
+  const fold = (key: string) => () => setOpen((current) => ({ ...current, [key]: !current[key] }));
 
   const submit = async () => {
     setBusy(true);
@@ -615,41 +661,42 @@ function SuggestDialog({
       const sources = rows.filter((row) => row.url.trim());
       if (tab === 'provider') {
         if (sources.length) {
-          await api('/api/suggest/provider', { body: { nodeId: providerId, id: view.id, kind: 'source', sources, note: note || undefined } });
+          await api('/api/suggest/provider', { body: { nodeId: providerId, id: view.id, kind: 'source', sources, note: notes.sources || undefined } });
         }
         if (duplicateOf.trim()) {
           await api('/api/suggest/provider', {
-            body: { nodeId: providerId, id: view.id, kind: 'duplicate', duplicateOf: duplicateOf.trim(), note: note || undefined },
+            body: { nodeId: providerId, id: view.id, kind: 'duplicate', duplicateOf: duplicateOf.trim(), note: notes.duplicate || undefined },
           });
         }
         if (!sources.length && !duplicateOf.trim()) {
+          const note = notes.upload || notes.sources || notes.duplicate;
           if (note.trim().length < 3) throw new Error('Say what is missing');
           await api('/api/suggest/provider', { body: { nodeId: providerId, id: view.id, kind: 'missing', note: note.trim() } });
         }
         toast('Sent to the content provider node — thank you!', 'success');
       } else {
-        if (reason.trim().length < 3) throw new Error('Say why (at least a few words)');
         const statuses: string[] = [];
-        const suggest = async (body: Record<string, unknown>) => {
+        const suggest = async (body: Record<string, unknown>, note: string) => {
           const result = await api<{ status: string; agreeing: number }>('/api/suggest', {
-            body: { nodeId: algorithmId, id: view.id, reason, ...body },
+            body: { nodeId: algorithmId, id: view.id, reason: note.trim() || reason.trim() || 'Suggested from the content page', ...body },
           });
           statuses.push(result.status);
         };
-        for (const row of sources) await suggest({ kind: 'source', value: row.url.trim(), platform: row.platform });
-        if (duplicateOf.trim()) await suggest({ kind: 'duplicate', value: duplicateOf.trim() });
+        for (const row of sources) await suggest({ kind: 'source', value: row.url.trim(), platform: row.platform }, notes.sources);
+        for (const warning of warnings) await suggest({ kind: 'tag', value: warning }, notes.warnings || `Content warning: ${warning}`);
         if (value.trim()) {
-          await suggest({
-            kind,
-            value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
-            timestamp: atTime ? time : undefined,
-          });
+          if (reason.trim().length < 3 && notes.meta.trim().length < 3) throw new Error('Say why (at least a few words)');
+          await suggest(
+            {
+              kind,
+              value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
+              timestamp: atTime ? time : undefined,
+            },
+            notes.meta
+          );
         }
-        if (!statuses.length) throw new Error('Add a source, a duplicate id, or a correction');
-        toast(
-          statuses.includes('accepted') ? 'Accepted — thanks! Credits were added to your account.' : 'Sent for review.',
-          'success'
-        );
+        if (!statuses.length) throw new Error('Add a source, a correction, or a content warning');
+        toast(statuses.includes('accepted') ? 'Accepted — thanks! Credits were added to your account.' : 'Sent for review.', 'success');
       }
       onClose();
     } catch (error) {
@@ -658,7 +705,6 @@ function SuggestDialog({
       setBusy(false);
     }
   };
-
   return (
     <Modal
       title="Suggest missing data"
@@ -681,139 +727,211 @@ function SuggestDialog({
           Algorithm search nodes
         </button>
       </div>
-      <div className="form-stack">
-        <label className="field">
-          {tab === 'provider' ? 'Content provider node' : 'Algorithm search node'}
-          <select
-            value={tab === 'provider' ? providerId : algorithmId}
-            onChange={(e) => (tab === 'provider' ? setProviderId(e.target.value) : setAlgorithmId(e.target.value))}
-          >
-            {(tab === 'provider' ? providers : algorithms).map((node) => (
-              <option key={node.id} value={node.id}>
-                {node.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <h3>Missing sources</h3>
-        <p className="small muted">
-          Links to this content on other platforms — one content id can carry several sources. Pick the platform and paste the link.
-        </p>
+      <label className="field">
+        {tab === 'provider' ? 'Content provider node' : 'Algorithm search node'}
+        <select
+          value={tab === 'provider' ? providerId : algorithmId}
+          onChange={(e) => (tab === 'provider' ? setProviderId(e.target.value) : setAlgorithmId(e.target.value))}
+        >
+          {(tab === 'provider' ? providers : algorithms).map((node) => (
+            <option key={node.id} value={node.id}>
+              {node.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <SuggestFold
+        title="Missing sources"
+        open={open.sources ?? true}
+        onToggle={fold('sources')}
+        description="Links to this content on other platforms — one content id can carry several sources. Pick the platform and paste the link."
+        note={notes.sources}
+        onNote={(note) => setNote('sources', note)}
+      >
         <SourceRows rows={rows} onChange={setRows} />
+      </SuggestFold>
 
-        <h3>Duplicate content</h3>
-        <p className="small muted">
-          If this is the same content as some other id, say which: it helps the content provider node compress or dedupe its store.
-        </p>
-        <label className="field">
-          The other content id
-          <input type="text" className="mono" placeholder="vs1… or yt:…" value={duplicateOf} onChange={(e) => setDuplicateOf(e.target.value)} />
-        </label>
+      {tab === 'provider' && (
+        <SuggestFold
+          title="Duplicate content"
+          open={open.duplicate ?? false}
+          onToggle={fold('duplicate')}
+          description="If this is the same content as some other id, say which: it helps the content provider node compress or dedupe its store."
+          note={notes.duplicate}
+          onNote={(note) => setNote('duplicate', note)}
+        >
+          <label className="field">
+            The other content id
+            <input type="text" className="mono" placeholder="vs1… or yt:…" value={duplicateOf} onChange={(e) => setDuplicateOf(e.target.value)} />
+          </label>
+        </SuggestFold>
+      )}
 
-        <h3>Missing content data</h3>
-        <p className="small muted">If no node has the data of this content id, upload it here.</p>
+      <SuggestFold
+        title="Missing content data"
+        open={open.upload ?? false}
+        onToggle={fold('upload')}
+        description="If no node has the data of this content id, upload it here."
+        note={notes.upload}
+        onNote={(note) => setNote('upload', note)}
+      >
         <UploadSection
           providers={tab === 'provider' && providerId ? [providerId] : providers.filter((node) => node.enabled).map((node) => node.id)}
           algorithms={tab === 'algorithm' && algorithmId ? [algorithmId] : []}
           sources={rows.filter((row) => row.url.trim()).map((row) => row.url.trim())}
         />
-
-        {tab === 'algorithm' ? (
-          <>
-            <h3>Correct the metadata</h3>
-            <p className="small muted">
-              Algorithm nodes reward accepted suggestions with credits. Say why, and point to the moment that shows it.
-            </p>
+      </SuggestFold>
+      {tab === 'algorithm' && (
+        <>
+          <SuggestFold
+            title="Correct the metadata"
+            open={open.meta ?? false}
+            onToggle={fold('meta')}
+            description="Algorithm nodes reward accepted suggestions with credits. Say why, and point to the moment that shows it."
+            note={notes.meta}
+            onNote={(note) => setNote('meta', note)}
+          >
             <label className="field">
               What
               <select value={kind} onChange={(e) => (setKind(e.target.value as SuggestionKind), setValue(''))}>
-                {SUGGESTION_KINDS.filter((k) => k !== 'source' && k !== 'duplicate').map((k) => (
+                {SUGGESTION_KINDS.filter((k) => k !== 'source' && k !== 'duplicate' && k !== 'rating').map((k) => (
                   <option key={k} value={k}>
                     {KIND_LABELS[k]}
                   </option>
                 ))}
               </select>
             </label>
-        {kind === 'format' ? (
-          <label className="field">
-            Format
-            <select value={value} onChange={(e) => setValue(e.target.value)}>
-              <option value="">Choose…</option>
-              {FORMATS.map((f) => (
-                <option key={f} value={f}>
-                  {FORMAT_LABELS[f]}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : kind === 'rating' ? (
-          <label className="field">
-            Age rating
-            <select value={value} onChange={(e) => setValue(e.target.value)}>
-              <option value="">Choose…</option>
-              {RATINGS.map((r) => (
-                <option key={r} value={r}>
-                  {RATING_LABELS[r]}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : kind === 'topic' ? (
-          <label className="field">
-            Topic
-            <input list="topics" value={value} onChange={(e) => setValue(e.target.value)} />
-            <datalist id="topics">
-              {TOPICS.map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
-          </label>
-        ) : kind === 'report' ? (
-          <label className="field">
-            Problem
-            <select value={value} onChange={(e) => setValue(e.target.value)}>
-              <option value="">Choose…</option>
-              <option value="illegal">Illegal content</option>
-              <option value="spam">Spam or scam</option>
-              <option value="misleading">Misleading</option>
-              <option value="copyright">Copyright</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-        ) : kind === 'creator' ? (
-          <label className="field">
-            Creator
-            <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Who made this" />
-          </label>
-        ) : kind === 'published' ? (
-          <label className="field">
-            Published
-            <input type="datetime-local" value={value} onChange={(e) => setValue(e.target.value)} />
-          </label>
-        ) : (
-          <label className="field">
-            Tag
-            <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. jump-scares" />
-          </label>
-        )}
-        <label className="field">
-          Why
-          <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Describe what in the content shows this." />
-        </label>
-        {media && (
-          <label className="row small">
-            <input type="checkbox" checked={atTime} onChange={(e) => setAtTime(e.target.checked)} /> Evidence at {formatDuration(time)}
-          </label>
-        )}
-          </>
-        ) : (
-          <label className="field">
-            Note for the operator (optional)
-            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything else the operator should know." />
-          </label>
-        )}
+            {kind === 'format' ? (
+              <label className="field">
+                Format
+                <select value={value} onChange={(e) => setValue(e.target.value)}>
+                  <option value="">Choose…</option>
+                  {FORMATS.map((f) => (
+                    <option key={f} value={f}>
+                      {FORMAT_LABELS[f]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : kind === 'topic' ? (
+              <label className="field">
+                Topic
+                <input list="topics" value={value} onChange={(e) => setValue(e.target.value)} />
+                <datalist id="topics">
+                  {TOPICS.map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+              </label>
+            ) : kind === 'report' ? (
+              <label className="field">
+                Problem
+                <select value={value} onChange={(e) => setValue(e.target.value)}>
+                  <option value="">Choose…</option>
+                  <option value="illegal">Illegal content</option>
+                  <option value="spam">Spam or scam</option>
+                  <option value="misleading">Misleading</option>
+                  <option value="copyright">Copyright</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+            ) : kind === 'creator' ? (
+              <label className="field">
+                Creator
+                <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Who made this" />
+              </label>
+            ) : kind === 'published' ? (
+              <label className="field">
+                Published
+                <input type="datetime-local" value={value} onChange={(e) => setValue(e.target.value)} />
+              </label>
+            ) : (
+              <label className="field">
+                Tag
+                <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. jump-scares" />
+              </label>
+            )}
+            <label className="field">
+              Why
+              <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Describe what in the content shows this." />
+            </label>
+            {media && (
+              <label className="row small">
+                <input type="checkbox" checked={atTime} onChange={(e) => setAtTime(e.target.checked)} /> Evidence at {formatDuration(time)}
+              </label>
+            )}
+          </SuggestFold>
+
+          <SuggestFold
+            title="Content warnings"
+            open={open.warnings ?? false}
+            onToggle={fold('warnings')}
+            description="What this content contains that its age rating is about — pick every warning that applies. This is separate from correcting the metadata."
+            note={notes.warnings}
+            onNote={(note) => setNote('warnings', note)}
+          >
+            <Chips options={RATING_REASONS} selected={warnings} onToggle={(warning) => setWarnings(toggle(warnings, warning))} />
+          </SuggestFold>
+        </>
+      )}
+    </Modal>
+  );
+}
+/** Where the content comes from and how it is stored — behind the (i) next to the video. */
+function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedIndex: number; onClose: () => void }) {
+  const [tab, setTab] = useState<'from' | 'tier'>('from');
+  return (
+    <Modal title="About this content" onClose={onClose} wide>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        <button className={`tab ${tab === 'from' ? 'on' : ''}`} onClick={() => setTab('from')}>
+          Where it comes from
+        </button>
+        <button className={`tab ${tab === 'tier' ? 'on' : ''}`} onClick={() => setTab('tier')}>
+          Storage tier
+        </button>
       </div>
+      {tab === 'from' ? (
+        <dl className="kv" style={{ marginTop: 12 }}>
+          <dt>Algorithm</dt>
+          <dd>
+            {view.decidedBy ? (
+              <span className="row" style={{ gap: 6 }}>
+                <ShieldCheck size={14} /> {view.decidedBy.name} ({view.status})
+              </span>
+            ) : (
+              'No algorithm node knows it'
+            )}
+          </dd>
+          <dt>Provider</dt>
+          <dd>
+            {view.provider
+              ? `${view.provider.name} · ${view.provider.perMiB} credit${view.provider.perMiB === 1 ? '' : 's'}/MiB (≈${view.provider.estimate} for all)`
+              : view.embeds.length
+                ? `External: ${view.embeds[embedIndex]?.label}`
+                : 'Unavailable'}
+          </dd>
+          {view.manifest && (
+            <>
+              <dt>File</dt>
+              <dd>
+                {view.manifest.name} · {formatBytes(view.manifest.size)}
+              </dd>
+              <dt>Type</dt>
+              <dd>{view.manifest.mime}</dd>
+              <dt>Chunks</dt>
+              <dd>
+                {view.manifest.chunks === 1 ? '1 chunk' : `${view.manifest.chunks} chunks of ${formatBytes(view.manifest.chunkSize)}`}
+              </dd>
+            </>
+          )}
+          <dt>Published</dt>
+          <dd>{timeAgo(view.item?.publishedAt ?? view.manifest?.createdAt) || '–'}</dd>
+          <dt>Id</dt>
+          <dd className="mono tiny">{view.id}</dd>
+        </dl>
+      ) : (
+        <StorageTierCard cid={view.id} preferred={view.provider?.id} />
+      )}
     </Modal>
   );
 }
@@ -829,6 +947,7 @@ export function WatchPage() {
   const [stats, setStats] = useState({ likes: 0, dislikes: 0 });
   const [suggesting, setSuggesting] = useState(false);
   const [claiming, setClaiming] = useState(false);
+  const [info, setInfo] = useState(false);
   const mediaRef = useRef<HTMLMediaElement | null>(null);
 
   const load = useCallback(async () => {
@@ -870,7 +989,7 @@ export function WatchPage() {
   if (!view || !state) return <div className="page"><Loading /></div>;
 
   const item = view.item;
-  const meta = (view.manifest?.meta ?? {}) as { title?: string; description?: string; tags?: string[] };
+  const meta = (view.manifest?.meta ?? {}) as { title?: string; description?: string; topics?: string[] };
   const title = item?.title ?? meta.title ?? view.manifest?.name ?? view.id;
   const creator = item?.creator ?? (view.manifest?.creator ? { id: view.manifest.creator.id, name: view.manifest.creator.name ?? 'Unnamed creator', kind: (view.manifest.creator.kind ?? 'unknown') as CreatorKind } : undefined);
   const subscribed = creator ? state.subscriptions.some((s) => s.id === creator.id) : false;
@@ -973,7 +1092,7 @@ export function WatchPage() {
                 <p className="small faint embed-placeholder-text" style={{ marginTop: 10, maxWidth: 340 }}>
                   This is a placeholder standing in for the platform's player. Third-party embeds are turned off: an embedded player from another
                   platform brings <strong>third-party tracking cookies</strong> with it. You can allow them — and change your mind at any time — in{' '}
-                  <Link className="link" to="/settings#privacy">
+                  <Link className="link" to="/settings?tab=privacy">
                     Settings → Privacy
                   </Link>
                   .
@@ -1000,7 +1119,6 @@ export function WatchPage() {
                   <Link to={creatorPath(creator.id)} style={{ fontWeight: 600 }}>
                     {creator.name}
                   </Link>
-                  <div className="tiny faint">{CREATOR_KIND_LABELS[creator.kind]}</div>
                 </div>
                 <button className={subscribed ? '' : 'primary'} onClick={toggleSubscription} style={{ marginLeft: 8 }}>
                   {subscribed ? 'Subscribed' : 'Subscribe'}
@@ -1018,6 +1136,8 @@ export function WatchPage() {
                 </button>
               </div>
             )}
+          </div>
+          <div className="watch-actions watch-action-buttons">
             <button onClick={() => setSuggesting(true)}>
               <Flag size={16} /> Suggest
             </button>
@@ -1063,79 +1183,9 @@ export function WatchPage() {
                   </Link>
                 );
               })}
-              {item.tags.map((tag) => (
-                <Link key={tag} to={`/search?q=${encodeURIComponent('#' + tag)}`} className="badge">
-                  #{tag}
-                </Link>
-              ))}
             </div>
           )}
           {(item?.description ?? meta.description) && <div className="description">{item?.description ?? meta.description}</div>}
-        </div>
-
-        <aside className="side-panel">
-          <div className="card">
-            <h3>Where it comes from</h3>
-            <dl className="kv" style={{ marginTop: 12 }}>
-              <dt>Algorithm</dt>
-              <dd>
-                {view.decidedBy ? (
-                  <span className="row" style={{ gap: 6 }}>
-                    <ShieldCheck size={14} /> {view.decidedBy.name} ({view.status})
-                  </span>
-                ) : (
-                  'No algorithm node knows it'
-                )}
-              </dd>
-              <dt>Provider</dt>
-              <dd>
-                {view.provider
-                  ? `${view.provider.name} · ${view.provider.perMiB} credit${view.provider.perMiB === 1 ? '' : 's'}/MiB (≈${view.provider.estimate} for all)`
-                  : view.embeds.length
-                    ? `External: ${view.embeds[embedIndex]?.label}`
-                    : 'Unavailable'}
-              </dd>
-              {view.manifest && (
-                <>
-                  <dt>File</dt>
-                  <dd>
-                    {view.manifest.name} · {formatBytes(view.manifest.size)}
-                  </dd>
-                  <dt>Type</dt>
-                  <dd>{view.manifest.mime}</dd>
-                  <dt>Chunks</dt>
-                  <dd>
-                    {view.manifest.chunks === 1 ? '1 chunk' : `${view.manifest.chunks} chunks of ${formatBytes(view.manifest.chunkSize)}`}
-                  </dd>
-                </>
-              )}
-              <dt>Published</dt>
-              <dd>{timeAgo(item?.publishedAt ?? view.manifest?.createdAt) || '–'}</dd>
-              <dt>Id</dt>
-              <dd className="mono tiny">{view.id}</dd>
-            </dl>
-          </div>
-          <StorageTierCard cid={view.id} preferred={view.provider?.id} />
-          {item?.notes && item.notes.length > 0 && (
-            <div className="card">
-              <h3>Why it is tagged</h3>
-              <div style={{ marginTop: 12 }}>
-                {item.notes.map((note) => (
-                  <div key={note.kind + note.value} className="note">
-                    <strong>
-                      {note.kind}: {note.value}
-                    </strong>
-                    {note.timestamp !== undefined && (
-                      <button className="small ghost" onClick={() => seek(note.timestamp!)} style={{ marginLeft: 6 }}>
-                        at {formatDuration(note.timestamp)}
-                      </button>
-                    )}
-                    <div className="muted small">{note.reason}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
           {view.embeds.length > 0 && playable && (
             <div className="card">
               <h3>Also on</h3>
@@ -1148,6 +1198,13 @@ export function WatchPage() {
               </div>
             </div>
           )}
+
+        </div>
+
+        <aside className="watch-info-col">
+          <button className="ghost icon watch-info" title="Where it comes from and how it is stored" aria-label="About this content" onClick={() => setInfo(true)}>
+            <Info size={18} />
+          </button>
         </aside>
       </div>
       <Comments contentId={view.id} />
@@ -1155,6 +1212,7 @@ export function WatchPage() {
         <SuggestDialog view={view} nodeId={view.decidedBy?.id ?? ''} mediaRef={mediaRef} onClose={() => setSuggesting(false)} />
       )}
       {claiming && <ClaimDialog view={view} onClose={() => setClaiming(false)} />}
+      {info && <InfoDialog view={view} embedIndex={embedIndex} onClose={() => setInfo(false)} />}
     </div>
   );
 }

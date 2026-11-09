@@ -97,7 +97,8 @@ export function nodePreviewOf(item: Pick<FeedItem, 'format' | 'thumbnail' | 'thu
 }
 
 /** The best still image of an item: the image itself for images, otherwise its thumbnail. */
-export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnail' | 'thumbnailUrl'>): string | undefined {
+export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumbnail' | 'thumbnailUrl' | 'gallery'>): string | undefined {
+  if (item.gallery?.length) return item.gallery[0].url;
   if (!contentPreviews) return undefined;
   const parsed = parseContentId(item.id);
   // With cookies off, the platform's picture may not load — but the preview the

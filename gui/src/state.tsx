@@ -3,6 +3,7 @@ import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientap
 import { useLocation } from 'react-router-dom';
 import { api, errorMessage, onNodesChanged } from './api';
 import { setBlockExternalEmbeds, setContentPreviews } from './media';
+import { postToast, setToastSaving } from './components/toasts';
 import { embedsAllowed, loadConsent, onConsentChange } from './consent';
 
 interface Toast {
@@ -27,7 +28,6 @@ const Context = createContext<AppContext | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ClientState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
   /** When `/api/state` was last read — automatic re-reads are spaced at least this far. */
   const lastRefresh = useRef(0);
 
@@ -41,11 +41,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Every message pops up at the bottom right and stays in the Messages history (the
+  // bell button) — the same system as the content and search nodes' consoles. The client
+  // keeps a copy of them only while the user has that on in Settings → History.
   const toast = useCallback((message: string, kind: Toast['kind'] = 'info') => {
-    const id = Date.now() + Math.random();
-    setToasts((list) => [...list, { id, message, kind }]);
-    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), kind === 'error' ? 7000 : 3500);
+    postToast(message, kind);
   }, []);
+  useEffect(() => setToastSaving(Boolean(state?.settings.toastHistory)), [state?.settings.toastHistory]);
 
   const updateSettings = useCallback(
     async (patch: Partial<Settings>) => {
@@ -122,13 +124,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   return (
     <Context.Provider value={value}>
       {children}
-      <div className="toasts" role="status">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast-${t.kind}`}>
-            {t.message}
-          </div>
-        ))}
-      </div>
     </Context.Provider>
   );
 }
