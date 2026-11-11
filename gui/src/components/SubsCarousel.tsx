@@ -14,21 +14,29 @@ import { Avatar } from './ui';
 export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] }) {
   const { state } = useApp();
   const order = state?.settings.subscriptionOrder ?? 'subscribed';
+  // Random reshuffles once per page load: the tiles keep their places while the page is
+  // open, and every load draws a new order.
+  const salt = useMemo(() => Math.random().toString(36).slice(2), []);
   // The order the carousel shows its tiles in: subscribed date by default, anything else
-  // from the settings. Random is stable for a list (the same ids keep the same order).
+  // from the settings.
   const ordered = useMemo(() => {
     const byId = (id: string) => {
       let hash = 0;
-      for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+      for (const char of id + salt) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
       return hash;
     };
     const list = [...subscriptions];
     if (order === 'az') return list.sort((a, b) => a.name.localeCompare(b.name));
     if (order === 'za') return list.sort((a, b) => b.name.localeCompare(a.name));
-    if (order === 'recent') return list.sort((a, b) => Date.parse(b.lastPostAt ?? b.addedAt) - Date.parse(a.lastPostAt ?? a.addedAt));
+    if (order === 'recent') {
+      // Newest post first — the order the subscribers' content appears on the page below —
+      // and the creators with nothing on that page last.
+      const time = (entry: Subscription) => (entry.lastPostAt ? Date.parse(entry.lastPostAt) || 0 : 0);
+      return list.sort((a, b) => time(b) - time(a));
+    }
     if (order === 'random') return list.sort((a, b) => byId(a.id) - byId(b.id));
     return list.sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
-  }, [subscriptions, order]);
+  }, [subscriptions, order, salt]);
   const rowRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ start: true, end: true });
 

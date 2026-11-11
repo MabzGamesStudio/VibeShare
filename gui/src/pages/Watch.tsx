@@ -102,9 +102,8 @@ function useRatio(view: ContentView): [number, (width: number, height: number) =
   return [ratio, measured];
 }
 
-/** A player box with the content's proportions, as large as fits the window. Tall content
- *  (a short, a portrait picture) never takes more than 80% of the screen height and is
- *  scaled to fit — never cut off. */
+/** A player box with the content's proportions, as large as fits the window but never
+ *  more than 80% of the screen height — scaled to fit, never cut off. */
 function Fit({ ratio, children }: { ratio: number; children: React.ReactNode }) {
   const clamped = Math.min(4, Math.max(0.25, ratio));
   return (

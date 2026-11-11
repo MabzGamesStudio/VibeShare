@@ -1,11 +1,11 @@
 import { Check, Copy, Download, ExternalLink, Link2, Mail, QrCode, Share2 } from 'lucide-react';
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { shareLink } from '../../../src/shared/clientdefaults';
+import { shareBase, shareLink } from '../../../src/shared/clientdefaults';
 import { parseContentId } from '../../../src/shared/sources';
 import { downloadBlob, qrSvg, svgToPng } from '../qr';
 import { useApp } from '../state';
-import { copyText } from '../util';
+import { APP_BASE, copyText } from '../util';
 import { Modal, Switch } from './ui';
 
 export interface ShareTarget {
@@ -102,15 +102,16 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
   // the client this page is open in. The
   // field stays editable: the url (content id included) can be changed before sharing.
   const defaultBase = (() => {
-    // The sharing address in Settings (a hosted copy of the web client) wins whenever it
-    // is set; where this page is served from only stands in when that address is empty.
-    const configured = state?.settings.shareBaseUrl?.trim() ?? '';
-    if (configured) return configured;
+    // The sharing address in Settings (a hosted copy of the web client) overrides the
+    // domain this page is served from whenever it is set to an address; where this page
+    // is served from only stands in when that address is empty.
+    let here = '';
     try {
-      return `${window.location.origin}${new URL('.', document.baseURI).pathname}`.replace(/\/+$/, '');
+      here = `${window.location.origin}${APP_BASE.pathname}`.replace(/\/+$/, '');
     } catch {
-      return state?.settings.shareBaseUrl ?? '';
+      here = '';
     }
+    return shareBase(state?.settings.shareBaseUrl ?? '', here);
   })();
   const [edited, setEdited] = useState<string | null>(null);
   const native = Boolean(parseContentId(target.id)?.native);

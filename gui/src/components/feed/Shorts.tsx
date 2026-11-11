@@ -6,7 +6,7 @@ import { api, errorMessage } from '../../api';
 import { markPreviewed, useTrackingPreviews } from '../../bloom';
 import { useApp } from '../../state';
 import { watchPath } from '../../util';
-import { Comments } from '../Comments';
+import { Comments, useCommentsResize } from '../Comments';
 import { ShareButton } from '../Share';
 import { Spinner } from '../ui';
 import { compact, Fields } from './Fields';
@@ -76,39 +76,56 @@ function Short({
   const shown = new Set<ShortButton>(page.options.shortButtons ?? DEFAULT_SHORT_BUTTONS);
   const mode = page.options.shortsComments === 'shrink' ? 'shrink' : 'cover';
   const share = Math.min(90, Math.max(10, Number(page.options.shortsCommentsSize) || 50));
+  const panel = useCommentsResize(() => setComments(false));
   return (
     <div
       className={`short-stage ${comments ? `comments-${mode}` : ''}`}
-      style={comments ? ({ '--comments-share': `${share}%` } as React.CSSProperties) : undefined}
-      onClick={(event) => {
-        // With the comments open, a click anywhere outside of them closes the section.
-        if (comments && !(event.target as HTMLElement).closest('.short-comments')) setComments(false);
+      style={comments ? ({ '--comments-share': panel.share(share) } as React.CSSProperties) : undefined}
+      onClickCapture={(event) => {
+        // Clicks in the comments panel and on the rail beside it are their own business.
+        if ((event.target as HTMLElement).closest('.short-comments, .short-rail, a')) return;
+        // A click on the video while the panel is open closes it and stops there: the
+        // short must not also toggle play/pause underneath.
+        if (comments) {
+          event.stopPropagation();
+          setComments(false);
+        }
       }}
     >
-      <div className="short-frame">
-        {near ? (
-          <MediaView
-            item={item}
-            active={active && page.options.autoplay}
-            paused={paused}
-            muted={muted}
-            loop={page.options.shortsLoop !== false}
-            fit="contain"
-            ipfsGateway={ipfsGateway}
-          />
-        ) : (
-          <Poster item={item} />
-        )}
-        {/* Catches swipes and taps over embedded players, which would otherwise swallow them. */}
-        <div className="short-shield" onClick={onTogglePause} />
-        {active && paused && (
-          <div className="short-paused">
-            <Pause size={34} />
-          </div>
-        )}
-        {page.fields.length > 0 && (
-          <div className="short-info">
-            <Fields item={item} fields={page.fields} variant="overlay" />
+      <div className="short-main">
+        <div className="short-frame">
+          {near ? (
+            <MediaView
+              item={item}
+              active={active && page.options.autoplay}
+              paused={paused}
+              muted={muted}
+              loop={page.options.shortsLoop !== false}
+              fit="contain"
+              ipfsGateway={ipfsGateway}
+            />
+          ) : (
+            <Poster item={item} />
+          )}
+          {/* Catches swipes and taps over embedded players, which would otherwise swallow them. */}
+          <div className="short-shield" onClick={onTogglePause} />
+          {active && paused && (
+            <div className="short-paused">
+              <Pause size={34} />
+            </div>
+          )}
+          {page.fields.length > 0 && (
+            <div className="short-info">
+              <Fields item={item} fields={page.fields} variant="overlay" />
+            </div>
+          )}
+        </div>
+        {comments && (
+          <div className="short-comments">
+            <div className="comments-handle" role="separator" aria-label="Resize comments" {...panel.handle} />
+            <div className="comments-scroll">
+              <Comments contentId={item.contentId ?? item.id} />
+            </div>
           </div>
         )}
       </div>
@@ -141,11 +158,6 @@ function Short({
           </Link>
         )}
       </div>
-      {comments && (
-        <div className="short-comments">
-          <Comments contentId={item.contentId ?? item.id} />
-        </div>
-      )}
     </div>
   );
 }

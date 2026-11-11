@@ -117,11 +117,11 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     const client = nodes.client(node(request));
     const [offers, mine] = await Promise.all([
       client.json<{ offers: { id: string; cid?: string; title?: string; bytes: number }[] }>('/v1/services/storage/offers'),
-      client.json<{ assignments: { id: string; jobId: string; cid?: string; title?: string; bytes: number; status: string }[] }>(
+      client.json<{ assignments: { id: string; jobId: string; cid?: string; title?: string; bytes: number; status: string; earned?: number }[] }>(
         '/v1/services/storage/assignments'
       ),
     ]);
-    const cids = new Map<string, { cid: string; title?: string; bytes: number; jobId: string; source: 'open job' | 'your assignment' }>();
+    const cids = new Map<string, { cid: string; title?: string; bytes: number; jobId: string; source: 'open job' | 'your assignment'; earned?: number }>();
     for (const offer of offers.offers ?? []) {
       if (offer.cid) cids.set(offer.cid, { cid: offer.cid, title: offer.title, bytes: offer.bytes, jobId: offer.id, source: 'open job' });
     }
@@ -135,6 +135,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
           bytes: assignment.bytes,
           jobId: assignment.jobId,
           source: 'your assignment',
+          earned: assignment.earned ?? 0,
         });
       }
     }
@@ -455,6 +456,11 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
         sourceMime?: string;
         previews?: string[];
         encoder?: 'ffmpeg';
+        sources?: string[];
+        algorithms?: string[];
+        sign?: boolean;
+        thumbnail?: string;
+        createdAt?: string;
       };
       pieces: (Uint8Array | undefined)[];
       bytes: number;
@@ -482,6 +488,11 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       sourceMime?: string;
       previews?: string[];
       encoder?: 'ffmpeg';
+      sources?: string[];
+      algorithms?: string[];
+      sign?: boolean;
+      thumbnail?: string;
+      createdAt?: string;
     }>();
     const mode = body.mode === 'convert' ? 'convert' : 'publish';
     const jobId = `${mode}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -496,6 +507,11 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
         sourceMime: body.sourceMime,
         previews: body.previews,
         encoder: body.encoder,
+        sources: body.sources,
+        algorithms: body.algorithms,
+        sign: body.sign,
+        thumbnail: body.thumbnail,
+        createdAt: body.createdAt,
       },
       pieces: [],
       bytes: 0,
@@ -659,8 +675,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   });
 
   on('POST', '/api/vvsh/manifest', async (request) => {
-    const body = await request.json<{ nodeId?: string; manifest?: Record<string, unknown> }>();
-    return core.commitVvshStream(nodes.require(String(body.nodeId ?? '')), body.manifest as never);
+    const body = await request.json<{ nodeId?: string; manifest?: Record<string, unknown>; algorithms?: string[]; sign?: boolean; thumbnail?: string; sources?: string[] }>();
+    return core.commitVvshStream(nodes.require(String(body.nodeId ?? '')), body.manifest as never, {
+      algorithms: body.algorithms,
+      sign: body.sign,
+      thumbnail: body.thumbnail,
+      sources: body.sources,
+    });
   });
 
   // Settings, identity, cache

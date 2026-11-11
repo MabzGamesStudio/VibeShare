@@ -1,9 +1,8 @@
 // Free static hosting platforms provider jobs can push content to. Each platform shows
 // how to open an account and publish a base URL; the GUI builds that base URL from the
 // entered values and appends content ids to it, so providers can query `<base>/<cid>`.
-// Pushing job data to a site is wired up for GitHub Pages (the example), GitLab Pages and
-// Netlify; the rest are sketched: each entry says which API its pipeline calls once it is
-// connected.
+// Pushing job data to a site is wired up for every platform here: each entry says which
+// API its pipeline calls.
 import { sha1hex } from '../../../src/shared/crypto';
 import { base64Of, bytesFromBase64, gzip, hmacBase64Of, rsaSha256Jwt, sha256HexOf, sigV2, sigV4, tarOf } from './signing';
 
@@ -33,7 +32,8 @@ export interface HostingStep {
   links?: { label: string; url: string }[];
   /** Field ids this step fills in: their inputs are shown right under it. */
   fields?: string[];
-  /** A starter folder to download instead of making by hand (a zip of these files). */
+  /** A starter to download instead of making by hand: a zip of these files — or the file
+   * itself when there is one and its name is not a .zip. */
   download?: { label: string; zip: string; entries: { path: string; text: string }[] };
   /** What you have when this step is done. The reader ticks it off. */
   check: string;
@@ -55,8 +55,8 @@ export interface HostingPlatform {
   buildBaseUrl: (values: Record<string, string>) => string;
   /** The site root the panel-1 check probes (when the content folder may not exist yet). */
   buildSiteUrl?: (values: Record<string, string>) => string;
-  /** Push pipeline that is wired up today; the others are skeletons. */
-  publish?: 'github' | 'gitlab' | 'netlify';
+  /** Which push pipeline this platform's `publish` runs; every one of them is wired up. */
+  publish?: 'github' | 'gitlab' | 'netlify' | 'cloudflare' | 'vercel' | 'firebase' | 'render' | 'appwrite' | 'surge' | 'neocities' | 'codeberg' | 'aws' | 'azure' | 'gcloud';
 }
 
 /** A saved base URL: one platform account the user configured. */
@@ -229,10 +229,11 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Add a first file so the site has a page',
         lines: [
-          'In the repository click “Add file” → “Create new file”.',
-          'Name it exactly as below, type one character in the big box, then click “Commit changes” twice.',
+          'Download the starter page below.',
+          'In the repository click “Add file” → “Upload files”, pick the downloaded file, then click “Commit changes”.',
         ],
         copies: [{ label: 'File name', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'index.html is listed in the repository file list.',
       },
       {
@@ -297,10 +298,15 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         lines: [
           'Open “Workers & Pages” → “Create application” → “Pages” → “Upload assets”.',
           'Project name: paste the value below → “Continue”.',
-          'Make a folder on your desktop with one file named index.html in it, and drag that folder onto the box.',
+          'Make nothing by hand: download and unzip the starter folder below, and drag that folder onto the box.',
           'Click “Deploy site”.',
         ],
         copies: [{ label: 'Project name', value: 'vibeshare-data' }],
+        download: {
+          label: 'Download the starter folder (zip)',
+          zip: 'VibeShare.zip',
+          entries: [{ path: 'VibeShare/index.html', text: STARTER_HTML }],
+        },
         check: 'The project overview shows “vibeshare-data.pages.dev”.',
       },
       {
@@ -327,8 +333,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'API token', secret: true, hint: 'Custom token with Account · Cloudflare Pages · Edit.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.pages.dev`, values.folder ?? ''),
-    // Skeleton: the push pipeline uploads each content id with the Pages direct upload API
+    // Wired up: the push pipeline uploads each content id with the Pages direct upload API
     // (POST /accounts/<account>/pages/projects/<project>/deployments).
+    publish: 'cloudflare',
   },
   {
     id: 'gitlab',
@@ -356,18 +363,19 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Add the page the site serves',
         lines: [
-          'Click “+” → “New file”.',
-          'Name it with the path below — the slash makes GitLab create the folder, and Pages publishes the public folder as the site.',
-          'Paste one character in the big box, then click “Commit changes”.',
+          'Download the starter page below.',
+          'Click “+” → “Upload file”, pick the downloaded file and set its folder to public — the page must land at the path below, and Pages publishes the public folder as the site.',
+          'Click “Commit changes”.',
         ],
         copies: [{ label: 'File name (a path, folder included)', value: 'public/index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'public/index.html is listed in the project files.',
       },
       {
         title: 'Add the pipeline file that publishes the site',
         lines: [
-          'Click “+” → “New file” again.',
-          'Name it exactly as below, paste the whole block into the box, then “Commit changes”.',
+          'Download the pipeline file below.',
+          'Click “+” → “Upload file” again, pick the downloaded file (its name is exactly as below), then “Commit changes”.',
           'There is nothing to build: the job publishes the public folder exactly as it is in the repository.',
         ],
         copies: [
@@ -377,6 +385,11 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
             value: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public',
           },
         ],
+        download: {
+          label: 'Download the pipeline file',
+          zip: '.gitlab-ci.yml',
+          entries: [{ path: '.gitlab-ci.yml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' }],
+        },
         check: 'Build → Pipelines shows a green pipeline with a “pages” job in it.',
       },
       {
@@ -497,10 +510,15 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         title: 'Deploy a first folder with Vercel Drop',
         lines: [
           'Open the Vercel Drop link below in your browser.',
-          'Drag a folder that contains an index.html onto the page.',
+          'Download and unzip the starter folder below, and drag that folder onto the page.',
           'Wait for “Congratulations!” and the project URL.',
         ],
-        copies: [{ label: 'Folder contents (make this on your desktop)', value: 'index.html' }],
+        copies: [{ label: 'Folder contents', value: 'index.html' }],
+        download: {
+          label: 'Download the starter folder (zip)',
+          zip: 'VibeShare.zip',
+          entries: [{ path: 'VibeShare/index.html', text: STARTER_HTML }],
+        },
         links: [{ label: 'Vercel Drop', url: 'https://vercel.com/new/drop' }],
         check: 'The deployment page shows a project with a *.vercel.app address.',
       },
@@ -508,26 +526,17 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         title: 'Name the project',
         lines: [
           'Open the project → “Settings” → “General” → “Project Name”.',
-          'Paste the name below and click “Save”.',
+          'Type the name below and paste it there, then click “Save” — the site is served at <project>.vercel.app.',
+          'The name is kept for the rest of the panels automatically.',
         ],
-        copies: [{ label: 'Project name', value: 'vibeshare-data' }],
-        check: 'The project URL is now the address below.',
+        fields: ['project'],
+        check: 'The Project name field below is filled in.',
       },
       {
         title: 'See your site',
         lines: ['Open the address below in a new tab.'],
-        copies: [{ label: 'Site address', value: 'https://vibeshare-data.vercel.app/' }],
+        copies: [{ label: 'Site address', value: 'https://<project>.vercel.app/' }],
         check: 'That address opens your page.',
-      },
-      {
-        title: 'Create the access token the client pushes with',
-        lines: [
-          'Avatar → “Account Settings” → “Tokens” (or open the Tokens link below).',
-          '“Create Token” → name it vibeshare → set a scope if asked → “Create”.',
-          'Copy it now — it is shown only once.',
-        ],
-        links: [{ label: 'Tokens page', url: 'https://vercel.com/account/tokens' }],
-        check: 'You have copied a token starting with vcp_ for the next step.',
       },
     ],
     fields: [
@@ -536,8 +545,10 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'Access token', secret: true, hint: 'Account Settings → Tokens.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.vercel.app`, values.folder ?? ''),
-    // Skeleton: the push pipeline creates a deployment with the REST API
-    // (POST https://api.vercel.com/v13/deployments).
+    buildSiteUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.vercel.app`),
+    // Wired up: the push pipeline creates a deployment with the REST API
+    // (POST https://api.vercel.com/v13/deployments), reusing the copies Vercel already holds.
+    publish: 'vercel',
   },
   {
     id: 'firebase',
@@ -572,12 +583,17 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Point the CLI at your files',
         lines: [
-          'Make a folder on your desktop with an index.html in it, then run the command below inside that folder.',
+          'Download and unzip the starter folder below, then run the command below inside that folder.',
           'Choose your project from the list.',
           '“What do you want to use as your public directory?” type a single dot and press Enter.',
           '“Configure as a single-page app?” press Enter (No). “Overwrite index.html?” press Enter (No).',
         ],
         copies: [{ label: 'Command — run inside your site folder', value: 'firebase init hosting' }],
+        download: {
+          label: 'Download the starter folder (zip)',
+          zip: 'VibeShare.zip',
+          entries: [{ path: 'VibeShare/index.html', text: STARTER_HTML }],
+        },
         check: 'The folder now contains a .firebase/ directory and a firebase.json file.',
       },
       {
@@ -607,8 +623,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'key', label: 'Service account key', secret: true, hint: 'Project settings → Service accounts → Generate new private key (JSON).' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.web.app`, values.folder ?? ''),
-    // Skeleton: the push pipeline deploys with the Firebase CLI or the Hosting REST API
+    // Wired up: the push pipeline deploys with the Hosting REST API
     // (sites/<site>/versions + release).
+    publish: 'firebase',
   },
   {
     id: 'render',
@@ -661,11 +678,15 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     fields: [
       { id: 'service', label: 'Site name', placeholder: 'vibeshare-data', hint: 'The name in the site URL.' },
       { id: 'repo', label: 'Repository', placeholder: 'yourname/vibeshare-data', hint: 'The repository Render builds from.' },
+      { id: 'branch', label: 'Branch', default: 'main' },
       { id: 'folder', label: 'Folder for content ids', default: 'public' },
       { id: 'token', label: 'API key', secret: true, hint: 'Account Settings → API Keys.' },
+      { id: 'ghToken', label: 'GitHub token', secret: true, hint: 'The access token from the GitHub tab — the client commits each content id with it and Render rebuilds.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.service ?? '').trim()}.onrender.com`, values.folder ?? ''),
-    // Skeleton: the push pipeline commits to the repository, which makes Render rebuild.
+    // Wired up: the push pipeline commits to the repository with the GitHub contents API,
+    // which makes Render rebuild (and a deploy is asked for besides).
+    publish: 'render',
   },
   {
     id: 'appwrite',
@@ -696,10 +717,15 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Upload a first build',
         lines: [
-          'Make a folder on your desktop with an index.html in it, then zip that folder (right-click → Compress).',
+          'Download the starter folder (zip) below.',
           'In the site: “Deployments” → “Create deployment” → “Manual upload” → pick the zip → “Deploy”.',
         ],
         copies: [{ label: 'Folder must contain', value: 'index.html' }],
+        download: {
+          label: 'Download the starter folder (zip)',
+          zip: 'VibeShare.zip',
+          entries: [{ path: 'VibeShare/index.html', text: STARTER_HTML }],
+        },
         check: 'The deployment row shows “Building…” then “Active”.',
       },
       {
@@ -727,8 +753,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       const endpoint = (values.endpoint ?? '').trim();
       return endpoint ? `${endpoint.replace(/\/+$/, '')}/${(values.folder ?? '').trim().replace(/^\/+|\/+$/g, '')}`.replace(/(.+)\/$/, '$1/') : '';
     },
-    // Skeleton: the push pipeline creates a deployment with the Sites API
+    // Wired up: the push pipeline creates a deployment with the Sites API
     // (POST /sites/<siteId>/deployments).
+    publish: 'appwrite',
   },
   {
     id: 'surge',
@@ -749,8 +776,13 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       },
       {
         title: 'Put a page in a folder',
-        lines: ['Make a folder on your desktop, for example “site”, and put an index.html in it (any content).'],
+        lines: ['Download and unzip the starter folder below — it holds a site folder with an index.html in it.'],
         copies: [{ label: 'Folder must contain', value: 'index.html' }],
+        download: {
+          label: 'Download the starter folder (zip)',
+          zip: 'site.zip',
+          entries: [{ path: 'site/index.html', text: STARTER_HTML }],
+        },
         check: 'The folder exists on this device with an index.html inside.',
       },
       {
@@ -783,7 +815,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'Login token', secret: true, hint: 'Output of “surge token”.' },
     ],
     buildBaseUrl: (values) => buildUrl((values.domain ?? '').trim().replace(/^https?:\/\//, ''), values.folder ?? ''),
-    // Skeleton: the push pipeline publishes with the Surge API (POST /surge/deploy).
+    // Wired up: the push pipeline publishes with the Surge API (POST https://surge.surge.sh
+    // with the domain, the file and the login token — the call the surge command makes).
+    publish: 'surge',
   },
   {
     id: 'neocities',
@@ -806,10 +840,11 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         title: 'Upload a first page',
         lines: [
           'Open the “Files” tab of your site.',
-          'Click “Upload” → “Choose files” → pick an index.html from your computer (or drag it onto the page).',
+          'Click “Upload” → “Choose files” → pick the starter page you downloaded below (or drag it onto the page).',
           'Wait for “File upload complete”.',
         ],
         copies: [{ label: 'File name (must match exactly)', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'The file list shows index.html.',
       },
       {
@@ -833,8 +868,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'apiKey', label: 'API key', secret: true, hint: 'Settings → API Key → Generate.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.site ?? '').trim()}.neocities.org`, values.folder ?? ''),
-    // Skeleton: the push pipeline posts the file to the Neocities upload API
+    // Wired up: the push pipeline posts the file to the Neocities upload API
     // (POST /api/upload with the API key as the bearer token).
+    publish: 'neocities',
   },
   {
     id: 'codeberg',
@@ -861,8 +897,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       },
       {
         title: 'Add the page the site serves',
-        lines: ['Click “Add file” → “Create file”.', 'Name it index.html, type one character in the box, then click “Commit changes”.'],
+        lines: ['Download the starter page below.', 'Click “Add file” → “Upload file”, pick the downloaded file, then click “Commit changes”.'],
         copies: [{ label: 'File name', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'index.html is listed in the repository files.',
       },
       {
@@ -893,8 +930,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'Access token', secret: true, hint: 'Settings → Applications → personal access token with repository write.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.user ?? '').trim()}.pages.codeberg.org`, values.folder ?? ''),
-    // Skeleton: Codeberg runs Forgejo — the push pipeline commits through its contents
+    // Wired up: Codeberg runs Forgejo — the push pipeline commits through its contents
     // API (POST /api/v1/repos/<user>/<repo>/contents/<path>), the same call as GitHub's.
+    publish: 'codeberg',
   },
   {
     id: 'aws',
@@ -927,10 +965,11 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Upload a first page',
         lines: [
-          'Open the bucket → “Upload” → “Add files” → pick an index.html from your computer.',
+          'Open the bucket → “Upload” → “Add files” → pick the starter page you downloaded below.',
           'Click “Upload”, wait for “Upload succeeded”, then “Close”.',
         ],
         copies: [{ label: 'File name (must match exactly)', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'The Objects list shows index.html with its size.',
       },
       {
@@ -980,8 +1019,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       if (!bucket || !region) return '';
       return `http://${bucket}.s3-website-${region}.amazonaws.com/${folder ? `${folder}/` : ''}`;
     },
-    // Skeleton: the push pipeline puts each content id into the bucket (S3 Upload, or a
+    // Wired up: the push pipeline puts each content id into the bucket (S3 Upload, or a
     // signed PUT against the endpoint with the access keys).
+    publish: 'aws',
   },
   {
     id: 'azure',
@@ -1024,9 +1064,10 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         title: 'Upload a first page',
         lines: [
           'Open “Data storage” → “Containers” → the container named $web (it was just created).',
-          '“Upload” → “Browse for files” → pick index.html → “Upload”.',
+          '“Upload” → “Browse for files” → pick the starter page you downloaded below → “Upload”.',
         ],
         copies: [{ label: 'File name (must match exactly)', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'The $web container lists index.html.',
       },
       {
@@ -1056,8 +1097,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       const folder = (values.folder ?? '').trim().replace(/^\/+|\/+$/g, '');
       return host ? `https://${host}/${folder ? `${folder}/` : ''}` : '';
     },
-    // Skeleton: the push pipeline puts each content id into the $web container
+    // Wired up: the push pipeline puts each content id into the $web container
     // (PUT https://<account>.blob.core.windows.net/$web/<path> with the access key).
+    publish: 'azure',
   },
   {
     id: 'gcloud',
@@ -1090,8 +1132,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       },
       {
         title: 'Upload a first page',
-        lines: ['In the bucket click “Upload files”.', 'Pick index.html from your computer → “Upload”.'],
+        lines: ['In the bucket click “Upload files”.', 'Pick the starter page you downloaded below → “Upload”.'],
         copies: [{ label: 'File name (must match exactly)', value: 'index.html' }],
+        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
         check: 'The Objects list shows index.html.',
       },
       {
@@ -1135,8 +1178,9 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       if (!bucket) return '';
       return `https://storage.googleapis.com/${bucket}/${folder ? `${folder}/` : ''}`;
     },
-    // Skeleton: the push pipeline uploads each content id with the JSON API
+    // Wired up: the push pipeline uploads each content id with the JSON API
     // (POST https://storage.googleapis.com/upload/storage/v1/b/<bucket>/o).
+    publish: 'gcloud',
   },
 ];
 /**
@@ -1270,7 +1314,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until the first deployment, the bytes after it.'
     ),
     save: saveGuide(
-      'The Cloudflare push pipeline uploads the id with the direct upload API (POST /accounts/<account>/pages/projects/<project>/deployments) — until it is connected, drop the file in by hand and the base URL works the same.'
+      'The Cloudflare push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and uploads it with the direct upload API (POST /accounts/<account>/pages/projects/<project>/deployments).'
     ),
   },
   gitlab: {
@@ -1363,25 +1407,19 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
   vercel: {
     access: [
       {
-        title: 'The project name',
-        lines: ['Open the project → Settings → General → “Project Name”: the address is <name>.vercel.app.'],
-        fields: ['project'],
-        check: 'The Project name matches the address of your project.',
-      },
-      {
         title: 'Where content ids go',
         lines: ['Each push deploys the folder; <folder>/<cid> is the path inside it. Leave it empty for the root.'],
         fields: ['folder'],
         check: 'The folder field says where the files will land.',
       },
       {
-        title: 'The access token',
+        title: 'Create the access token the client pushes with',
         lines: [
-          'Avatar → Account Settings → “Tokens” → “Create Token”.',
-          'Name it vibeshare → “Create”.',
-          'Copy it now (it starts with vcp_) — Vercel shows it only once.',
+          'Avatar → “Account Settings” → “Tokens” (or open the Tokens link below).',
+          '“Create Token” → name it vibeshare → set a scope if asked → “Create”.',
+          'Copy it now — it is shown only once.',
         ],
-        copies: [{ label: 'Token name', value: 'vibeshare' }],
+        links: [{ label: 'Tokens page', url: 'https://vercel.com/account/tokens' }],
         fields: ['token'],
         check: 'The Access token field is filled with a vcp_ token.',
       },
@@ -1391,7 +1429,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until a deployment carries the file.'
     ),
     save: saveGuide(
-      'The Vercel push pipeline creates a deployment with the REST API (POST https://api.vercel.com/v13/deployments) — until it is connected, drag the folder onto vercel.com/new/drop and the base URL works the same.'
+      'The Vercel push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and creates a deployment with the REST API (POST https://api.vercel.com/v13/deployments), reusing the copies Vercel already holds.'
     ),
   },
   firebase: {
@@ -1425,7 +1463,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until a deploy carries the file.'
     ),
     save: saveGuide(
-      'The Firebase push pipeline uploads the id as a Hosting version and releases it (POST /v1beta1/sites/<site>/versions, then a release) — until it is connected, run “firebase deploy” after copying the file in, and the base URL works the same.'
+      'The Firebase push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers, uploads it as a Hosting version and releases it (POST /v1beta1/sites/<site>/versions, then a release).'
     ),
   },
   render: {
@@ -1443,6 +1481,12 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
         check: 'The Repository field holds owner/name of the connected repository.',
       },
       {
+        title: 'The branch it builds',
+        lines: ['The branch Render deploys is the one the repository pushes to (usually main).'],
+        fields: ['branch'],
+        check: 'The Branch field holds the branch your repository uses.',
+      },
+      {
         title: 'Where content ids go',
         lines: ['Render rebuilds the repository on every push; <folder>/<cid> is the path inside the publish directory. Leave it empty for the root.'],
         fields: ['folder'],
@@ -1458,13 +1502,22 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
         fields: ['token'],
         check: 'The API key field is filled.',
       },
+      {
+        title: 'The GitHub token the client commits with',
+        lines: [
+          'The client commits each content id into the repository and Render rebuilds — that needs a GitHub token with Contents: Read and write on that repository.',
+          'The token you made in the GitHub tab works here (fine-grained, that repository, Contents: Read and write).',
+        ],
+        fields: ['ghToken'],
+        check: 'The GitHub token field is filled (dots).',
+      },
     ],
     url: urlGuide(
       'Render serves the publish directory at <service>.onrender.com: <folder>/<cid> is a file in that directory, published by the next build.',
       'Open the example address — 404 until a build carries the file.'
     ),
     save: saveGuide(
-      'The Render push pipeline commits <folder>/<cid> to the repository (the same contents API as GitHub), which makes Render rebuild — until it is connected, commit the file by hand and the base URL works the same.'
+      'The Render push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and commits <folder>/<cid> to the repository (the same contents API as GitHub), which makes Render rebuild.'
     ),
   },
   appwrite: {
@@ -1507,7 +1560,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until a deployment carries the file.'
     ),
     save: saveGuide(
-      'The Appwrite push pipeline creates a deployment for the site (POST /sites/<siteId>/deployments) — until it is connected, upload the file as a manual deployment and the base URL works the same.'
+      'The Appwrite push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and creates a deployment for the site (POST /sites/<siteId>/deployments).'
     ),
   },
   surge: {
@@ -1543,7 +1596,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until you publish that file.'
     ),
     save: saveGuide(
-      'The Surge push pipeline deploys the file with the Surge API (POST https://surge.surge.sh — domain, file, token) — until it is connected, run “surge ./folder <domain>” by hand and the base URL works the same.'
+      'The Surge push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and deploys the file with the Surge API (POST https://surge.surge.sh — domain, file, token).'
     ),
   },
   neocities: {
@@ -1572,7 +1625,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until you upload that file.'
     ),
     save: saveGuide(
-      'The Neocities push pipeline posts the file to the upload API (POST https://neocities.org/api/upload, bearer token) — until it is connected, drag the file in on the Files page and the base URL works the same.'
+      'The Neocities push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and posts the file to the upload API (POST https://neocities.org/api/upload, bearer token).'
     ),
   },
   codeberg: {
@@ -1612,7 +1665,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until the next commit carries the file.'
     ),
     save: saveGuide(
-      'The Codeberg push pipeline commits through the Forgejo contents API (POST /api/v1/repos/<user>/<repo>/contents/<path>), the same call GitHub uses — until it is connected, commit the file by hand and the base URL works the same.'
+      'The Codeberg push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and commits through the Forgejo contents API (POST /api/v1/repos/<user>/<repo>/contents/<path>), the same call GitHub uses.'
     ),
   },
   aws: {
@@ -1647,7 +1700,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — before the first upload it answers 404 (or NoSuchKey), after it the bytes.'
     ),
     save: saveGuide(
-      'The AWS push pipeline puts the object in the bucket (PUT /<folder>/<cid> against the endpoint, signed with the access keys) — until it is connected, drag the file in on the bucket’s Upload page and the base URL works the same.'
+      'The AWS push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and puts the object in the bucket (PUT /<folder>/<cid> against the endpoint, signed with the access keys).'
     ),
   },
   azure: {
@@ -1689,7 +1742,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 until the blob is uploaded.'
     ),
     save: saveGuide(
-      'The Azure push pipeline puts the blob in $web (PUT https://<account>.blob.core.windows.net/$web/<path> with the access key) — until it is connected, use the container’s Upload button and the base URL works the same.'
+      'The Azure push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and puts the blob in $web (PUT https://<account>.blob.core.windows.net/$web/<path> with the access key).'
     ),
   },
   gcloud: {
@@ -1723,7 +1776,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       'Open the example address — 404 (or AccessDenied until the object is public) before the first upload, the bytes after it.'
     ),
     save: saveGuide(
-      'The Google Cloud push pipeline uploads the object (POST https://storage.googleapis.com/upload/storage/v1/b/<bucket>/o, signed with the HMAC keys) — until it is connected, drag the file in on the bucket’s Objects page and the base URL works the same.'
+      'The Google Cloud push is wired end to end: press “Publish the job’s content id to this host & save” — it downloads the id from your providers and uploads the object (POST https://storage.googleapis.com/upload/storage/v1/b/<bucket>/o, signed with the HMAC keys).'
     ),
   },
 };
@@ -2430,9 +2483,75 @@ async function pushAppwrite(host: HostConfig, cid: string, data: Uint8Array): Pr
 }
 
 /**
- * Pushes one content id's bytes to a saved host. GitHub, GitLab, Netlify, Cloudflare
- * Pages, Vercel, Firebase, Appwrite, Codeberg, Neocities and the three bucket stores are
- * wired up; Surge publishes only through its command and Render only from its repository.
+ * Puts one content id on a Render static site: the bytes go into the repository Render
+ * builds from (the same contents API GitHub uses) and a deploy is asked for, so the site
+ * serves the file once the build finishes.
+ */
+async function pushRender(host: HostConfig, cid: string, data: Uint8Array): Promise<PushResult> {
+  const { repo, branch, ghToken, token, service } = host.values;
+  const [owner, name] = (repo ?? '').split('/').map((part) => part.trim());
+  if (!owner || !name || !ghToken) return { ok: false, message: 'Fill in the repository (owner/name) and the GitHub token first.' };
+  // The commit lands through GitHub; Render rebuilds the moment the repository changes.
+  const commit = await pushGitHub({ ...host, values: { ...host.values, owner, repo: name, token: ghToken, branch: branch || 'main' } }, cid, data);
+  if (!commit.ok) return commit;
+  const url = contentUrl(host.baseUrl, cid);
+  // Asking Render for a deploy on top is a courtesy — the commit already triggers one.
+  if (token) {
+    try {
+      const headers = { authorization: `Bearer ${token}`, accept: 'application/json' };
+      const list = await fetch('https://api.render.com/v1/services?limit=100', { headers });
+      const found = ((await list.json().catch(() => [])) as { id?: string; name?: string; service?: { id?: string; name?: string } }[])
+        .map((entry) => entry.service ?? entry)
+        .find((entry) => entry.name === (service ?? '').trim());
+      if (found?.id) {
+        await fetch(`https://api.render.com/v1/services/${encodeURIComponent(found.id)}/deploys`, { method: 'POST', headers, body: '{}' }).catch(() => undefined);
+      }
+    } catch {
+      // The commit alone already makes Render rebuild.
+    }
+  }
+  return { ok: true, message: `Pushed ${cid} to ${host.label} — Render rebuilds now and serves it at ${url} in a few minutes.`, url };
+}
+
+/**
+ * Publishes one content id to a Surge domain: a gzip tar of the welcome page and the
+ * content id, posted to the domain with the login token — the call the surge command
+ * itself makes.
+ */
+async function pushSurge(host: HostConfig, cid: string, data: Uint8Array): Promise<PushResult> {
+  const { domain, token } = host.values;
+  if (!domain || !token) return { ok: false, message: 'Fill in the domain and the login token first.' };
+  const path = contentPath(host.values, cid);
+  const url = contentUrl(host.baseUrl, cid);
+  try {
+    const archive = await gzip(tarOf([{ path: 'index.html', data: new TextEncoder().encode(STARTER_HTML) }, { path, data }]));
+    const response = await fetch(`https://surge.surge.sh/${domain.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')}`, {
+      method: 'POST',
+      headers: {
+        // The surge command signs in as “token” with the login token as the password.
+        authorization: `Basic ${base64Of(new TextEncoder().encode(`token:${token}`))}`,
+        'content-type': 'application/gzip',
+      },
+      body: archive as unknown as BodyInit,
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, message: 'Surge refused the login token — run “surge token” again and paste the new one.' };
+    }
+    if (!response.ok) {
+      const detail = await failureDetail(response);
+      return { ok: false, message: `Surge did not accept the publish (${response.status}) — ${detail}. Check the domain and the token.` };
+    }
+    return { ok: true, message: `Pushed ${cid} to ${host.label} — Surge serves it at ${url}.`, url };
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `Could not reach surge.surge.sh (${why}). Check the connection, the domain and the login token.` };
+  }
+}
+
+/**
+ * Pushes one content id's bytes to a saved host. Every platform's pipeline is wired up —
+ * the default below is only a safety net for a host saved with a platform this build does
+ * not know.
  */
 export async function pushHostedContent(host: HostConfig, cid: string, data: Uint8Array): Promise<PushResult> {
   switch (host.platform) {
@@ -2442,11 +2561,33 @@ export async function pushHostedContent(host: HostConfig, cid: string, data: Uin
       return pushGitLab(host, cid, data);
     case 'netlify':
       return pushNetlify(host, cid, data);
+    case 'cloudflare':
+      return pushCloudflare(host, cid, data);
+    case 'vercel':
+      return pushVercel(host, cid, data);
+    case 'firebase':
+      return pushFirebase(host, cid, data);
+    case 'render':
+      return pushRender(host, cid, data);
+    case 'appwrite':
+      return pushAppwrite(host, cid, data);
+    case 'surge':
+      return pushSurge(host, cid, data);
+    case 'neocities':
+      return pushNeocities(host, cid, data);
+    case 'codeberg':
+      return pushCodeberg(host, cid, data);
+    case 'aws':
+      return pushAws(host, cid, data);
+    case 'azure':
+      return pushAzure(host, cid, data);
+    case 'gcloud':
+      return pushGoogleCloud(host, cid, data);
     default: {
       const platform = hostingPlatform(host.platform);
       return {
         ok: false,
-        message: `Skeleton: the ${platform.name} push pipeline is not connected yet. The base URL and the content id path work now — see the platform tab for the call it will make.`,
+        message: `This build has no push pipeline for ${platform.name}. The base URL and the content id path work — put the bytes at ${contentUrl(host.baseUrl, cid)} by hand.`,
       };
     }
   }

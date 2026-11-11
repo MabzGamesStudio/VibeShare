@@ -56,6 +56,18 @@ export function gradientFor(text: string): string {
   return `linear-gradient(135deg, hsl(${hue} 70% 45%), hsl(${(hue + 50) % 360} 75% 35%))`;
 }
 
+/**
+ * The folder the client is served from ('/' at the root): the folder this script was
+ * loaded from, never the route the client is currently on. Routes and share links are
+ * relative to it, so the same build works at a domain root and in any folder of a static
+ * host — a deep link served as the app itself would otherwise become the base and grow
+ * another segment on every visit.
+ */
+export const APP_BASE = new URL('..', import.meta.url);
+
+/** The same as a pathname ('/' or '/web'): the base the routes mount under. */
+export const APP_BASE_PATH = APP_BASE.pathname.replace(/(.)\/+$/, '$1');
+
 export function watchPath(id: string): string {
   return `/watch/${encodeURIComponent(id)}`;
 }

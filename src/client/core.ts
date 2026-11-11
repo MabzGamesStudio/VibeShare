@@ -50,7 +50,7 @@ import type { CreatorKind } from '../shared/taxonomy.js';
 import { conflictsWithDisregard } from '../shared/taxonomy.js';
 import { sourceKeyOf } from '../algorithm/sources.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
-import { embedFor, parseContentId, parseSource, platformOf, withSources, baseId } from '../shared/sources.js';
+import { embedFor, formatSource, parseContentId, parseSource, platformOf, sourceFromUrl, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
 import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
@@ -1637,6 +1637,16 @@ export class ClientCore {
       previews?: string[];
       /** Opt in to the daemon's configured native encoder (legacy API calls stay lossless). */
       encoder?: 'ffmpeg';
+      /** External copies the manifest falls back to (raw links; normalized here). */
+      sources?: string[];
+      /** The algorithm nodes to put the content id in front of; every active one when omitted. */
+      algorithms?: string[];
+      /** Sign as the creator — off publishes without a creator identity. */
+      sign?: boolean;
+      /** A small image (data: URL) the algorithm nodes show with the listing. */
+      thumbnail?: string;
+      /** One stamp across providers keeps the content id the same everywhere. */
+      createdAt?: string;
     }
   ): Promise<{ cid: string; manifest: Manifest; objects: number; listed: number }> {
     const client = this.nodes.client(node);
@@ -1658,14 +1668,16 @@ export class ClientCore {
       size: 0,
       chunkSize: DEFAULT_CHUNK_SIZE,
       chunks: [],
-      createdAt: new Date().toISOString(),
+      createdAt: options.createdAt ?? new Date().toISOString(),
       vvsh: file,
     };
     if (options.meta && Object.keys(options.meta).length) manifest.meta = options.meta;
-    const signed = signManifest(manifest, this.store.identity, this.settings.profile);
+    const sources = this.normalizeVvshSources(options.sources);
+    if (sources?.length) manifest.sources = sources;
+    const signed = options.sign === false ? manifest : signManifest(manifest, this.store.identity, this.settings.profile);
     await client.json('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const cid = contentIdOf(signed);
-    const listed = await this.submitVvshToAlgorithms(cid, signed, node);
+    const listed = await this.submitVvshToAlgorithms(cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, cid, signed.meta?.title ?? signed.name);
     return { cid, manifest: signed, objects, listed };
   }
@@ -1703,6 +1715,16 @@ export class ClientCore {
       previews?: string[];
       /** How far the provider's own processing is, 0–100, from each polled state. */
       onProgress?: (percent: number) => void;
+      /** External copies the manifest falls back to (raw links; normalized here). */
+      sources?: string[];
+      /** The algorithm nodes to put the content id in front of; every active one when omitted. */
+      algorithms?: string[];
+      /** Sign as the creator — off publishes without a creator identity. */
+      sign?: boolean;
+      /** A small image (data: URL) the algorithm nodes show with the listing. */
+      thumbnail?: string;
+      /** One stamp across providers keeps the content id the same everywhere. */
+      createdAt?: string;
     }
   ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number; warnings: string[] }> {
     const client = this.nodes.client(node);
@@ -1767,9 +1789,14 @@ export class ClientCore {
     }
     warnings.push(...(converted.warnings ?? []));
     if (converted.status === 'error' || !converted.manifest) throw new Error(converted.error || 'Provider conversion failed');
-    const signed = signManifest(converted.manifest, this.store.identity, this.settings.profile);
+    // The caller's stamp and fallback links go in before signing: the same video on two
+    // providers then lands on the same content id.
+    const base: Manifest = { ...converted.manifest, ...(options.createdAt ? { createdAt: options.createdAt } : {}) };
+    const sources = this.normalizeVvshSources(options.sources);
+    if (sources?.length) base.sources = sources;
+    const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
     return { cid: committed.cid, quote: converted.quote, manifest: signed, listed, warnings };
   }
@@ -1790,10 +1817,17 @@ export class ClientCore {
   }
 
   /** Commits an already-uploaded .vvsh stream (its objects are on the node) and lists it. */
-  async commitVvshStream(node: NodeEntry, manifest: Manifest): Promise<{ cid: string; listed: number }> {
-    const signed = signManifest(manifest, this.store.identity, this.settings.profile);
+  async commitVvshStream(
+    node: NodeEntry,
+    manifest: Manifest,
+    options: { algorithms?: string[]; sign?: boolean; thumbnail?: string; sources?: string[] } = {}
+  ): Promise<{ cid: string; listed: number }> {
+    const base: Manifest = { ...manifest };
+    const sources = this.normalizeVvshSources(options.sources ?? manifest.sources);
+    if (sources?.length) base.sources = sources;
+    const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
     const committed = await this.nodes.client(node).json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node);
+    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
     return { cid: committed.cid, listed };
   }
@@ -1934,11 +1968,23 @@ export class ClientCore {
     return out;
   }
 
-  /** Puts a published .vvsh stream in front of the search algorithm nodes as well. */
-  private async submitVvshToAlgorithms(cid: string, manifest: Manifest, provider: NodeEntry): Promise<number> {
+  /**
+   * Puts a published .vvsh stream in front of the search algorithm nodes as well: the
+   * chosen ones when the caller picked them, every active one otherwise.
+   */
+  private async submitVvshToAlgorithms(
+    cid: string,
+    manifest: Manifest,
+    provider: NodeEntry,
+    options: { algorithms?: string[]; sign?: boolean; thumbnail?: string } = {}
+  ): Promise<number> {
     const profile = this.settings.profile;
+    const sign = options.sign !== false;
+    const chosen = options.algorithms
+      ? this.nodes.list('algorithm').filter((node) => options.algorithms?.includes(node.id))
+      : this.nodes.active('algorithm');
     let listed = 0;
-    for (const node of this.nodes.active('algorithm')) {
+    for (const node of chosen) {
       try {
         const client = this.nodes.client(node);
         const info = node.info ?? (await client.fetchInfo());
@@ -1956,10 +2002,11 @@ export class ClientCore {
             tags: manifest.meta?.tags,
             language: manifest.meta?.language,
             durationSeconds: manifest.meta?.durationSeconds,
-            creator: { id: this.store.identity.id, name: profile.name || undefined, kind: profile.kind },
+            creator: sign ? { id: this.store.identity.id, name: profile.name || undefined, kind: profile.kind } : undefined,
+            thumbnail: options.thumbnail,
             providers: [provider.ref],
             publishedAt: manifest.createdAt,
-            creatorProof: { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) },
+            creatorProof: sign ? { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) } : undefined,
           },
         });
         listed++;
@@ -1968,6 +2015,20 @@ export class ClientCore {
       }
     }
     return listed;
+  }
+
+  /** External copies of a .vvsh stream, as the ids (`yt:…`, `ia:…`) clients fall back to. */
+  private normalizeVvshSources(list: string[] | undefined): string[] | undefined {
+    if (!list?.length) return undefined;
+    const sources: string[] = [];
+    for (const text of list) {
+      const trimmed = text.trim();
+      if (!trimmed) continue;
+      const source = parseSource(trimmed) && !/^https?:/.test(trimmed) ? parseSource(trimmed) : sourceFromUrl(trimmed);
+      if (!source) throw badRequest(`Not a link or source: ${trimmed}`);
+      sources.push(formatSource(source));
+    }
+    return sources.length ? sources : undefined;
   }
 
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */

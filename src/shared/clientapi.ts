@@ -299,6 +299,8 @@ export interface PageConfig {
     shortsComments?: 'cover' | 'shrink';
     /** Shorts: the share of the screen the comments take up (10–90 percent). */
     shortsCommentsSize?: number;
+    /** Images: the tallest each picture gets, as a share of the screen height (10–100 percent). */
+    imageHeight?: number;
   };
   /** Show the page in the left panel. */
   sidebar: boolean;
@@ -363,12 +365,16 @@ export interface Settings {
   watchHistory: boolean;
   /** The subscriptions carousel order: subscribed date (the default), random, A–Z, Z–A, or last post. */
   subscriptionOrder: 'subscribed' | 'random' | 'az' | 'za' | 'recent';
+  /** The hosting platform tabs shown in the provider jobs instructions (checked = shown). */
+  hostingTabs: string[];
   /** How many history rows one page shows. */
   historyPageSize: number;
   /** Drop local watch and search history older than this many days (0 = keep forever). */
   historyClearDays: number;
   /** Whether toast messages are saved at all (off by default: none are kept). */
   toastHistory: boolean;
+  /** Whether contributions to algorithm nodes are logged at all (off by default: none are kept). */
+  logContributions: boolean;
   /** Whether the bell icon for past toast messages shows on every page. */
   toastIcon: boolean;
   /** Whether the search bar shows matching past searches under the search box. */

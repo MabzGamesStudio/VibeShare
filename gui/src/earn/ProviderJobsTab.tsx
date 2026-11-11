@@ -4,7 +4,7 @@ import { api, errorMessage, streamUrl } from '../api';
 import { CodeBox } from '../components/ui';
 import { downloadBlob } from '../qr';
 import { useApp } from '../state';
-import { baseKey, checkAccess, checkCids, checkFilled, checkSite, offerHost, type CheckResult } from './checks';
+import { baseKey, checkAccess, checkCids, checkFilled, checkIndex, checkSite, offerHost, type CheckResult } from './checks';
 import { buildZip, DUMMY_CID, HOSTING_PLATFORMS, contentUrl, hostingPlatform, loadDrafts, loadHosts, newHostId, platformGuide, pushHostedContent, recordUrlJobs, saveDrafts, saveHosts, type HostConfig, type HostDraft, type HostingField, type HostingStep } from './hosting';
 
 /** The platform setup as a guided flow: one step per screen instead of all at once. */
@@ -53,8 +53,12 @@ function FieldInput({ field, value, onChange }: { field: HostingField; value: st
   );
 }
 
-/** Downloads the starter folder a step hands out (a zip of its files). */
+/** Downloads the starter a step hands out: a zip of its files, or the single file itself. */
 function downloadZip(action: { zip: string; entries: { path: string; text: string }[] }) {
+  if (action.entries.length === 1 && !action.zip.endsWith('.zip')) {
+    downloadBlob(new Blob([action.entries[0].text], { type: 'text/plain' }), action.zip);
+    return;
+  }
   const zip = buildZip(action.entries);
   downloadBlob(new Blob([zip as unknown as BlobPart], { type: 'application/zip' }), action.zip);
 }
@@ -89,12 +93,12 @@ function StepCard({
   return (
     <div className="card form-stack" style={{ padding: 12 }}>
       <div className="row between">
-        <strong>
+        <strong className="step-heading">
           {number}. {step.title}
         </strong>
         <span className="hint">{done ? '✓ Done' : `Step ${number} of ${total}`}</span>
       </div>
-      <ol className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
+      <ol className="instructions muted" style={{ margin: 0, paddingLeft: 18 }}>
         {step.lines.map((line, index) => (
           <li key={index}>{line}</li>
         ))}
@@ -120,7 +124,7 @@ function StepCard({
       {mine.map((field) => (
         <FieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => onField(field.id, value)} />
       ))}
-      <label className="row small" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+      <label className="row instructions" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
         <input type="checkbox" checked={done} onChange={onToggle} />
         <span>
           {done ? '✓ You have: ' : 'Check: '}
@@ -138,11 +142,14 @@ function StepCard({
  * providers can download from `<base>/<cid>` and pay for it.
  */
 export function ProviderJobsTab() {
-  const { providers, toast } = useApp();
+  const { providers, state, toast } = useApp();
   const [hosts, setHosts] = useState<HostConfig[]>(() => loadHosts());
   const [platformId, setPlatformId] = useState(HOSTING_PLATFORMS[0].id);
+  // The tabs the instructions show are ticked in Settings → Nodes; only those appear here.
+  const shown = HOSTING_PLATFORMS.filter((entry) => (state?.settings.hostingTabs ?? []).includes(entry.id));
+  const activeId = shown.some((entry) => entry.id === platformId) ? platformId : (shown[0]?.id ?? platformId);
   const [step, setStep] = useState(0);
-  useEffect(() => setStep(0), [platformId]);
+  useEffect(() => setStep(0), [activeId]);
   // Every field auto-saves as it is typed, per platform — moving between steps or
   // closing the page keeps all of it.
   const [drafts, setDrafts] = useState<Record<string, HostDraft>>(() => loadDrafts());
@@ -151,11 +158,13 @@ export function ProviderJobsTab() {
   // Provider jobs to host: the wizard fetches a job's content id from a provider here.
   const [jobNode, setJobNode] = useState('');
   const [jobItems, setJobItems] = useState<{ cid: string; title?: string; source: string }[]>([]);
+  // The "No job handy" fold stays closed until a fetch finds nothing — then it opens itself.
+  const [noJob, setNoJob] = useState(false);
 
-  const platform = hostingPlatform(platformId);
-  const draft: HostDraft = drafts[platformId] ?? { values: {}, baseUrl: '', label: '', cid: '' };
+  const platform = hostingPlatform(activeId);
+  const draft: HostDraft = drafts[activeId] ?? { values: {}, baseUrl: '', label: '', cid: '' };
   const update = (patch: Partial<HostDraft>) =>
-    setDrafts((current) => ({ ...current, [platformId]: { ...draft, ...patch } }));
+    setDrafts((current) => ({ ...current, [activeId]: { ...draft, ...patch } }));
   const values = {
     ...Object.fromEntries(platform.fields.map((field) => [field.id, field.default ?? ''])),
     ...draft.values,
@@ -165,8 +174,11 @@ export function ProviderJobsTab() {
   // The steps behind tabs 2–4: where the access details come from, how this platform
   // serves <base>/<cid>, and what saving and offering it does.
   const guide = platformGuide(platform.id);
-  /** Fields no access step asks for, so nothing of the platform disappears from the form. */
-  const covered = new Set(guide.access.flatMap((instruction) => instruction.fields ?? []));
+  /** The name to give the access token — shown right above the field its value goes in. */
+  const tokenName = guide.access.flatMap((instruction) => instruction.copies ?? []).find((copy) => copy.label === 'Token name');
+  const firstSecret = platform.fields.findIndex((field) => field.secret);
+  /** Fields no step asks for, so nothing of the platform disappears from the form. */
+  const covered = new Set([...platform.steps, ...guide.access].flatMap((instruction) => instruction.fields ?? []));
   const leftoverFields = platform.fields.filter((field) => !covered.has(field.id));
   /**
    * Which steps of a group are ticked. Older saved drafts hold a plain array (the
@@ -212,8 +224,9 @@ export function ProviderJobsTab() {
   useEffect(() => {
     setResult(null);
     setChecking(null);
-  }, [step, platformId]);
-  // Panel 1 promises the site itself is up — its root, even before the content folder exists.
+  }, [step, activeId]);
+  // Panel 1 promises the starter page is served — an index.html at the site address, even
+  // before the content folder exists.
   const siteUrl = platform.buildSiteUrl ? platform.buildSiteUrl(values) : baseUrl;
   const stepsOf = (group: string): HostingStep[] =>
     group === 'account' ? platform.steps : group === 'access' ? guide.access : group === 'url' ? guide.url : guide.save;
@@ -228,7 +241,7 @@ export function ProviderJobsTab() {
       const cids = [draft.cid, ...jobItems.map((item) => item.cid)];
       const answer =
         kind === 'site'
-          ? await checkSite(siteUrl)
+          ? await checkIndex(siteUrl)
           : kind === 'access'
             ? await checkAccess(platform.id, values)
             : kind === 'filled'
@@ -245,7 +258,7 @@ export function ProviderJobsTab() {
   const checkRow = (kind: 'site' | 'access' | 'filled' | 'final', label = 'Check this step') => (
     <div className="form-stack" style={{ gap: 6 }}>
       <div className="row">
-        <button className="small" disabled={checking !== null} onClick={() => void runCheck(kind)}>
+        <button className="primary small" disabled={checking !== null} onClick={() => void runCheck(kind)}>
           {checking === kind ? 'Checking…' : label}
         </button>
       </div>
@@ -366,7 +379,8 @@ export function ProviderJobsTab() {
   const nameField = (
     <label className="field">
       Name this host
-      <input type="text" value={draft.label} placeholder={platform.name} onChange={(e) => update({ label: e.target.value })} />
+      {/* Filled in with the hosting name already: skipping this step still leaves a name. */}
+      <input type="text" value={draft.label || platform.name} placeholder={platform.name} onChange={(e) => update({ label: e.target.value })} />
     </label>
   );
   const saveOfferButton = (
@@ -408,7 +422,8 @@ export function ProviderJobsTab() {
 
       <div className="field">
         <span>From a provider job — fetch a content id to host</span>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        {/* The provider picker and the button share one baseline. */}
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
             Content provider
             <select value={jobNode || providers[0]?.id || ''} onChange={(e) => setJobNode(e.target.value)}>
@@ -420,7 +435,7 @@ export function ProviderJobsTab() {
             </select>
           </label>
           <button
-            className="small"
+            className="primary small"
             disabled={!providers.length}
             onClick={async () => {
               const node = jobNode || providers[0]?.id;
@@ -435,8 +450,12 @@ export function ProviderJobsTab() {
                 const items = (answer.items ?? []).filter((item) => known[item.cid]);
                 setJobItems(items);
                 if (items.length) update({ cid: items[0].cid });
-                // No jobs on that node is not a dead end: the default article's id is always here.
-                else update({ cid: DUMMY_CID });
+                // No jobs on that node is not a dead end: the default article's id is always
+                // here — the fold that says so opens itself when a fetch finds nothing.
+                else {
+                  update({ cid: DUMMY_CID });
+                  setNoJob(true);
+                }
                 toast(
                   items.length
                     ? `Found ${items.length} job content id${items.length === 1 ? '' : 's'} the search nodes know`
@@ -471,19 +490,43 @@ export function ProviderJobsTab() {
         </span>
       </div>
 
-      <div className="field">
-        <span className="hint">
-          No job handy? Use the default article describing VibeShare — its content id is stored in this app, so there is nothing to find:
-        </span>
-        <CodeBox text={DUMMY_CID} />
-        <div className="row">
-          <button className="small" onClick={() => update({ cid: DUMMY_CID })}>
-            Use this content id
-          </button>
+      <details open={noJob} onToggle={(event) => setNoJob(event.currentTarget.open)}>
+        <summary className="small" style={{ cursor: 'pointer' }}>
+          No job handy?
+        </summary>
+        <div className="field" style={{ marginTop: 8 }}>
+          <span className="hint">
+            Use the default article describing VibeShare — its content id is stored in this app, so there is nothing to find:
+          </span>
+          <CodeBox text={DUMMY_CID} />
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="small" onClick={() => update({ cid: DUMMY_CID })}>
+              Use this content id
+            </button>
+          </div>
         </div>
-      </div>
+      </details>
     </>
   );
+  // Nothing ticked under Settings → Nodes: say so instead of showing an empty tab row.
+  if (!shown.length) {
+    return (
+      <div className="card form-stack">
+        <div className="row">
+          <Globe size={22} />
+          <div>
+            <h2>Provider jobs on free hosting</h2>
+            <p className="instructions muted">
+              No hosting platform is shown here yet — tick the ones to walk through under Settings → Nodes.
+            </p>
+          </div>
+        </div>
+        <a className="link small" href="/settings?tab=nodes">
+          Open Settings → Nodes
+        </a>
+      </div>
+    );
+  }
   return (
     <>
       <div className="card form-stack">
@@ -491,7 +534,7 @@ export function ProviderJobsTab() {
           <Globe size={22} />
           <div>
             <h2>Provider jobs on free hosting</h2>
-            <p className="small muted">
+            <p className="instructions muted">
               Providers pay credits each time they download a copy of content from a link you offer — the bytes must hash to the content
               id exactly. Free static hosts give you a base URL; the tabs below walk through the account setup of each platform, build
               that base URL with you and push job data to the site, so the site serves <code>&lt;base&gt;/&lt;cid&gt;</code> and every
@@ -502,8 +545,8 @@ export function ProviderJobsTab() {
       </div>
 
       <div className="tabs">
-        {HOSTING_PLATFORMS.map((entry) => (
-          <button key={entry.id} className={`tab ${platformId === entry.id ? 'on' : ''}`} onClick={() => setPlatformId(entry.id)}>
+        {shown.map((entry) => (
+          <button key={entry.id} className={`tab ${activeId === entry.id ? 'on' : ''}`} onClick={() => setPlatformId(entry.id)}>
             {entry.name}
           </button>
         ))}
@@ -531,7 +574,7 @@ export function ProviderJobsTab() {
         {step === 0 && (
           <>
             {completeBanner('account')}
-            <p className="small muted">{platform.about}</p>
+            <p className="instructions muted">{platform.about}</p>
             <div className="row">
               <a className="link small" href={platform.signup} target="_blank" rel="noreferrer">
                 Sign up <ExternalLink size={12} />
@@ -598,7 +641,7 @@ export function ProviderJobsTab() {
                 publishButton
               )
             )}
-            <p className="small muted">
+            <p className="instructions muted">
               Saving keeps the base URL and its access details on this device. Then offer it to your provider nodes — they query{' '}
               <code>&lt;base&gt;/&lt;cid&gt;</code> for any content id and pay per download from it. Pushing more content later lives in
               <em> the URL jobs card under Provider nodes</em>.
@@ -615,19 +658,28 @@ export function ProviderJobsTab() {
             <div className="form-stack">
               {guide.access
                 .flatMap((instruction) => instruction.copies ?? [])
+                .filter((copy) => copy.label !== 'Token name')
                 .map((copy) => (
                   <div key={copy.label} className="field" style={{ marginBottom: 0 }}>
-                    <span className="hint">{copy.label === 'Token name' ? 'Access token name' : copy.label}</span>
+                    <span className="hint">{copy.label}</span>
                     <CodeBox text={substitute(copy.value, values)} />
                   </div>
                 ))}
-              {platform.fields.map((field) => (
-                <FieldInput
-                  key={field.id}
-                  field={field}
-                  value={values[field.id] ?? ''}
-                  onChange={(value) => update({ values: { ...values, [field.id]: value } })}
-                />
+              {platform.fields.map((field, index) => (
+                <Fragment key={field.id}>
+                  {/* The access token's name sits right above the field its value goes in. */}
+                  {tokenName && index === firstSecret && (
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <span className="hint">Access token name</span>
+                      <CodeBox text={substitute(tokenName.value, values)} />
+                    </div>
+                  )}
+                  <FieldInput
+                    field={field}
+                    value={values[field.id] ?? ''}
+                    onChange={(value) => update({ values: { ...values, [field.id]: value } })}
+                  />
+                </Fragment>
               ))}
               <div className="field" style={{ marginBottom: 0 }}>
                 <span className="hint">Site url</span>
@@ -647,7 +699,7 @@ export function ProviderJobsTab() {
           <button className="small" disabled={step === 0} onClick={() => setStep(Math.max(0, step - 1))}>
             ← Back
           </button>
-          {step < PLATFORM_STEPS.length - 1 ? (
+          {step < PLATFORM_STEPS.length - 1 && (
             <button
               className="primary small"
               disabled={!allChecked}
@@ -655,10 +707,6 @@ export function ProviderJobsTab() {
               onClick={() => setStep(step + 1)}
             >
               Next →
-            </button>
-          ) : (
-            <button className="primary" onClick={save}>
-              <Save size={16} /> Save host
             </button>
           )}
           <span className="hint">Access tokens stay on this device only.</span>

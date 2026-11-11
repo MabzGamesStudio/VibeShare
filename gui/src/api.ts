@@ -4,6 +4,7 @@
 // development it can be passed as ?t=… instead.
 
 import type { NodeEntry } from '../../src/shared/clientapi';
+import { APP_BASE } from './util';
 
 /** True in the static web build (normal routes, backend in the browser). */
 export const IS_STATIC = __VIBESHARE_WEB__;
@@ -23,7 +24,7 @@ export function resolvePath(path: string): string {
 
 function send(path: string, init: RequestInit): Promise<Response> {
   const target = resolvePath(path);
-  if (localHandler) return localHandler(new Request(new URL(target, document.baseURI), init));
+  if (localHandler) return localHandler(new Request(new URL(target, APP_BASE), init));
   return fetch(target, init);
 }
 

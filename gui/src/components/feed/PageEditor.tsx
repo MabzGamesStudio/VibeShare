@@ -694,14 +694,28 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
                       <option value="large">Large</option>
                     </select>
                   </label>
+                  {layout === 'stream' && (
+                    <label className="field">
+                      Image height
+                      <input
+                        type="range"
+                        min={10}
+                        max={100}
+                        step={5}
+                        value={draft.options.imageHeight ?? 72}
+                        onChange={(e) => setOptions({ imageHeight: Number(e.target.value) })}
+                      />
+                      <span className="hint">{draft.options.imageHeight ?? 72}% of the screen height</span>
+                    </label>
+                  )}
                   <label className="field">
-                    Comments over the short
+                    {layout === 'shorts' ? 'Comments over the short' : 'Comments over the picture'}
                     <select
-                      value={draft.options.shortsComments ?? 'cover'}
+                      value={draft.options.shortsComments ?? (layout === 'shorts' ? 'cover' : 'shrink')}
                       onChange={(e) => setOptions({ shortsComments: e.target.value as 'cover' | 'shrink' })}
                     >
-                      <option value="cover">Cover the short</option>
-                      <option value="shrink">Shrink the short</option>
+                      <option value="cover">{layout === 'shorts' ? 'Cover the short' : 'Cover the picture'}</option>
+                      <option value="shrink">{layout === 'shorts' ? 'Shrink the short' : 'Shrink the picture'}</option>
                     </select>
                   </label>
                   <label className="field">

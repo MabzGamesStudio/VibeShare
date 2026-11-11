@@ -3,17 +3,19 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { AppProvider } from './state';
+import { APP_BASE_PATH } from './util';
 import './styles.css';
 
 const root = createRoot(document.getElementById('root')!);
 
 /**
  * The folder the client is served from ('/' at the root): every route is relative to it,
- * so the same build works at a domain root and in any folder of a static host. A deep
- * link comes in through the 404 page (the web build), which pins this with a <base> tag;
- * a plain load of the folder is its own base.
+ * so the same build works at a domain root and in any folder of a static host. It is the
+ * folder the script came from — never the document's URL, which on a deep link served as
+ * the app (the daemon's fallback) sits inside the routes and would make every link grow
+ * another /p on each visit.
  */
-const base = new URL('.', document.baseURI).pathname.replace(/(.)\/+$/, '$1');
+const base = APP_BASE_PATH;
 
 // Links made before the routes moved off the #hash (`…/#/watch/x`) still open.
 const legacy = /^#(\/.*)$/.exec(location.hash);

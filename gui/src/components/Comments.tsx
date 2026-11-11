@@ -1,7 +1,7 @@
 // A verified comment chain presented as a foldable reply tree. Verification and the wire
 // format stay in shared/comments; this component only changes composition and presentation.
 import { ChevronDown, ChevronRight, MessageCircle, MoreHorizontal, Pencil, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import {
   checkCommentChain,
   COMMENT_ORDERS,
@@ -34,6 +34,92 @@ const DATE_DISPLAY_LABELS: Record<DateDisplay, string> = {
 };
 
 type Thread = CommentThread;
+
+/** How many open panels are holding the page still. */
+let scrollLocks = 0;
+
+/**
+ * Keeps the page behind a comments panel where it is: only the panel itself scrolls
+ * until the last open panel closes.
+ */
+export function useScrollLock(active: boolean): void {
+  useEffect(() => {
+    if (!active) return;
+    scrollLocks += 1;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      scrollLocks -= 1;
+      if (!scrollLocks) document.body.style.overflow = previous;
+    };
+  }, [active]);
+}
+
+/**
+ * The drag handle at the top of the comments panel on a short or an image post. Each
+ * panel keeps its own height: dragging the handle sizes it — the share it returns feeds
+ * the stage's --comments-share variable, so the picture takes what is left — and letting
+ * go below a fifth of the screen closes the panel instead.
+ */
+export function useCommentsResize(onClose: () => void): {
+  share: (percent: number) => string;
+  handle: {
+    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  };
+} {
+  const [height, setHeight] = useState<number | null>(null);
+  const drag = useRef<{ id: number; y: number; h: number } | null>(null);
+  return {
+    share: (percent: number) => (height != null ? `${height}px` : `${percent}%`),
+    handle: {
+      onPointerDown(event) {
+        const panel = event.currentTarget.closest('.short-comments');
+        const stage = event.currentTarget.closest<HTMLElement>('.short-stage, .image-stage');
+        if (!panel || !stage) return;
+        // No scrolling or text selection while the panel is being sized.
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        // The handle starts from the panel's size on the screen — never its content height.
+        drag.current = {
+          id: event.pointerId,
+          y: event.clientY,
+          h: Math.min(panel.getBoundingClientRect().height, stage.getBoundingClientRect().height),
+        };
+      },
+      onPointerMove(event) {
+        const current = drag.current;
+        const stage = event.currentTarget.closest<HTMLElement>('.short-stage, .image-stage');
+        if (!current || !stage || event.pointerId !== current.id) return;
+        // Straight into the variable, no re-render per move: the picture resizes with the
+        // panel live, and the height is committed to state only when the handle is let go.
+        const next = Math.max(0, Math.min(stage.getBoundingClientRect().height, current.h + (current.y - event.clientY)));
+        stage.style.setProperty('--comments-share', `${next}px`);
+      },
+      onPointerUp(event) {
+        const current = drag.current;
+        const panel = event.currentTarget.closest('.short-comments');
+        if (!current || event.pointerId !== current.id) return;
+        drag.current = null;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        const dropped = panel?.getBoundingClientRect().height ?? 0;
+        if (dropped < window.innerHeight * 0.2) {
+          // Dropped below a fifth of the screen: the panel goes away entirely.
+          setHeight(null);
+          onClose();
+        } else {
+          setHeight(dropped);
+        }
+      },
+      onPointerCancel(event) {
+        if (drag.current?.id === event.pointerId) drag.current = null;
+      },
+    },
+  };
+}
 
 export function Comments({ contentId }: { contentId: string }) {
   const [data, setData] = useState<CommentsResponse | null>(null);

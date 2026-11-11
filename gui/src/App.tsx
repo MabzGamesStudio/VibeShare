@@ -53,8 +53,26 @@ function TopSearch() {
   // the credit chips, and the past searches below it take up most of the screen.
   const [mobileOpen, setMobileOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (mobileOpen) inputRef.current?.focus();
+  }, [mobileOpen]);
+  // On a phone the search closes again when a tap lands outside it: the search goes
+  // back to the icon button and the provider and algorithm credits reappear.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const outside = (event: MouseEvent | TouchEvent) => {
+      if (!wrapRef.current?.contains(event.target as Node)) {
+        setMobileOpen(false);
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('touchstart', outside);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('touchstart', outside);
+    };
   }, [mobileOpen]);
   const suggest = Boolean(state?.settings.searchSuggestions);
   useEffect(() => {
@@ -82,7 +100,7 @@ function TopSearch() {
     else navigate(`/search?q=${encodeURIComponent(text)}`);
   };
   return (
-    <div className={`searchbox-wrap ${mobileOpen ? 'mobile-open' : ''}`}>
+    <div ref={wrapRef} className={`searchbox-wrap ${mobileOpen ? 'mobile-open' : ''}`}>
       <button
         type="button"
         className="ghost icon search-toggle"
@@ -136,6 +154,7 @@ function TopSearch() {
               onClick={() => {
                 setQuery(item.query);
                 setOpen(false);
+                setMobileOpen(false);
                 navigate(`/search?q=${encodeURIComponent(item.query)}`);
               }}
             >

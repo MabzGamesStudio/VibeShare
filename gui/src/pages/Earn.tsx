@@ -5,10 +5,10 @@ import { ProviderJobsTab } from '../earn/ProviderJobsTab';
 import { ProviderNodesTab } from '../earn/ProviderNodesTab';
 
 const EARN_TABS = [
-  ['algorithms', 'Algorithm nodes'],
-  ['providers', 'Provider nodes'],
   ['provider-jobs', 'Provider jobs'],
   ['algorithm-jobs', 'Algorithm jobs'],
+  ['providers', 'Provider nodes'],
+  ['algorithms', 'Algorithm nodes'],
 ] as const;
 
 type EarnTab = (typeof EARN_TABS)[number][0];
@@ -18,7 +18,7 @@ export function EarnPage() {
   // The tab lives in the URL (?tab=…), so cards elsewhere can link straight to one.
   const [params, setParams] = useSearchParams();
   const wanted = params.get('tab');
-  const tab: EarnTab = EARN_TABS.some(([id]) => id === wanted) ? (wanted as EarnTab) : 'algorithms';
+  const tab: EarnTab = EARN_TABS.some(([id]) => id === wanted) ? (wanted as EarnTab) : 'provider-jobs';
   const setTab = (id: EarnTab) => setParams({ tab: id });
   return (
     <div className="page page-narrow">

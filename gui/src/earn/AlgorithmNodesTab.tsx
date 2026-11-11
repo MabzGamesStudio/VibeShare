@@ -24,15 +24,52 @@ interface Contributions {
  * *Report stats* takes on every platform.
  */
 export function AlgorithmNodesTab() {
-  const { algorithms } = useApp();
+  const { algorithms, state } = useApp();
   const [nodeId, setNodeId] = useState('');
   const [data, setData] = useState<Contributions | null>(null);
+  // Lazy loading or pagination over the rows below, with the page size the user picks.
+  const [paged, setPaged] = useState(true);
+  const [size, setSize] = useState(25);
+  const [page, setPage] = useState(0);
+  const [shown, setShown] = useState(25);
+  // Listing the contributions is off by default: nothing is collected until the user
+  // turns the log on in Settings → History.
+  const logging = Boolean(state?.settings.logContributions);
   useEffect(() => {
+    if (!logging) return;
     api<Contributions>('/api/contributions').then(setData).catch(() => undefined);
-  }, []);
+  }, [logging]);
   const target = algorithms.find((node) => node.id === nodeId) ?? algorithms[0];
   const info = target?.info as AlgorithmInfo | undefined;
   const mine = data?.nodes.find((n) => n.node === target?.id);
+  // Submissions and suggestions as one list — the rows the card pages over.
+  const rows: (
+    | { type: 'submission'; id: string; contentId: string; status: string; title: string; note?: string; createdAt: string }
+    | { type: 'suggestion'; id: string; contentId: string; status: string; what: string; value: string; agreeing: number; createdAt: string }
+  )[] = [
+    ...(mine?.submissions ?? []).map((entry) => ({
+      type: 'submission' as const,
+      id: entry.id,
+      contentId: entry.contentId,
+      status: entry.status,
+      title: entry.request.title,
+      note: entry.note,
+      createdAt: entry.createdAt,
+    })),
+    ...(mine?.suggestions ?? []).map((entry) => ({
+      type: 'suggestion' as const,
+      id: entry.id,
+      contentId: entry.contentId,
+      status: entry.status,
+      what: entry.kind,
+      value: entry.value,
+      agreeing: entry.agreeing,
+      createdAt: entry.createdAt,
+    })),
+  ];
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  const current = Math.min(page, pages - 1);
+  const visible = paged ? rows.slice(current * size, current * size + size) : rows.slice(0, shown);
 
   if (!algorithms.length) {
     return (
@@ -60,8 +97,9 @@ export function AlgorithmNodesTab() {
         </label>
       </div>
 
-      <div className="card form-stack">
-        <div className="row">
+      {/* The balance of one node, as a card centered on the page. */}
+      <div className="card form-stack" style={{ margin: '18px auto 0', maxWidth: 620, textAlign: 'center' }}>
+        <div className="row" style={{ justifyContent: 'center' }}>
           <Sparkles size={22} />
           <div>
             <h2>Credits on {target?.name}</h2>
@@ -71,7 +109,7 @@ export function AlgorithmNodesTab() {
             </p>
           </div>
         </div>
-        <div className="row between">
+        <div className="row" style={{ justifyContent: 'center', gap: 16 }}>
           <div className="row">
             <StatusDot online={target?.status.online} enabled={target?.enabled} />
             <strong style={{ fontSize: 22 }}>{target?.balance ?? '–'}</strong>
@@ -152,40 +190,111 @@ export function AlgorithmNodesTab() {
             <p className="small muted">Suggestions and submissions of yours this node has reviewed — or is still reviewing.</p>
           </div>
         </div>
-        {mine?.error && <div className="small faint">{mine.error}</div>}
-        {mine && (mine.suggestions.length > 0 || mine.submissions.length > 0) ? (
-          <table className="table">
-            <tbody>
-              {mine.submissions.map((s) => (
-                <tr key={s.id}>
-                  <td className="small">
-                    Submitted <Link className="link" to={watchPath(s.contentId)}>{s.request.title}</Link>
-                    {s.note && <div className="tiny faint">{s.note}</div>}
-                  </td>
-                  <td>
-                    <span className={`badge ${s.status === 'accepted' ? 'ok' : s.status === 'rejected' ? 'danger' : ''}`}>{s.status}</span>
-                  </td>
-                  <td className="tiny faint">{timeAgo(s.createdAt)}</td>
-                </tr>
-              ))}
-              {mine.suggestions.map((s) => (
-                <tr key={s.id}>
-                  <td className="small">
-                    {s.kind} “{s.value}” on <Link className="link" to={watchPath(s.contentId)}>{s.contentId.slice(0, 18)}…</Link>
-                    <div className="tiny faint">{s.agreeing} agreeing</div>
-                  </td>
-                  <td>
-                    <span className={`badge ${s.status === 'accepted' ? 'ok' : s.status === 'rejected' ? 'danger' : ''}`}>{s.status}</span>
-                  </td>
-                  <td className="tiny faint">{timeAgo(s.createdAt)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
+        {!logging ? (
           <p className="small muted">
-            Nothing yet. Use Like / Suggest under any content — this node rewards votes and accepted suggestions.
+            Nothing is logged by default. Turn on “Keep a log of my contributions to algorithm nodes” in{' '}
+            <Link className="link" to="/settings#history">
+              Settings → History
+            </Link>{' '}
+            and this card lists every suggestion and submission of yours.
           </p>
+        ) : (
+          <>
+            {mine?.error && <div className="small faint">{mine.error}</div>}
+            {rows.length > 0 ? (
+              <>
+                <div className="row between small">
+                  <span className="muted">
+                    {rows.length} item{rows.length === 1 ? '' : 's'}
+                    {paged ? ` · page ${current + 1} of ${pages}` : ` · showing ${visible.length}`}
+                  </span>
+                  <div className="row" style={{ gap: 6 }}>
+                    <span className="hint">Items per page</span>
+                    <select
+                      value={size}
+                      onChange={(e) => {
+                        setSize(Number(e.target.value));
+                        setPage(0);
+                        setShown(Number(e.target.value));
+                      }}
+                    >
+                      {[10, 25, 50, 100].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="hint">Show as</span>
+                    <select
+                      value={paged ? 'paged' : 'lazy'}
+                      onChange={(e) => {
+                        setPaged(e.target.value === 'paged');
+                        setPage(0);
+                        setShown(size);
+                      }}
+                    >
+                      <option value="paged">Pagination</option>
+                      <option value="lazy">Lazy load</option>
+                    </select>
+                    {paged && (
+                      <>
+                        <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
+                          Previous
+                        </button>
+                        <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+                          Next
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <table className="table">
+                  <tbody>
+                    {visible.map((row) =>
+                      row.type === 'submission' ? (
+                        <tr key={row.id}>
+                          <td className="small">
+                            Submitted{' '}
+                            <Link className="link" to={watchPath(row.contentId)}>
+                              {row.title}
+                            </Link>
+                            {row.note && <div className="tiny faint">{row.note}</div>}
+                          </td>
+                          <td>
+                            <span className={`badge ${row.status === 'accepted' ? 'ok' : row.status === 'rejected' ? 'danger' : ''}`}>{row.status}</span>
+                          </td>
+                          <td className="tiny faint">{timeAgo(row.createdAt)}</td>
+                        </tr>
+                      ) : (
+                        <tr key={row.id}>
+                          <td className="small">
+                            {row.what} “{row.value}” on{' '}
+                            <Link className="link" to={watchPath(row.contentId)}>
+                              {row.contentId.slice(0, 18)}…
+                            </Link>
+                            <div className="tiny faint">{row.agreeing} agreeing</div>
+                          </td>
+                          <td>
+                            <span className={`badge ${row.status === 'accepted' ? 'ok' : row.status === 'rejected' ? 'danger' : ''}`}>{row.status}</span>
+                          </td>
+                          <td className="tiny faint">{timeAgo(row.createdAt)}</td>
+                        </tr>
+                      )
+                    )}
+                  </tbody>
+                </table>
+                {!paged && visible.length < rows.length && (
+                  <button className="small" onClick={() => setShown(shown + size)}>
+                    Load more ({rows.length - visible.length} left)
+                  </button>
+                )}
+              </>
+            ) : (
+              <p className="small muted">
+                Nothing yet. Use Like / Suggest under any content — this node rewards votes and accepted suggestions.
+              </p>
+            )}
+          </>
         )}
       </div>
     </>

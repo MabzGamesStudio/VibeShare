@@ -55,8 +55,9 @@ export function ProviderNodesTab() {
         </label>
       </div>
 
-      <div className="card form-stack">
-        <div className="row">
+      {/* The balance of one node, as a card centered on the page. */}
+      <div className="card form-stack" style={{ margin: '18px auto 0', maxWidth: 620, textAlign: 'center' }}>
+        <div className="row" style={{ justifyContent: 'center' }}>
           <HardDrive size={22} />
           <div>
             <h2>Credits on {target?.name}</h2>
@@ -66,7 +67,7 @@ export function ProviderNodesTab() {
             </p>
           </div>
         </div>
-        <div className="row between">
+        <div className="row" style={{ justifyContent: 'center', gap: 16 }}>
           <div className="row">
             <StatusDot online={target?.status.online} enabled={target?.enabled} />
             <strong style={{ fontSize: 22 }}>{target?.balance ?? '–'}</strong>

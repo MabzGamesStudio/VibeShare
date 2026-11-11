@@ -1,94 +1,28 @@
 import { CheckCircle2, Circle, CircleAlert, Film, ImagePlus, Link2, Loader2, Upload, UploadCloud } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Job, NodeEntry } from '../../../src/shared/clientapi';
+import type { Job } from '../../../src/shared/clientapi';
 import { VvshCompose } from '../components/VvshCompose';
-import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
+import type { ProviderInfo } from '../../../src/shared/protocol';
 import type { Embed, ExternalSource } from '../../../src/shared/sources';
-import {
-  CREATOR_KIND_LABELS,
-  CREATOR_KINDS,
-  FORMAT_LABELS,
-  FORMATS,
-  guessFormat,
-  RATING_LABELS,
-  RATINGS,
-  TOPICS,
-  type CreatorKind,
-  type Format,
-  type Rating,
-} from '../../../src/shared/taxonomy';
+import { FORMAT_LABELS, FORMATS, type Format } from '../../../src/shared/taxonomy';
 import { api, errorMessage, uploadFile } from '../api';
-import { Chips, Spinner, Switch, toggle } from '../components/ui';
+import {
+  describeAlgorithm,
+  describeProvider,
+  emptyMeta,
+  imageThumbnail,
+  inspectMedia,
+  MetaFields,
+  mergeTopics,
+  NodePicker,
+  SignCard,
+  ThumbPicker,
+  type MetaState,
+} from '../components/PublishFields';
+import { Spinner } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, formatDuration, splitList, watchPath } from '../util';
-
-const MAX_THUMB = 190 * 1024;
-
-function canvasToDataUrl(canvas: HTMLCanvasElement): string {
-  for (const quality of [0.82, 0.7, 0.55, 0.4]) {
-    const url = canvas.toDataURL('image/jpeg', quality);
-    if (url.length * 0.75 < MAX_THUMB) return url;
-  }
-  return canvas.toDataURL('image/jpeg', 0.3);
-}
-
-function drawScaled(source: CanvasImageSource, width: number, height: number): string {
-  const scale = Math.min(1, 640 / width);
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(width * scale);
-  canvas.height = Math.round(height * scale);
-  canvas.getContext('2d')!.drawImage(source, 0, 0, canvas.width, canvas.height);
-  return canvasToDataUrl(canvas);
-}
-
-async function imageThumbnail(file: File): Promise<string | undefined> {
-  try {
-    const bitmap = await createImageBitmap(file);
-    return drawScaled(bitmap, bitmap.width, bitmap.height);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads the duration of audio/video, and grabs a frame of video as the thumbnail. */
-function inspectMedia(file: File): Promise<{ duration?: number; thumbnail?: string }> {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const video = file.type.startsWith('video/');
-    const element = document.createElement(video ? 'video' : 'audio');
-    element.preload = 'metadata';
-    element.muted = true;
-    const done = (result: { duration?: number; thumbnail?: string }) => {
-      URL.revokeObjectURL(url);
-      resolve(result);
-    };
-    const timer = setTimeout(() => done({}), 8000);
-    element.onerror = () => {
-      clearTimeout(timer);
-      done({});
-    };
-    element.onloadedmetadata = () => {
-      const duration = Number.isFinite(element.duration) ? element.duration : undefined;
-      if (!video) {
-        clearTimeout(timer);
-        done({ duration });
-        return;
-      }
-      const v = element as HTMLVideoElement;
-      v.onseeked = () => {
-        clearTimeout(timer);
-        try {
-          done({ duration, thumbnail: drawScaled(v, v.videoWidth, v.videoHeight) });
-        } catch {
-          done({ duration });
-        }
-      };
-      v.currentTime = Math.min(2, (duration ?? 2) / 3);
-    };
-    element.src = url;
-  });
-}
 
 function JobView({ job }: { job: Job }) {
   return (
@@ -152,105 +86,82 @@ function useJob(): [Job | null, (id: string) => void] {
   return [job, setId];
 }
 
-interface MetaState {
-  title: string;
-  description: string;
-  format: Format;
-  rating: Rating;
-  topics: string[];
-  language: string;
+/** What the file field takes for each format — the format at the top governs the picker. */
+const FORMAT_ACCEPT: Record<Format, string> = {
+  video: 'video/*,.mkv,.mov,.mp4,.m4v,.webm,.ogv,.avi,.wmv,.flv,.ts',
+  'short-video': 'video/*,.mkv,.mov,.mp4,.m4v,.webm,.ogv,.avi,.wmv,.flv,.ts',
+  live: 'video/*,.mkv,.mov,.mp4,.m4v,.webm,.ogv,.avi,.wmv,.flv,.ts',
+  music: 'audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac',
+  audio: 'audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac',
+  podcast: 'audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.wav,.flac',
+  image: 'image/*',
+  'image-list': 'image/*',
+  article: '.txt,.md,.markdown,.html,.htm,.epub,.pdf,text/*',
+  game: '.zip,.7z,.rar,.apk,.jar,.exe,.dmg,.appimage,application/zip,application/x-7z-compressed',
+  software: '.zip,.7z,.rar,.apk,.jar,.exe,.dmg,.appimage,application/zip,application/x-7z-compressed',
+  book: '.pdf,.epub,.mobi,application/pdf,application/epub+zip',
+  file: '',
+  other: '',
+};
+
+const FORMAT_DROP: Record<Format, string> = {
+  video: 'Drop a video or click to choose',
+  'short-video': 'Drop a video or click to choose',
+  live: 'Drop a video or click to choose',
+  music: 'Drop an audio file or click to choose',
+  audio: 'Drop an audio file or click to choose',
+  podcast: 'Drop an audio file or click to choose',
+  image: 'Drop an image or click to choose',
+  'image-list': 'Drop an image or click to choose',
+  article: 'Drop an article or click to choose',
+  game: 'Drop a game or click to choose',
+  software: 'Drop a program or click to choose',
+  book: 'Drop a book or click to choose',
+  file: 'Drop a file or click to choose',
+  other: 'Drop a file or click to choose',
+};
+
+const VIDEO_EXT = ['.mkv', '.mov', '.mp4', '.m4v', '.webm', '.ogv', '.avi', '.wmv', '.flv', '.ts'];
+const AUDIO_EXT = ['.mp3', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.wav', '.flac'];
+const DOC_EXT = ['.txt', '.md', '.markdown', '.html', '.htm', '.epub', '.pdf'];
+const APP_EXT = ['.zip', '.7z', '.rar', '.apk', '.jar', '.exe', '.dmg', '.appimage'];
+const BOOK_EXT = ['.pdf', '.epub', '.mobi'];
+
+function extOf(name: string): string {
+  const match = name.toLowerCase().match(/(\.[a-z0-9]+)$/);
+  return match ? match[1] : '';
 }
 
-function MetaFields({ meta, setMeta }: { meta: MetaState; setMeta: (meta: MetaState) => void }) {
-  return (
-    <>
-      <label className="field">
-        Title
-        <input type="text" value={meta.title} onChange={(e) => setMeta({ ...meta, title: e.target.value })} maxLength={300} />
-      </label>
-      <label className="field">
-        Description
-        <textarea value={meta.description} onChange={(e) => setMeta({ ...meta, description: e.target.value })} rows={4} />
-      </label>
-      <div className="form-grid">
-        <label className="field">
-          Format
-          <select value={meta.format} onChange={(e) => setMeta({ ...meta, format: e.target.value as Format })}>
-            {FORMATS.map((f) => (
-              <option key={f} value={f}>
-                {FORMAT_LABELS[f]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          Age rating
-          <select value={meta.rating} onChange={(e) => setMeta({ ...meta, rating: e.target.value as Rating })}>
-            {RATINGS.map((r) => (
-              <option key={r} value={r}>
-                {RATING_LABELS[r]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          Language
-          <input type="text" value={meta.language} onChange={(e) => setMeta({ ...meta, language: e.target.value })} placeholder="en" />
-        </label>
-      </div>
-      <div className="field">
-        <span>Topics</span>
-        <Chips options={TOPICS} selected={meta.topics} onToggle={(t) => setMeta({ ...meta, topics: toggle(meta.topics, t) })} />
-      </div>
-    </>
-  );
-}
-
-function NodePicker({
-  nodes,
-  selected,
-  setSelected,
-  describe,
-}: {
-  nodes: NodeEntry[];
-  selected: string[];
-  setSelected: (ids: string[]) => void;
-  describe: (node: NodeEntry) => string;
-}) {
-  if (!nodes.length) return <p className="small muted">None enabled. <Link className="link" to="/nodes">Add nodes</Link></p>;
-  return (
-    <div className="check-list">
-      {nodes.map((node) => (
-        <label key={node.id} className="check-item">
-          <input type="checkbox" checked={selected.includes(node.id)} onChange={() => setSelected(toggle(selected, node.id))} />
-          <div>
-            <div style={{ fontWeight: 600 }}>{node.name}</div>
-            <div className="tiny faint">{describe(node)}</div>
-          </div>
-        </label>
-      ))}
-    </div>
-  );
-}
-
-const emptyMeta = (): MetaState => ({ title: '', description: '', format: 'video', rating: 'all', topics: [], language: '' });
-
-function describeProvider(node: NodeEntry): string {
-  const info = node.info as ProviderInfo | undefined;
-  if (!info) return node.url;
-  const upload = info.pricing.upload;
-  if (upload.mode === 'closed') return 'Does not accept uploads';
-  return `${upload.mode === 'paid' ? `${upload.perMiB} credits/MiB` : 'Free uploads'} · up to ${formatBytes(upload.maxBytes)} · balance ${node.balance ?? '?'}`;
-}
-
-function describeAlgorithm(node: NodeEntry): string {
-  const info = node.info as AlgorithmInfo | undefined;
-  if (!info) return node.url;
-  return `${info.pricing.submission ? `${info.pricing.submission} credits per submission` : 'Free submissions'} · reviewed by the operator`;
+/** Whether a file belongs in the format chosen at the top of the tab. */
+function fitsFormat(file: File, format: Format): boolean {
+  const mime = file.type || '';
+  const ext = extOf(file.name);
+  switch (format) {
+    case 'video':
+    case 'short-video':
+    case 'live':
+      return mime.startsWith('video/') || VIDEO_EXT.includes(ext);
+    case 'music':
+    case 'audio':
+    case 'podcast':
+      return mime.startsWith('audio/') || AUDIO_EXT.includes(ext);
+    case 'image':
+    case 'image-list':
+      return mime.startsWith('image/');
+    case 'article':
+      return mime.startsWith('text/') || DOC_EXT.includes(ext);
+    case 'game':
+    case 'software':
+      return APP_EXT.includes(ext) || mime === 'application/zip' || mime === 'application/x-7z-compressed' || mime === 'application/java-archive';
+    case 'book':
+      return mime === 'application/pdf' || mime === 'application/epub+zip' || BOOK_EXT.includes(ext);
+    default:
+      return true;
+  }
 }
 
 function FileTab({ onVideo }: { onVideo?: () => void }) {
-  const { state, providers, algorithms, updateSettings, toast } = useApp();
+  const { state, providers, algorithms, toast } = useApp();
   const enabledProviders = providers.filter((n) => n.enabled && (n.info as ProviderInfo | undefined)?.pricing.upload.mode !== 'closed');
   const enabledAlgorithms = algorithms.filter((n) => n.enabled);
   const [file, setFile] = useState<File | null>(null);
@@ -268,7 +179,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   const [uploading, setUploading] = useState<number | null>(null);
   const [job, watchJob] = useJob();
   const input = useRef<HTMLInputElement>(null);
-  const thumbInput = useRef<HTMLInputElement>(null);
+  const listInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!chosenProviders.length && enabledProviders.length) setChosenProviders([enabledProviders[0].id]);
@@ -277,18 +188,22 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   }, [providers.length, algorithms.length]);
 
   const choose = async (picked: File) => {
+    // The format at the top is the choice; the file field only takes what fits it.
+    if (!fitsFormat(picked, meta.format)) {
+      toast(`That file does not fit ${FORMAT_LABELS[meta.format].toLowerCase()} — change the format at the top to take it.`, 'error');
+      return;
+    }
     setFile(picked);
     setVideoHint((picked.type || '').startsWith('video/'));
     setThumbnail(undefined);
     setDuration(undefined);
     const mime = picked.type || 'application/octet-stream';
-    setMeta((m) => ({ ...m, title: m.title || picked.name.replace(/\.[^.]+$/, ''), format: guessFormat(mime) }));
+    setMeta((m) => ({ ...m, title: m.title || picked.name.replace(/\.[^.]+$/, '') }));
     if (mime.startsWith('image/')) setThumbnail(await imageThumbnail(picked));
     if (mime.startsWith('video/') || mime.startsWith('audio/')) {
       const info = await inspectMedia(picked);
       setDuration(info.duration);
       if (info.thumbnail) setThumbnail(info.thumbnail);
-      setMeta((m) => ({ ...m, format: guessFormat(mime, info.duration) }));
     }
   };
 
@@ -297,7 +212,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
     const list = [...picked];
     if (!list.length) return;
     const images = list.filter((one) => (one.type || '').startsWith('image/'));
-    if (list.length > 1 && images.length === list.length) {
+    if (list.length > 1 && images.length === list.length && (meta.format === 'image' || meta.format === 'image-list')) {
       setGallery(images.slice(1, 64));
       await choose(images[0]);
       setMeta((m) => ({ ...m, format: 'image-list' }));
@@ -307,37 +222,51 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
     await choose(list[0]);
   };
 
+  const images = file ? [file, ...gallery] : [];
+  // A list of images publishes every image as its own content and the list itself last:
+  // whenever several images were picked at once, or the format is "Image list".
+  const asList = gallery.length > 0 || (meta.format === 'image-list' && (file?.type || '').startsWith('image/'));
+
+  /** Takes one image out of the list (the first one hands its place to the next). */
+  const dropImage = (index: number) => {
+    if (index === 0) {
+      setFile(gallery[0] ?? null);
+      setGallery(gallery.slice(1));
+    } else {
+      setGallery(gallery.filter((_, at) => at !== index - 1));
+    }
+  };
+
   const publish = async () => {
     if (!file) return;
     try {
       setUploading(0);
       // A list of images: every image publishes as its own content first (each gets its
       // own id), and the list itself publishes last with all of those ids as its gallery.
-      const images = [file, ...gallery];
       const galleryIds: string[] = [];
       for (const [index, image] of images.entries()) {
-        if (gallery.length) setUploading(index / (images.length + 1));
-        const { fileId } = await uploadFile(image, gallery.length ? () => undefined : setUploading);
+        if (asList) setUploading(index / (images.length + 1));
+        const { fileId } = await uploadFile(image, asList ? () => undefined : setUploading);
         const one = await api<Job>('/api/publish', {
           body: {
             fileId,
             name: image.name,
             mime: image.type || 'application/octet-stream',
-            title: gallery.length ? `${meta.title} (${index + 1}/${images.length})` : meta.title,
+            title: asList ? `${meta.title} (${index + 1}/${images.length})` : meta.title,
             description: meta.description,
-            format: gallery.length ? 'image' : meta.format,
+            format: asList ? 'image' : meta.format,
             rating: meta.rating,
-            topics: meta.topics,
+            topics: mergeTopics(meta),
             language: meta.language || undefined,
-            durationSeconds: gallery.length ? undefined : duration,
-            sources: gallery.length ? undefined : splitList(sources),
+            durationSeconds: asList ? undefined : duration,
+            sources: asList ? undefined : splitList(sources),
             providers: chosenProviders,
             algorithms: chosenAlgorithms,
-            thumbnail: gallery.length ? undefined : thumbnail,
+            thumbnail: asList ? undefined : thumbnail,
             sign,
           },
         });
-        if (!gallery.length) {
+        if (!asList) {
           watchJob(one.id);
           return;
         }
@@ -369,7 +298,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
           description: meta.description,
           format: 'image-list',
           rating: meta.rating,
-          topics: meta.topics,
+          topics: mergeTopics(meta),
           language: meta.language || undefined,
           gallery: galleryIds,
           sources: splitList(sources),
@@ -400,10 +329,20 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
     );
   }
 
-  const profile = state.settings.profile;
   return (
     <div className="publish-layout">
       <div className="form-stack">
+        <label className="field">
+          Format
+          <select value={meta.format} onChange={(e) => setMeta({ ...meta, format: e.target.value as Format })}>
+            {FORMATS.map((f) => (
+              <option key={f} value={f}>
+                {FORMAT_LABELS[f]}
+              </option>
+            ))}
+          </select>
+          <span className="hint">Decides what the file field below takes.</span>
+        </label>
         {!file ? (
           <div
             className={`dropzone ${over ? 'over' : ''}`}
@@ -417,9 +356,13 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             }}
           >
             <UploadCloud size={44} />
-            <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>Drop a file or click to choose</h2>
-            <p>Video, music, podcasts, images, articles, games — any file. It is split into chunks and uploaded to the providers you pick.</p>
-            <p className="hint">Pick several images at once to publish them as a list of images: one content per image, plus the list itself.</p>
+            <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>{FORMAT_DROP[meta.format]}</h2>
+            <p>It is split into chunks and uploaded to the providers you pick.</p>
+            {meta.format === 'image' || meta.format === 'image-list' ? (
+              <p className="hint">Pick several images at once to publish them as a list of images: one content per image, plus the list itself.</p>
+            ) : (
+              <p className="hint">The format at the top decides which files this field takes.</p>
+            )}
           </div>
         ) : (
           <div className="card row between">
@@ -428,7 +371,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
               <div className="small muted">
                 {file.type || 'unknown type'} · {formatBytes(file.size)}
                 {duration ? ` · ${formatDuration(duration)}` : ''}
-                {gallery.length ? ` · a list of ${gallery.length + 1} images` : ''}
+                {asList ? ` · a list of ${images.length} image${images.length === 1 ? '' : 's'}` : ''}
               </div>
             </div>
             <button className="small" onClick={() => (setFile(null), setGallery([]), setMeta(emptyMeta()))}>
@@ -448,33 +391,53 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
         <input
           ref={input}
           type="file"
-          multiple
+          multiple={meta.format === 'image' || meta.format === 'image-list'}
+          accept={FORMAT_ACCEPT[meta.format] || undefined}
           hidden
           onChange={(e) => e.target.files?.length && void chooseMany(e.target.files)}
         />
-        <MetaFields meta={meta} setMeta={setMeta} />
+        <MetaFields meta={meta} setMeta={setMeta} hideFormat />
+        {asList && file && (
+          <div className="field">
+            <span>
+              Images in the list <span className="hint">Each one publishes as its own content; the list itself goes last.</span>
+            </span>
+            <div className="form-stack" style={{ gap: 6 }}>
+              {images.map((image, index) => (
+                <div key={`${image.name}-${index}`} className="card row between" style={{ padding: '6px 10px', margin: 0 }}>
+                  <span className="small">
+                    {index + 1}. {image.name} <span className="faint">· {formatBytes(image.size)}</span>
+                  </span>
+                  <button type="button" className="small" onClick={() => dropImage(index)}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="small" style={{ alignSelf: 'flex-start' }} onClick={() => listInput.current?.click()}>
+              <ImagePlus size={14} /> Add images
+            </button>
+            <input
+              ref={listInput}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(e) => {
+                const picked = [...(e.target.files ?? [])].filter((one) => (one.type || '').startsWith('image/'));
+                if (picked.length) setGallery([...gallery, ...picked].slice(0, 63));
+                e.target.value = '';
+              }}
+            />
+          </div>
+        )}
         <label className="field">
           Fallback links <span className="hint">Copies elsewhere (YouTube, archive.org, IPFS…), shown when no provider has the file. One per line.</span>
           <textarea value={sources} onChange={(e) => setSources(e.target.value)} rows={2} placeholder="https://www.youtube.com/watch?v=…" />
         </label>
       </div>
       <div className="form-stack">
-        <div className="field">
-          <span>Thumbnail</span>
-          <div className="preview-thumb" onClick={() => thumbInput.current?.click()} style={{ cursor: 'pointer' }}>
-            {thumbnail ? <img src={thumbnail} alt="" /> : <ImagePlus size={32} className="faint" />}
-          </div>
-          <input
-            ref={thumbInput}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={async (e) => {
-              const picked = e.target.files?.[0];
-              if (picked) setThumbnail(await imageThumbnail(picked));
-            }}
-          />
-        </div>
+        <ThumbPicker value={thumbnail} onChange={setThumbnail} />
         <div className="field">
           <span>Upload to providers</span>
           <NodePicker nodes={enabledProviders} selected={chosenProviders} setSelected={setChosenProviders} describe={describeProvider} />
@@ -483,36 +446,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
           <span>Submit to algorithm nodes</span>
           <NodePicker nodes={enabledAlgorithms} selected={chosenAlgorithms} setSelected={setChosenAlgorithms} describe={describeAlgorithm} />
         </div>
-        <div className="card form-stack" style={{ padding: 16 }}>
-          <Switch checked={sign} onChange={setSign} label="Sign as the creator" />
-          {sign ? (
-            <>
-              <p className="tiny faint">Your public key proves you made it, so people can subscribe to you.</p>
-              <div className="row">
-                <input
-                  type="text"
-                  defaultValue={profile.name}
-                  placeholder="Creator name"
-                  onBlur={(e) => e.target.value !== profile.name && void updateSettings({ profile: { ...profile, name: e.target.value } })}
-                  style={{ flex: 1 }}
-                />
-                <select
-                  value={profile.kind}
-                  onChange={(e) => void updateSettings({ profile: { ...profile, kind: e.target.value as CreatorKind } })}
-                  style={{ width: 'auto' }}
-                >
-                  {CREATOR_KINDS.filter((k) => k !== 'unknown').map((k) => (
-                    <option key={k} value={k}>
-                      {CREATOR_KIND_LABELS[k]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </>
-          ) : (
-            <p className="tiny faint">Published without a creator identity.</p>
-          )}
-        </div>
+        <SignCard sign={sign} setSign={setSign} />
         {uploading !== null && (
           <div>
             <div className="small muted">Sending to your client… {Math.round(uploading * 100)}%</div>
@@ -560,7 +494,7 @@ function LinkTab() {
           description: meta.description,
           format: meta.format,
           rating: meta.rating,
-          topics: meta.topics,
+          topics: mergeTopics(meta),
           language: meta.language || undefined,
           algorithms: chosen,
         },

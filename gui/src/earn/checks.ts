@@ -65,9 +65,22 @@ export async function checkCids(baseUrl: string, cids: string[]): Promise<CheckR
   return { ok: all, message: `${all ? '✓' : '✗'} ${list.length} content id${list.length === 1 ? '' : 's'}: ${lines.join(' · ')}` };
 }
 
+/** The site answers with an index.html: the page the setup uploads is being served. */
+export async function checkIndex(baseUrl: string): Promise<CheckResult> {
+  const root = baseUrl.trim().replace(/\/+$/, '/');
+  if (!/^https?:\/\//.test(root)) return { ok: false, message: 'There is no site address yet — fill in the fields first.' };
+  const url = new URL('index.html', root).href;
+  const answer = await probe(url);
+  if (answer.error) return { ok: false, message: `Could not reach ${url} — ${answer.error}` };
+  if (answer.status === 200) {
+    return { ok: true, message: `✓ index.html is at the hosted URL — ${url} answered 200${answer.bytes ? ` (${answer.bytes} bytes)` : ''} in ${answer.ms ?? 0} ms.` };
+  }
+  return { ok: false, message: `No index.html at the hosted URL — ${url} answered ${answer.status || 'nothing'}. Upload the starter page first.` };
+}
+
 /**
  * The access token can really write: a probe file is committed and removed again. Wired
- * for the two platforms whose pipelines are wired; the rest say so plainly.
+ * for GitHub, GitLab, Netlify and Vercel; the rest say so plainly.
  */
 export async function checkAccess(platformId: string, values: Record<string, string>): Promise<CheckResult> {
   const name = '.vibeshare-write-test.txt';
@@ -153,6 +166,37 @@ export async function checkAccess(platformId: string, values: Record<string, str
         : { ok: true, message: `✓ The token wrote ${name} (removing it answered ${remove.status} — delete the draft deploy by hand in Deploys).` };
     } catch (error) {
       return { ok: false, message: `Could not reach api.netlify.com to test the token (${error instanceof Error ? error.message : String(error)}).` };
+    }
+  }
+  if (platformId === 'vercel') {
+    const { project, token } = values;
+    if (!project || !token) return { ok: false, message: 'Fill in the project name and access token first.' };
+    try {
+      // A preview deployment holding only the probe file: it proves the token can push
+      // without touching what the live deployment serves.
+      const deploy = await fetch('https://api.vercel.com/v13/deployments?forceNew=1', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: project,
+          target: 'preview',
+          projectSettings: { framework: null },
+          files: [{ file: name, data: btoa(text), encoding: 'base64' }],
+        }),
+      });
+      const body = (await deploy.json().catch(() => ({}))) as { id?: string; error?: { message?: string } };
+      if (!deploy.ok || !body.id) {
+        return { ok: false, message: `Vercel would not push the probe file (${deploy.status}) — ${body.error?.message ?? 'check the token and the project name'}.` };
+      }
+      const remove = await fetch(`https://api.vercel.com/v13/deployments/${encodeURIComponent(body.id)}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${token}` },
+      }).catch(() => null);
+      return remove?.ok
+        ? { ok: true, message: `✓ The token pushed ${name} and removed it again — write access works.` }
+        : { ok: true, message: `✓ The token pushed ${name} (a preview deployment, the live site untouched) — write access works.` };
+    } catch (error) {
+      return { ok: false, message: `Could not reach api.vercel.com to test the token (${error instanceof Error ? error.message : String(error)}).` };
     }
   }
   return { ok: false, message: 'No write test is wired for this platform yet — paste the access token by hand and check it on the platform.' };

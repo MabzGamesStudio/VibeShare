@@ -863,6 +863,19 @@ label.field > span.hint,
   font-size: 12px;
 }
 
+/* The instruction text of the guided setups: larger and a touch heavier than the fine
+   print, so the steps read easily — the headings above stay larger and heavier still. */
+.instructions {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.step-heading {
+  font-size: 16px;
+  font-weight: 650;
+}
+
 .banner {
   display: flex;
   align-items: flex-start;
@@ -1276,26 +1289,34 @@ table.table {
   margin-top: 14px;
 }
 
-/* The content actions (suggest, report stats, save, share, copy id): two split a row
-   equally and one on its own spans the whole row. */
+/* The content actions (suggest, report stats, save, share, copy id): one row of
+   buttons as wide as their labels. Only on a phone do they stretch to equal widths
+   that fill the width (see the mobile block). The download button is wrapped in a
+   span (it can show an error note under the button) and must lay out like the rest. */
 .watch-actions.watch-action-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.watch-action-buttons > * {
-  display: flex;
+.watch-action-buttons > button,
+.watch-action-buttons > span {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: 100%;
+  width: fit-content;
   min-width: 0;
 }
 
-.watch-action-buttons > :last-child:nth-child(odd) {
-  grid-column: 1 / -1;
+/* The download button's wrapper: the button fills it, its error note goes below. */
+.watch-action-buttons > span {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.watch-action-buttons > span > button {
+  width: 100%;
 }
 
 .vote-group {
@@ -2599,17 +2620,18 @@ button.watch-info:hover {
   padding-top: 2px;
 }
 
-/* The content itself: square corners, the whole width of its column (so it covers the
-   screen whether the side panel is open or collapsed), letterboxed inside its box. */
+/* The content itself: square corners, as wide as its column (so it covers the screen
+   whether the side panel is open or collapsed) but never taller than 80% of the
+   screen height — scaled to fit its box, never cut off. */
 .watch .player,
 .watch .player.fit {
   border-radius: 0;
 }
 
 .watch .player.fit {
-  width: 100%;
-  max-height: calc(100vh - 110px);
-  margin: 0;
+  --player-max-h: 80vh;
+  max-height: 80vh;
+  margin: 0 auto;
 }
 
 .watch .player.fit video,
@@ -2639,19 +2661,18 @@ button.watch-info:hover {
 }
 
 .suggest-fold {
-  text-align: left;
-}
-
-.suggest-fold {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   margin-top: 10px;
+  text-align: left;
 }
 
 .suggest-fold-head {
   display: flex;
   align-items: center;
+  /* Left, not centered like a plain button: the fold header is text. */
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
   padding: 0;
@@ -2720,14 +2741,62 @@ button.watch-info:hover {
 
 /* The comments section on a short: it covers the video or shrinks it, per the page. */
 .short-comments {
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
   border-top: 1px solid var(--border);
-  padding: 12px;
   z-index: 5;
 }
 
-.short-stage.comments-cover .short-comments {
+/* The handle at the top of the panel: drag the whole strip to size the panel (each panel
+   remembers its own height), or drop the panel below a fifth of the screen to close it. */
+.comments-handle {
+  flex: none;
+  position: relative;
+  height: 22px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.comments-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.comments-handle:active {
+  cursor: grabbing;
+}
+
+.comments-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 12px 12px;
+}
+
+/* The video frame and its comments share one column: the panel covers or shrinks the
+   video only — the rail beside it stays clear of it. */
+.short-main {
+  position: relative;
+  height: 100%;
+  aspect-ratio: 9 / 16;
+  max-width: calc(100vw - var(--sidebar) - 120px);
+  display: flex;
+  justify-content: center;
+}
+
+.short-stage.comments-cover .short-comments,
+.short-stage.comments-shrink .short-comments,
+.image-stage.comments-cover .short-comments {
   position: absolute;
   left: 0;
   right: 0;
@@ -2736,37 +2805,22 @@ button.watch-info:hover {
   border-radius: 12px 12px 0 0;
 }
 
-.short-stage.comments-shrink {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-}
-
-/* The short gives up part of the screen and centers in what is left. */
+/* Shrink mode: the short gives the bottom of its column to the comments and stays
+   visible above them — its media is absolutely positioned inside the frame, so an auto
+   height would collapse it to nothing. */
 .short-stage.comments-shrink .short-frame {
-  height: auto;
-  max-height: calc(100% - var(--comments-share, 50%));
-  flex: 0 1 auto;
-  margin: 0 auto;
+  height: calc(100% - var(--comments-share, 50%));
+  min-height: 48px;
 }
 
 .short-stage.comments-shrink .short-comments {
-  height: var(--comments-share, 50%);
-  min-height: 120px;
-  flex: none;
   width: min(100%, 560px);
   margin: 0 auto;
   border: 1px solid var(--border);
   border-radius: 12px;
 }
 
-/* The rail steps aside while the comments are on the screen. */
-.short-stage.comments-cover .short-rail,
-.short-stage.comments-shrink .short-rail,
-.short-stage.comments-cover .short-top,
-.short-stage.comments-shrink .short-top,
+/* The rail overlays the picture here, so it steps aside while the comments are open. */
 .image-stage.comments-cover .image-rail,
 .image-stage.comments-shrink .image-rail {
   display: none;
@@ -2826,39 +2880,43 @@ button.watch-info:hover {
   position: relative;
 }
 
-.image-stage.comments-cover .short-comments {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: var(--comments-share, 50%);
-  border-radius: 12px 12px 0 0;
-}
-
 .image-stage.comments-shrink {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
+  gap: 0;
 }
 
+/* Shrink mode: the picture gives up the bottom of the screen to the panel — what does not
+   fit of it is cut there (the picture itself stays top-aligned). */
 .image-stage.comments-shrink .image-media {
-  height: auto;
-  max-height: calc(100% - var(--comments-share, 50%));
-  flex: 0 1 auto;
+  height: calc(100% - var(--comments-share, 50%));
+  max-height: none;
+  flex: none;
   margin: 0 auto;
   overflow: hidden;
 }
 
+/* Pinned to the bottom of the screen: the picture stays visible above it. */
 .image-stage.comments-shrink .short-comments {
   height: var(--comments-share, 50%);
-  min-height: 120px;
   flex: none;
   width: min(100%, 560px);
   margin: 0 auto;
   border: 1px solid var(--border);
   border-radius: 12px;
+}
+
+/* Focused on its comments, the picture fills the screen above the panel (cover mode runs
+   the picture behind the panel instead). */
+.image-stage.comments-cover .image-media,
+.image-stage.comments-cover .image-frame-wrap,
+.image-stage.comments-cover .image-frame,
+.image-stage.comments-cover .image-full,
+.image-stage.comments-shrink .image-frame-wrap,
+.image-stage.comments-shrink .image-frame,
+.image-stage.comments-shrink .image-full {
+  height: 100%;
 }
 
 /* ------------------------------------------------- mobile viewing */
@@ -2871,6 +2929,7 @@ button.watch-info:hover {
   }
 
   .watch .player.fit {
+    --player-max-h: 58vh;
     max-height: 58vh;
   }
 
@@ -2884,6 +2943,24 @@ button.watch-info:hover {
     gap: 8px;
     row-gap: 8px;
     margin-top: 10px;
+  }
+
+  /* Content actions stretch to equal widths that fill the width on a phone. */
+  .watch-actions.watch-action-buttons {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .watch-action-buttons > button,
+  .watch-action-buttons > span,
+  .watch-action-buttons > span > button {
+    width: 100%;
+  }
+
+  .watch-action-buttons > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   .description {
@@ -3277,6 +3354,12 @@ button.layout-option.on {
     width: 100%;
   }
 
+  .short-main {
+    width: 100%;
+    max-width: none;
+    aspect-ratio: auto;
+  }
+
   .short-frame {
     width: 100%;
     max-width: none;
@@ -3294,6 +3377,12 @@ button.layout-option.on {
     right: 10px;
     bottom: 96px;
     z-index: 4;
+  }
+
+  /* On a phone the rail sits on the video: it steps aside while the comments are open. */
+  .short-stage.comments-cover .short-rail,
+  .short-stage.comments-shrink .short-rail {
+    display: none;
   }
 
   .rail-button,
@@ -3556,6 +3645,13 @@ button.layout-option.on {
   max-width: min(96vw, 1400px);
 }
 
+/* One picture after another: a hairline and some air separate them. */
+.stream-images .post-plain + .post-plain {
+  margin-top: 22px;
+  border-top: 1px solid var(--border);
+  padding-top: 22px;
+}
+
 .post.post-plain {
   border: 0;
   border-radius: 0;
@@ -3569,7 +3665,7 @@ button.layout-option.on {
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 72vh;
+  height: var(--image-height, 72vh);
   padding: 0;
   margin: 0;
   border: 0;
@@ -3581,7 +3677,7 @@ button.layout-option.on {
 
 .image-frame .image-full {
   display: block;
-  height: 72vh;
+  height: var(--image-height, 72vh);
   width: auto;
   max-width: 100%;
   object-fit: contain;
@@ -3603,6 +3699,14 @@ button.layout-option.on {
   word-break: break-word;
   white-space: normal;
   text-align: center;
+}
+
+/* A wide picture letterboxes inside its frame: with the comments open it hugs the top of
+   the frame, so the empty strip is all under the panel and more of the picture — and no
+   buffer above it — stays in view. */
+.image-stage.comments-cover .image-full,
+.image-stage.comments-shrink .image-full {
+  object-position: top;
 }
 
 /* The picture's place while its full resolution is still coming in. */

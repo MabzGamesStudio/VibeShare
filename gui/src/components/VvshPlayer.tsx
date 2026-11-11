@@ -570,7 +570,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
           src={videoUrl || undefined}
           poster={meta.previews?.images[0]}
           playsInline
-          style={{ width: '100%', maxHeight: full ? '100vh' : undefined, objectFit: 'contain', display: 'block', borderRadius: full ? 0 : 8 }}
+          style={{ width: '100%', maxHeight: full ? '100vh' : '80vh', objectFit: 'contain', display: 'block', borderRadius: full ? 0 : 8 }}
           onClick={() => {
             const v = video.current;
             if (!v) return;

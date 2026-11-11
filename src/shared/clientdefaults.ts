@@ -54,7 +54,7 @@ export function presetPage(preset: PagePreset): PageConfig {
         filters: { ...NO_FILTERS, formats: ['image'] },
         thumbnail: true,
         fields: ['title', 'creator', 'platform'],
-        options: { autoplay: false, muted: true, columns: 1, size: 'large' },
+        options: { autoplay: false, muted: true, columns: 1, size: 'large', shortsComments: 'shrink', shortsCommentsSize: 50 },
         sidebar: true,
       };
   }
@@ -98,9 +98,11 @@ export function defaultSettings(): Settings {
     searchHistory: false,
     watchHistory: false,
     subscriptionOrder: 'subscribed',
+    hostingTabs: ['github', 'gitlab'],
     historyPageSize: 25,
     historyClearDays: 0,
     toastHistory: false,
+    logContributions: false,
     toastIcon: true,
     searchSuggestions: true,
     stateRefreshSeconds: 0,
@@ -217,9 +219,14 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   merged.vvshScrubWidth = Math.min(640, Math.max(80, Number(merged.vvshScrubWidth) || Number(old.vvshPreviewWidth) || 220));
   merged.historyMode = merged.historyMode === 'lazy' ? 'lazy' : 'pages';
   merged.watchHistory = merged.watchHistory === true;
+  merged.logContributions = merged.logContributions === true;
   merged.subscriptionOrder = (['random', 'az', 'za', 'recent'] as const).includes(merged.subscriptionOrder as 'random')
     ? merged.subscriptionOrder
     : 'subscribed';
+  // Which hosting platform tabs the provider jobs instructions show (checked = shown).
+  merged.hostingTabs = Array.isArray(merged.hostingTabs)
+    ? merged.hostingTabs.filter((id): id is string => typeof id === 'string')
+    : ['github', 'gitlab'];
   merged.historyPageSize = Math.min(200, Math.max(5, Math.round(merged.historyPageSize || 25)));
   merged.historyClearDays = Math.min(3650, Math.max(0, Math.round(merged.historyClearDays || 0)));
   merged.debugLogs = merged.debugLogs === true;
@@ -310,6 +317,16 @@ export function pagePreferences(preferences: Preferences, filters: Partial<PageF
   return out;
 }
 
+/**
+ * Where shared links point: the sharing address set in Settings (a hosted copy of the
+ * web client) overrides the address this client runs on whenever it is set to one; an
+ * empty or unusable value keeps the client's own address.
+ */
+export function shareBase(configured: string, clientBase: string): string {
+  const wanted = configured.trim();
+  return /^https?:\/\/\S+$/i.test(wanted) ? wanted : clientBase;
+}
+
 /** The link that opens a content id in a hosted web client (normal routes). */
 export function shareLink(baseUrl: string, contentId: string, providerHint?: string): string {
   const base = (baseUrl || DEFAULT_SHARE_BASE_URL).replace(/#.*$/, '').replace(/\/index\.html$/, '').replace(/\/+$/, '');
@@ -369,6 +386,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   next.searchSuggestions = Boolean(next.searchSuggestions);
   // Toast messages: saved copies are off by default; the bell icon is on unless removed.
   next.toastHistory = Boolean(next.toastHistory);
+  next.logContributions = Boolean(next.logContributions);
   next.toastIcon = next.toastIcon !== false;
   // Seen-content bloom filters: the size is one of 1, 10, 100, … bits; the preview filter
   // either hides what was previewed or only pushes it down among the other previews.
@@ -430,6 +448,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     page.fields = [...new Set(page.fields)].slice(0, 20);
     page.options.columns = Math.min(8, Math.max(0, Math.round(Number(page.options.columns) || 0)));
     if (!['small', 'medium', 'large'].includes(page.options.size)) page.options.size = 'medium';
+    if (page.options.imageHeight !== undefined) page.options.imageHeight = Math.min(100, Math.max(10, Math.round(Number(page.options.imageHeight) || 72)));
     if (page.filters.maxRating && !RATINGS.includes(page.filters.maxRating)) delete page.filters.maxRating;
   }
   return next;

@@ -20,6 +20,7 @@ import { PageIconView } from '../components/feed/icons';
 import { PageEditor } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
+import { HOSTING_PLATFORMS } from '../earn/hosting';
 import { useApp } from '../state';
 import { chooseConsent, loadConsent } from '../consent';
 import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
@@ -846,11 +847,39 @@ function ToastMessagesSection() {
   );
 }
 
+/** Which hosting platform tabs the provider jobs instructions show (Settings → Nodes). */
+function NodesSection() {
+  const { state, updateSettings } = useApp();
+  const shown = state?.settings.hostingTabs ?? [];
+  const toggleTab = (id: string) =>
+    void updateSettings({ hostingTabs: shown.includes(id) ? shown.filter((entry) => entry !== id) : [...shown, id] });
+  return (
+    <div className="card form-stack">
+      <h2>Provider node</h2>
+      <p className="instructions muted">
+        The hosting platforms the provider jobs instructions walk through. A ticked platform shows as a tab under Earn → Provider
+        jobs; the others stay hidden until you tick them here.
+      </p>
+      <div className="check-list">
+        {HOSTING_PLATFORMS.map((entry) => (
+          <label key={entry.id} className="check-item">
+            <input type="checkbox" checked={shown.includes(entry.id)} onChange={() => toggleTab(entry.id)} />
+            <div>
+              <div style={{ fontWeight: 600 }}>{entry.name}</div>
+            </div>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** The settings grouped into tabs: similar settings live together. */
 const SETTINGS_TABS: [string, string][] = [
   ['feed', 'Feed'],
   ['seen', 'Seen content'],
   ['media', 'Media controls'],
+  ['nodes', 'Nodes'],
   ['privacy', 'Privacy'],
   ['profiles', 'Profiles'],
   ['history', 'History'],
@@ -1272,6 +1301,14 @@ export function SettingsPage() {
             <div className="card form-stack">
               <h2>History</h2>
               <HistorySection />
+              <Switch
+                checked={Boolean(state?.settings.logContributions)}
+                onChange={(logContributions) => void updateSettings({ logContributions })}
+                label="Keep a log of my contributions to algorithm nodes (Earn → Algorithm nodes)"
+              />
+              <p className="hint">
+                Off by default — nothing is collected. Suggestions and submissions of yours are listed on the Earn page when this is on.
+              </p>
             </div>
           ) : (
             <ToastMessagesSection />
@@ -1280,6 +1317,8 @@ export function SettingsPage() {
       )}
 
       {tab === 'logs' && <LogsCard />}
+
+      {tab === 'nodes' && <NodesSection />}
 
       {tab === 'seen' && <SeenFiltersSection />}
 
@@ -1306,16 +1345,6 @@ export function SettingsPage() {
               defaultValue={s.profile.name}
               onBlur={(e) => void updateSettings({ profile: { ...s.profile, name: e.target.value } })}
             />
-          </label>
-          <label className="field">
-            You are a
-            <select value={s.profile.kind} onChange={(e) => void updateSettings({ profile: { ...s.profile, kind: e.target.value as CreatorKind } })}>
-              {CREATOR_KINDS.filter((k) => k !== 'unknown').map((k) => (
-                <option key={k} value={k}>
-                  {CREATOR_KIND_LABELS[k]}
-                </option>
-              ))}
-            </select>
           </label>
         </div>
       </div>

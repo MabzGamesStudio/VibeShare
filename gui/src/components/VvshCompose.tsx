@@ -5,12 +5,16 @@
 // it from just the video (it names its price from the metadata, length and encodings).
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { UploadCloud } from 'lucide-react';
-import type { Manifest } from '../../../src/shared/content.js';
+import type { NodeEntry } from '../../../src/shared/clientapi';
+import type { Manifest, ManifestMeta } from '../../../src/shared/content.js';
+import type { ProviderInfo } from '../../../src/shared/protocol';
 import type { VvshRendition } from '../../../src/shared/vvsh.js';
 import { buildVvsh, vvshPlan } from '../../../src/shared/vvsh-encode.js';
 import { base64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage } from '../api';
+import { emptyMeta, MetaFields, mergeTopics, NodePicker, describeAlgorithm, describeProvider, SignCard, ThumbPicker, type MetaState } from './PublishFields';
 import { useApp } from '../state';
+import { splitList } from '../util';
 import {
   defaultKbps,
   estimateBytes,
@@ -119,13 +123,28 @@ const DEFAULT_ROWS: EncodeRow[] = [
 ];
 
 export function VvshCompose() {
-  const { state, toast } = useApp();
-  const provider = state?.nodes.find((node) => node.type === 'provider' && node.enabled);
+  const { providers, algorithms, toast } = useApp();
+  const enabledProviders = providers.filter((n) => n.enabled && (n.info as ProviderInfo | undefined)?.pricing.upload.mode !== 'closed');
+  const enabledAlgorithms = algorithms.filter((n) => n.enabled);
   const [file, setFile] = useState<File | null>(null);
   const [over, setOver] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const [seconds, setSeconds] = useState(0);
-  const [title, setTitle] = useState('');
+  // The metadata the stream is published with: links to copies elsewhere, and everything
+  // the algorithm nodes are told about it.
+  const [meta, setMeta] = useState<MetaState>(emptyMeta);
+  const [links, setLinks] = useState('');
+  const [thumbnail, setThumbnail] = useState<string | undefined>();
+  const [sign, setSign] = useState(true);
+  // The nodes to upload to, picked one by one in the column on the right.
+  const [chosenProviders, setChosenProviders] = useState<string[]>([]);
+  const [chosenAlgorithms, setChosenAlgorithms] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!chosenProviders.length && enabledProviders.length) setChosenProviders([enabledProviders[0].id]);
+    if (!chosenAlgorithms.length && enabledAlgorithms.length) setChosenAlgorithms(enabledAlgorithms.map((n) => n.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers.length, algorithms.length]);
   const [rows, setRows] = useState<EncodeRow[]>(DEFAULT_ROWS);
   const [chunkSeconds, setChunkSeconds] = useState('5');
   const [previews, setPreviews] = useState('100');
@@ -261,29 +280,49 @@ export function VvshCompose() {
     }
   };
 
+  /** The metadata the stream carries: what every algorithm node receives about it. */
+  const buildMeta = (totalSeconds: number, name: string): ManifestMeta => ({
+    title: meta.title.trim() || name.replace(/\.vvsh$/i, '') || 'video',
+    description: meta.description.trim() || undefined,
+    format: 'video',
+    rating: meta.rating,
+    topics: mergeTopics(meta),
+    language: meta.language.trim() || undefined,
+    durationSeconds: totalSeconds,
+  });
+
   /** Piece uploads get one explicit retry. The finish runs the rest as a background job
    *  that is polled below — it retries itself once with a warning on a total failure. */
   const uploadVideo = async (
     mode: 'publish' | 'convert',
+    node: NodeEntry,
     source: Blob,
     name: string,
     totalSeconds: number,
     previewImages: string[],
     onProgress: (percent: number) => void,
-    onProcessing?: (percent: number | null) => void
+    onProcessing?: (percent: number | null) => void,
+    /** Algorithm nodes to put the finished content id in front of (the first run only). */
+    submitTo: string[] = [],
+    /** One stamp per publish keeps the content id the same on every provider. */
+    stamp?: string
   ): Promise<{ cid: string; warnings?: string[] }> => {
-    if (!provider) throw new Error('Add a provider first');
     const session = await api<{ jobId: string }>('/api/vvsh/session', {
       body: {
         mode,
-        nodeId: provider.id,
+        nodeId: node.id,
         name,
         totalSeconds,
         config,
         sourceMime: source.type || 'video/mp4',
         previews: previewImages,
         encoder: mode === 'publish' ? 'ffmpeg' : undefined,
-        meta: { title: title.trim() || name.replace(/\.vvsh$/i, ''), durationSeconds: totalSeconds, format: 'video' },
+        meta: buildMeta(totalSeconds, name),
+        sources: splitList(links),
+        algorithms: submitTo,
+        sign,
+        thumbnail,
+        createdAt: stamp,
       },
     });
     const pieceSize = 2 * 1024 * 1024;
@@ -329,7 +368,8 @@ export function VvshCompose() {
   /** Publishes in stages — encode each quality, upload object by object, commit — and
    *  every finished step is recorded, so it can be picked back up after any interruption. */
   const run = async (existing?: VvshJob | null) => {
-    if (!provider) return;
+    const targets = providers.filter((n) => chosenProviders.includes(n.id));
+    if (!targets.length) return;
     try {
       setResult(null);
       const resuming = existing && existing.status !== 'done' ? existing : null;
@@ -346,7 +386,7 @@ export function VvshCompose() {
       const id = resuming?.id ?? newJobId();
       const fresh: VvshJob = {
         id,
-        name: (title.trim() || (file?.name ?? resuming?.name ?? 'video').replace(/\.vvsh$/i, '').replace(/\.[^.]+$/, '') || 'video') + '.vvsh',
+        name: (meta.title.trim() || (file?.name ?? resuming?.name ?? 'video').replace(/\.vvsh$/i, '').replace(/\.[^.]+$/, '') || 'video') + '.vvsh',
         totalSeconds,
         rows,
         chunkSeconds: chunkSecondsValue,
@@ -366,9 +406,18 @@ export function VvshCompose() {
       const encoder = await api<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }>('/api/vvsh/encoder');
       if (encoder.backend === 'ffmpeg') {
         await persist({ stage: 'Uploading to the local FFmpeg encoder', pct: 0 });
-        const published = await uploadVideo('publish', source, fresh.name, totalSeconds, probed.previews, (pct) => void persist({ pct }));
-        await persist({ status: 'done', stage: 'Done (FFmpeg)', pct: 100, cid: published.cid });
-        setResult(published.cid);
+        const stamp = new Date().toISOString();
+        let cid = '';
+        // The finished content id goes to the selected algorithm nodes — once, from the
+        // first provider that takes it.
+        let submitTo = chosenAlgorithms;
+        for (const node of targets) {
+          const published = await uploadVideo('publish', node, source, fresh.name, totalSeconds, probed.previews, (pct) => void persist({ pct }), undefined, submitTo, stamp);
+          submitTo = [];
+          cid = published.cid;
+        }
+        await persist({ status: 'done', stage: 'Done (FFmpeg)', pct: 100, cid });
+        setResult(cid);
         toast('Published with FFmpeg', 'success');
         return;
       }
@@ -396,7 +445,6 @@ export function VvshCompose() {
       // 2) Build and upload object by object; every hash is recorded, so a resume skips it.
       await persist({ stage: 'Uploading', pct: 0 });
       const estimate = Math.max(1, (plan?.chunkCount ?? 1) * (rows.length + 1) + 64);
-      const meta = title.trim() ? { title: title.trim(), durationSeconds: totalSeconds, format: 'video' as const } : undefined;
       const { file: vvsh } = await buildVvsh(
         new Uint8Array(0),
         {
@@ -410,7 +458,9 @@ export function VvshCompose() {
         },
         async (hash, data) => {
           if (jobRef.current?.uploaded.includes(hash)) return;
-          await api('/api/vvsh/object', { method: 'PUT', body: { nodeId: provider.id, hash, data: base64url(data) } });
+          for (const node of targets) {
+            await api('/api/vvsh/object', { method: 'PUT', body: { nodeId: node.id, hash, data: base64url(data) } });
+          }
           const uploaded = [...(jobRef.current?.uploaded ?? []), hash];
           await persist({ uploaded, pct: Math.min(98, Math.round((uploaded.length / estimate) * 98)) });
         }
@@ -426,11 +476,23 @@ export function VvshCompose() {
         chunks: [],
         createdAt: new Date().toISOString(),
         vvsh,
-        meta,
+        meta: buildMeta(totalSeconds, fresh.name),
       };
-      const committed = await api<{ cid: string; listed: number }>('/api/vvsh/manifest', { body: { nodeId: provider.id, manifest } });
-      await persist({ status: 'done', stage: 'Done', pct: 100, cid: committed.cid });
-      setResult(committed.cid);
+      const fallback = splitList(links);
+      if (fallback.length) manifest.sources = fallback;
+      let cid = '';
+      // The finished content id goes to the selected algorithm nodes — once, from the
+      // first provider that commits the stream.
+      let submitTo = chosenAlgorithms;
+      for (const node of targets) {
+        const committed = await api<{ cid: string; listed: number }>('/api/vvsh/manifest', {
+          body: { nodeId: node.id, manifest, algorithms: submitTo, sign, thumbnail },
+        });
+        submitTo = [];
+        cid = committed.cid;
+      }
+      await persist({ status: 'done', stage: 'Done', pct: 100, cid });
+      setResult(cid);
       toast('Published', 'success');
     } catch (e) {
       await persist({ status: 'error', stage: 'Stopped', error: errorMessage(e) });
@@ -440,7 +502,8 @@ export function VvshCompose() {
 
   /** Upload the source for provider-side conversion and polled completion. */
   const runPassthrough = async () => {
-    if (!provider) return;
+    const targets = providers.filter((n) => chosenProviders.includes(n.id));
+    if (!targets.length) return;
     if (rows.some((row) => !(row.width > 0) || !(row.height > 0))) {
       toast('Every encoding needs a width and a height', 'error');
       return;
@@ -454,10 +517,19 @@ export function VvshCompose() {
       if (!source) throw new Error('Pick the video file first');
       const probed = await probeVideo(source, previewSplits, previewWidthValue, previewQualityValue);
       const totalSeconds = probed.seconds || seconds;
-      const name = (title.trim() || file?.name?.replace(/\.[^.]+$/, '') || job?.name?.replace(/\.vvsh$/i, '') || 'video') + '.vvsh';
-      const answer = await uploadVideo('convert', source, name, totalSeconds, probed.previews, setPassPct, setProcessPct);
+      const name = (meta.title.trim() || file?.name?.replace(/\.[^.]+$/, '') || job?.name?.replace(/\.vvsh$/i, '') || 'video') + '.vvsh';
+      const stamp = new Date().toISOString();
+      let cid = '';
+      // The finished content id goes to the selected algorithm nodes — once, from the
+      // first provider that converts the video.
+      let submitTo = chosenAlgorithms;
+      for (const node of targets) {
+        const answer = await uploadVideo('convert', node, source, name, totalSeconds, probed.previews, setPassPct, setProcessPct, submitTo, stamp);
+        submitTo = [];
+        cid = answer.cid;
+      }
       setPassPct(100);
-      setResult(answer.cid);
+      setResult(cid);
       toast('Stored on the provider', 'success');
     } catch (e) {
       toast(errorMessage(e), 'error');
@@ -471,11 +543,11 @@ export function VvshCompose() {
   // moving after a refresh instead of waiting for another button press.
   const autoStarted = useRef(false);
   useEffect(() => {
-    if (autoStarted.current || job?.status !== 'working' || !provider) return;
+    if (autoStarted.current || job?.status !== 'working' || !chosenProviders.length) return;
     autoStarted.current = true;
     void run(job);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job?.status, provider]);
+  }, [job?.status, chosenProviders.length]);
 
   // The progress card is always on the page (below the buttons): whatever runs fills it
   // in where the user already is, instead of appearing somewhere they are not looking.
@@ -506,7 +578,8 @@ export function VvshCompose() {
             : 'Nothing running yet — encoding, uploading and provider processing all show right here.';
 
   return (
-    <div className="card form-stack">
+    <div className="publish-layout">
+      <div className="form-stack">
       <h3>Verifiable video stream (.vvsh)</h3>
       <span className="hint">
         The video becomes chunks of I/P/B frames under a merkle tree whose last layers hold one encoding per bitrate. The .vvsh file itself is
@@ -569,22 +642,21 @@ export function VvshCompose() {
         accept="video/*,.mkv,.mov,.mp4,.m4v,.webm,.ogv,.avi,.wmv,.flv,.ts"
         onChange={(e) => e.target.files?.[0] && void choose(e.target.files[0])}
       />
-      <div className="form-grid">
-        <label className="field">
-          Title
-          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={file?.name ?? 'My video'} />
-        </label>
-        <div className="field">
-          <span>Video length</span>
-          <span className="mono" style={{ display: 'block', fontSize: '1.1em' }}>
-            {seconds > 0 ? formatClock(seconds) : '—'}
-          </span>
-          <span className="hint" style={{ display: 'block' }}>
-            Read from the video itself{source?.width ? ` · ${source.width}×${source.height}` : ''}
-            {source?.fps ? ` · ${source.fps} fps` : ''}
-          </span>
-        </div>
+      <div className="field">
+        <span>Video length</span>
+        <span className="mono" style={{ display: 'block', fontSize: '1.1em' }}>
+          {seconds > 0 ? formatClock(seconds) : '—'}
+        </span>
+        <span className="hint" style={{ display: 'block' }}>
+          Read from the video itself{source?.width ? ` · ${source.width}×${source.height}` : ''}
+          {source?.fps ? ` · ${source.fps} fps` : ''}
+        </span>
       </div>
+      <label className="field">
+        Links <span className="hint">Copies elsewhere (YouTube, archive.org, IPFS…), used when no provider has the stream. One per line.</span>
+        <textarea value={links} onChange={(e) => setLinks(e.target.value)} rows={2} placeholder="https://www.youtube.com/watch?v=…" />
+      </label>
+      <MetaFields meta={meta} setMeta={setMeta} hideFormat />
       <details className="field">
         <summary style={{ cursor: 'pointer' }}>Advanced settings — chunks and previews (filled in with sensible defaults)</summary>
         <div className="form-grid" style={{ marginTop: 10 }}>
@@ -837,48 +909,61 @@ export function VvshCompose() {
           {plan.previewCount === 1 ? '' : 's'}
         </span>
       )}
-      <div className="row">
-        <button className="primary small" disabled={(!file && !canResume) || !provider || !rows.length || job?.status === 'working'} onClick={() => void run(job)}>
-          {job && job.status !== 'done' ? 'Resume publishing' : 'Process & publish'}
-        </button>
-        <button className="small" disabled={(!file && !canResume) || !provider || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
-          Convert on the provider
-        </button>
-        {job && job.status !== 'done' && (
-          <button
-            className="small"
-            onClick={() => {
-              void clearJob().then(() => {
-                jobRef.current = null;
-                setJob(null);
-              });
-            }}
-          >
-            Discard the unfinished job
+      </div>
+      <div className="form-stack">
+        <ThumbPicker value={thumbnail} onChange={setThumbnail} />
+        <div className="field">
+          <span>Upload to providers</span>
+          <NodePicker nodes={enabledProviders} selected={chosenProviders} setSelected={setChosenProviders} describe={describeProvider} />
+        </div>
+        <div className="field">
+          <span>Submit to algorithm nodes</span>
+          <NodePicker nodes={enabledAlgorithms} selected={chosenAlgorithms} setSelected={setChosenAlgorithms} describe={describeAlgorithm} />
+        </div>
+        <SignCard sign={sign} setSign={setSign} />
+        <div className="row">
+          <button className="primary small" disabled={(!file && !canResume) || !chosenProviders.length || !rows.length || job?.status === 'working'} onClick={() => void run(job)}>
+            {job && job.status !== 'done' ? 'Resume publishing' : 'Process & publish'}
           </button>
-        )}
-      </div>
-      {/* Always in place: pressing a button fills this card in, so the progress is never
-          somewhere else on the page than where the user is looking. */}
-      <div className="card form-stack">
-        <div className="row between">
-          <strong>{progressTitle}</strong>
-          <span className="hint">{progressHint}</span>
+          <button className="small" disabled={(!file && !canResume) || !chosenProviders.length || !rows.length || job?.status === 'working'} onClick={() => void runPassthrough()}>
+            Convert on the provider
+          </button>
+          {job && job.status !== 'done' && (
+            <button
+              className="small"
+              onClick={() => {
+                void clearJob().then(() => {
+                  jobRef.current = null;
+                  setJob(null);
+                });
+              }}
+            >
+              Discard the unfinished job
+            </button>
+          )}
         </div>
-        <div className="progress">
-          <div style={{ width: `${progressPct}%` }} />
+        {/* Always in place: pressing a button fills this card in, so the progress is never
+            somewhere else on the page than where the user is looking. */}
+        <div className="card form-stack">
+          <div className="row between">
+            <strong>{progressTitle}</strong>
+            <span className="hint">{progressHint}</span>
+          </div>
+          <div className="progress">
+            <div style={{ width: `${progressPct}%` }} />
+          </div>
+          {job && job.status !== 'done' && job.error && <div className="banner danger small">{job.error}</div>}
+          {job && job.status !== 'done' && (
+            <span className="hint">Kept in this browser (IndexedDB) — closing or refreshing the page keeps the work; press resume to continue.</span>
+          )}
+          {result && (
+            <span className="hint">
+              Content id: <code>{result}</code>
+            </span>
+          )}
         </div>
-        {job && job.status !== 'done' && job.error && <div className="banner danger small">{job.error}</div>}
-        {job && job.status !== 'done' && (
-          <span className="hint">Kept in this browser (IndexedDB) — closing or refreshing the page keeps the work; press resume to continue.</span>
-        )}
-        {result && (
-          <span className="hint">
-            Content id: <code>{result}</code>
-          </span>
-        )}
+        {!chosenProviders.length && <span className="hint">Pick a content provider node to upload to.</span>}
       </div>
-      {!provider && <span className="hint">Add a content provider node first.</span>}
     </div>
   );
 }

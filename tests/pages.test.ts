@@ -8,6 +8,7 @@ import {
   normalizeSettings,
   pagePreferences,
   presetPage,
+  shareBase,
   shareLink,
 } from '../src/shared/clientdefaults.js';
 import { admin, startAlgorithm, startClient, tempDir } from './helpers.js';
@@ -83,6 +84,17 @@ describe('page configurations', () => {
     );
     assert.equal(shareLink('https://example.org/app/index.html#/old', 'yt:x'), 'https://example.org/app/watch/yt%3Ax');
     assert.equal(shareLink('https://example.org/', 'vs1abc', 'vs:provider:vk1x@https://p.example'), 'https://example.org/watch/vs1abc?p=vs%3Aprovider%3Avk1x%40https%3A%2F%2Fp.example');
+  });
+
+  it('share links use the sharing address of the settings over where the client runs', () => {
+    assert.equal(shareBase('https://example.org/vs', 'http://localhost:7700'), 'https://example.org/vs');
+    assert.equal(shareBase('  https://example.org/vs  ', 'http://localhost:7700'), 'https://example.org/vs');
+    assert.equal(shareBase('', 'http://localhost:7700'), 'http://localhost:7700', 'an empty address keeps where the client runs');
+    assert.equal(shareBase('not an address', 'http://localhost:7700'), 'http://localhost:7700', 'only a defined address overrides the domain');
+    assert.equal(
+      shareLink(shareBase('https://example.org/vs', 'http://localhost:7700'), 'yt:x'),
+      'https://example.org/vs/watch/yt%3Ax'
+    );
   });
 });
 

@@ -10,14 +10,12 @@ import type { FeedItem, FeedResponse } from '../../../src/shared/clientapi';
 import type { CreatorInfo, TopicInfo } from '../../../src/shared/protocol';
 import {
   CREATOR_KIND_LABELS,
-  CREATOR_KINDS,
   FORMAT_LABELS,
   FORMATS,
   RATING_LABELS,
   RATING_REASONS,
   RATINGS,
   TOPICS,
-  type CreatorKind,
   type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
@@ -56,7 +54,6 @@ interface SearchSettings {
   /** Platforms to search in, and platforms to leave out. */
   platforms: string[];
   blockedPlatforms: string[];
-  kinds: CreatorKind[];
   sort: 'relevance' | 'new' | 'top';
   /** endless: results load as the reader scrolls; pages: a page at a time. */
   paging: 'lazy' | 'pages';
@@ -82,7 +79,6 @@ function loadSettings(): SearchSettings {
     disregard: [],
     platforms: [],
     blockedPlatforms: [],
-    kinds: [],
     sort: 'relevance',
     paging: 'lazy',
     pageSize: 24,
@@ -256,7 +252,6 @@ export function SearchPage() {
             creatorIds: settings.creators.length ? settings.creators : undefined,
             onlyCreators: settings.creators.length ? true : undefined,
             blockedCreators: settings.blockedCreators.length ? settings.blockedCreators : undefined,
-            creatorKinds: settings.kinds.length ? settings.kinds : undefined,
             preferredPlatforms: settings.platforms.length ? settings.platforms : undefined,
             platformLevel: settings.platforms.length ? 'only' : undefined,
             blockedPlatforms: settings.blockedPlatforms.length ? settings.blockedPlatforms : undefined,
@@ -294,24 +289,20 @@ export function SearchPage() {
     return [...mixed, ...content].sort((a, b) => b.score - a.score);
   }, [matches, topics, paged.items, query, settings.show]);
 
-  // Pages: the kinds that matched lead the first page only; every page after it shows one
-  // screenful of content results.
+  // Pages: one screenful of the mixed list at a time — a page holds whatever blend of the
+  // kinds matched (nine content results and a creator, five creators and five content…).
   const pageRows = useMemo(() => {
     if (settings.paging !== 'pages') return rows;
-    const content = rows.filter((row) => row.type === 'content');
-    const start = page * size;
-    const window = content.slice(start, start + size);
-    return page === 0 ? [...rows.filter((row) => row.type !== 'content'), ...window].sort((a, b) => b.score - a.score) : window;
+    return rows.slice(page * size, page * size + size);
   }, [rows, settings.paging, page, size]);
 
   const sentinel = useSentinel(() => paged.loadMore(), settings.paging === 'lazy' && !paged.done, paged.items.length);
   // A new search or a different page size starts over on the first page.
   useEffect(() => setPage(0), [query, settings.paging, settings.pageSize, settings.sort]); // eslint-disable-line react-hooks/exhaustive-deps
-  const contentRows = rows.filter((row) => row.type === 'content').length;
-  const pager = settings.paging === 'pages' && contentRows > 0;
-  const lastPage = Math.max(0, Math.ceil(contentRows / size) - 1);
+  const pager = settings.paging === 'pages' && rows.length > 0;
+  const lastPage = Math.max(0, Math.ceil(rows.length / size) - 1);
   const goPage = (next: number) => {
-    if ((next + 1) * size > paged.items.length && !paged.done) paged.loadMore();
+    if ((next + 1) * size > rows.length && !paged.done) paged.loadMore();
     setPage(Math.max(0, next));
   };
   const pageNav = pager ? (
@@ -399,10 +390,6 @@ export function SearchPage() {
                 ))}
               </select>
             </label>
-            <div className="field">
-              Creator
-              <Chips options={CREATOR_KINDS.filter((k) => k !== 'unknown')} selected={settings.kinds} labels={CREATOR_KIND_LABELS} onToggle={(v) => set({ kinds: toggle(settings.kinds, v as CreatorKind) })} />
-            </div>
           </div>
           <div>
             <div className="hint" style={{ marginBottom: 8 }}>Content warnings — leave these out entirely</div>

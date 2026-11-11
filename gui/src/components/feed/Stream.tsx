@@ -1,8 +1,8 @@
 import { MessageCircle } from 'lucide-react';
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { DEFAULT_SHORT_BUTTONS, type FeedItem, type PageConfig, type ShortButton } from '../../../../src/shared/clientapi';
 import { usePreviewSeen } from '../../bloom';
-import { Comments } from '../Comments';
+import { Comments, useCommentsResize, useScrollLock } from '../Comments';
 import { PostDownload } from '../Download';
 import { SaveCidButton } from '../SaveCid';
 import { aspectOf, playableFor } from '../../media';
@@ -74,15 +74,47 @@ function StreamPost({
 function ImagePost({ item, page, onOpenImage }: { item: FeedItem; page: PageConfig; onOpenImage: (item: FeedItem, src?: string) => void }) {
   const [comments, setComments] = useState(false);
   const shown = new Set<ShortButton>(page.options.shortButtons ?? DEFAULT_SHORT_BUTTONS);
-  const mode = page.options.shortsComments === 'shrink' ? 'shrink' : 'cover';
+  // Pictures shrink under their comments unless the page says to cover them (shorts are
+  // the other way around).
+  const mode = page.options.shortsComments === 'cover' ? 'cover' : 'shrink';
   const share = Math.min(90, Math.max(10, Number(page.options.shortsCommentsSize) || 50));
+  const panel = useCommentsResize(() => setComments(false));
+  useScrollLock(comments);
+  const stage = useRef<HTMLDivElement | null>(null);
+  // Focused on its comments: the picture locks with its top at the top of the screen (just
+  // under the sticky top bar) and fills what is left of the window — so the comments share
+  // is a share of the screen, and the mode decides where the picture's bottom lands.
+  const [focused, setFocused] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const box = stage.current;
+    if (!comments || !box) {
+      setFocused(undefined);
+      return;
+    }
+    const fit = () => {
+      const topbar = document.querySelector('.topbar');
+      const inset = topbar && getComputedStyle(topbar).position === 'sticky' ? topbar.getBoundingClientRect().height : 0;
+      setFocused(Math.max(240, window.innerHeight - inset));
+      window.scrollTo({ top: Math.max(0, window.scrollY + box.getBoundingClientRect().top - inset) });
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [comments]);
   return (
     <div
+      ref={stage}
       className={`image-stage ${comments ? `comments-${mode}` : ''}`}
-      style={comments ? ({ '--comments-share': `${share}%` } as React.CSSProperties) : undefined}
-      onClick={(event) => {
-        // With the comments open, a click anywhere outside of them closes the section.
-        if (comments && !(event.target as HTMLElement).closest('.short-comments')) setComments(false);
+      style={comments ? ({ '--comments-share': panel.share(share), height: focused } as React.CSSProperties) : undefined}
+      onClickCapture={(event) => {
+        // Clicks in the comments panel are its own business; a click on the picture while
+        // the panel is open closes it and stops there — without also opening the
+        // fullscreen view underneath.
+        if ((event.target as HTMLElement).closest('.short-comments')) return;
+        if (comments) {
+          event.stopPropagation();
+          setComments(false);
+        }
       }}
     >
       <div className="image-media">
@@ -107,7 +139,10 @@ function ImagePost({ item, page, onOpenImage }: { item: FeedItem; page: PageConf
       </div>
       {comments && (
         <div className="short-comments">
-          <Comments contentId={item.contentId ?? item.id} />
+          <div className="comments-handle" role="separator" aria-label="Resize comments" {...panel.handle} />
+          <div className="comments-scroll">
+            <Comments contentId={item.contentId ?? item.id} />
+          </div>
         </div>
       )}
     </div>
@@ -117,8 +152,13 @@ function ImagePost({ item, page, onOpenImage }: { item: FeedItem; page: PageConf
 /** One column of posts, loading more as you scroll: the image feed. */
 export function StreamLayout({ items, page, ipfsGateway }: { items: FeedItem[]; page: PageConfig; ipfsGateway: string }) {
   const [open, setOpen] = useState<{ item: FeedItem; src?: string } | null>(null);
+  // The tallest each picture gets, as a share of the screen height (10–100 percent).
+  const height = Math.min(100, Math.max(10, Number(page.options.imageHeight) || 72));
   return (
-    <div className={`stream stream-${page.options.size} ${items.some((item) => item.format === 'image') ? 'stream-images' : ''}`}>
+    <div
+      className={`stream stream-${page.options.size} ${items.some((item) => item.format === 'image') ? 'stream-images' : ''}`}
+      style={{ '--image-height': `${height}vh` } as React.CSSProperties}
+    >
       {items.map((item) => (
         <StreamPost key={item.id} item={item} page={page} ipfsGateway={ipfsGateway} onOpenImage={(item, src) => setOpen({ item, src })} />
       ))}

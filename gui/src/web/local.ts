@@ -2,14 +2,14 @@
 // the page itself. Native content then plays from blob URLs instead of streaming.
 import './polyfill';
 import { setLocalHandler, setStreamResolver } from '../api';
+import { APP_BASE } from '../util';
 import { createBackend } from './backend';
 import { loadConfig } from './config';
 import { memoryKeyValue, openIndexedDb } from './store';
 
 export async function startInPage(): Promise<void> {
-  // The folder the client is served from — the document's base (the 404 page pins it on
-  // a deep link), never the route the client is currently on.
-  const base = new URL('./', document.baseURI);
+  // The folder the client is served from (never the route the client is currently on).
+  const base = APP_BASE;
   const config = await loadConfig(base.href);
   const kv = await openIndexedDb().catch(() => memoryKeyValue());
   const backend = await createBackend({ kv, config, appUrl: base.href, hostName: location.hostname });
