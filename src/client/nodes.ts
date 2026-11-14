@@ -5,6 +5,7 @@ import { NodeClient, type RequestResult } from '../shared/nodeclient.js';
 import { formatNodeRef, parseNodeRefs, type NodeType } from '../shared/noderef.js';
 import type { ProviderInfo, AlgorithmInfo } from '../shared/protocol.js';
 import type { ClientStoreLike } from './model.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 export function errorText(error: unknown): string {
   if (error instanceof RemoteError) return error.message;
@@ -25,7 +26,8 @@ export class NodeManager {
   constructor(
     private readonly store: ClientStoreLike,
     /** How requests to a node are sent (the daemon routes them through Tor); plain fetch when undefined. */
-    private readonly transport?: (target: { url: string; onion?: string }) => Transport | undefined
+    private readonly transport?: (target: { url: string; onion?: string }) => Transport | undefined,
+    private readonly traces: TraceLog = NO_TRACES
   ) {}
 
   /**
@@ -181,6 +183,7 @@ export class NodeManager {
     }
     this.changed();
     await Promise.all(added.map((node) => this.refreshBalance(node)));
+    this.traces.trace('basic', 'nodes', 'nodes added', { data: { added: added.length, errors: errors.length } });
     return { added, errors };
   }
 
@@ -190,6 +193,7 @@ export class NodeManager {
     this.nodes.splice(index, 1);
     this.clients.delete(id);
     this.changed();
+    this.traces.trace('basic', 'nodes', 'node removed', { message: id });
   }
 
   update(id: string, patch: Partial<Pick<NodeEntry, 'enabled' | 'auth' | 'maxPrice' | 'name'>>): NodeEntry {
@@ -230,8 +234,11 @@ export class NodeManager {
       node.description = node.info.description;
       node.status = { online: true, latencyMs: Date.now() - started, checkedAt: new Date().toISOString() };
       await this.refreshBalance(node);
+      this.traces.trace('basic', 'nodes', 'node refreshed', { message: node.name, data: { node: node.id, latencyMs: node.status.latencyMs } });
     } catch (error) {
       node.status = { online: false, checkedAt: new Date().toISOString(), error: errorText(error) };
+      // The failure shows on the node's row in the GUI — worth an error line when tracing.
+      this.traces.trace('error', 'nodes', 'node refresh failed', { message: node.name, data: { node: node.id }, error: errorText(error) });
     }
     this.changed();
     return node;

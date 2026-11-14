@@ -8,6 +8,7 @@ import { FORMATS, RATINGS, type Format, type Rating } from '../shared/taxonomy.j
 import type { ClientStoreLike, UploadedFile, UploadStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
 import { rememberPublished } from './published.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 /** Reads a file a chunk at a time. */
 async function* readChunks(file: UploadedFile, chunkSize: number): AsyncGenerator<Uint8Array> {
@@ -23,7 +24,8 @@ export class Publisher {
   constructor(
     private readonly store: ClientStoreLike,
     private readonly nodes: NodeManager,
-    private readonly uploads: UploadStore
+    private readonly uploads: UploadStore,
+    private readonly traces: TraceLog = NO_TRACES
   ) {}
 
   private newJob(kind: Job['kind'], title: string, steps: string[]): Job {
@@ -63,6 +65,10 @@ export class Publisher {
     const algorithms = this.nodesOf(request.algorithms ?? [], 'algorithm');
     if (!providers.length) throw badRequest('Pick at least one provider node to upload to');
     const sources = this.parseSources(request.sources);
+    this.traces.trace('basic', 'publisher', 'publish', {
+      message: request.title.trim().slice(0, 120),
+      data: { providers: providers.length, algorithms: algorithms.length, sources: sources.length },
+    });
     const job = this.newJob('publish', request.title, [
       'Split into chunks and hash',
       ...providers.map((node) => `Upload to ${node.name}`),
@@ -176,9 +182,14 @@ export class Publisher {
             }
             await client.json(`/v1/uploads/${cid}/commit`, { method: 'POST', timeoutMs: 60000 });
             stored.push(provider);
+            this.traces.trace('dependency', 'publisher', `POST /v1/uploads/${cid.slice(0, 12)}/commit`, {
+              message: provider.name,
+              data: { node: provider.id, cost: started.cost },
+            });
             step(index, 'done', started.cost ? `${started.cost} credits` : undefined);
             void this.nodes.refreshBalance(provider);
           } catch (error) {
+            this.traces.trace('error', 'publisher', 'upload failed', { message: provider.name, data: { node: provider.id }, error: errorText(error) });
             step(index, 'error', errorText(error));
             done += manifest.chunks.length;
           }
@@ -219,10 +230,12 @@ export class Publisher {
       job.result = { id };
       job.status = 'done';
       job.progress = 1;
+      this.traces.trace('basic', 'publisher', 'publish → done', { data: { cid, stored: stored.length, algorithms: library.algorithms.length } });
       await this.uploads.remove(request.fileId);
     } catch (error) {
       job.status = 'error';
       job.error = errorText(error);
+      this.traces.trace('error', 'publisher', 'publish failed', { data: { title: job.title.slice(0, 120) }, error: job.error });
       const running = job.steps.find((s) => s.status === 'running');
       if (running) {
         running.status = 'error';
@@ -256,10 +269,15 @@ export class Publisher {
           : submission;
         const result = await client.json<{ id: string; status: string }>('/v1/submissions', { body, timeoutMs: 30000 });
         library.algorithms.push({ nodeId: node.id, submissionId: result.id });
+        this.traces.trace('dependency', 'publisher', 'POST /v1/submissions', {
+          message: node.name,
+          data: { node: node.id, submission: result.id, status: result.status },
+        });
         job.steps[index].status = 'done';
         job.steps[index].detail = result.status === 'accepted' ? 'Listed' : 'Waiting for review';
       } catch (error) {
         library.algorithms.push({ nodeId: node.id, error: errorText(error) });
+        this.traces.trace('error', 'publisher', 'submission failed', { message: node.name, data: { node: node.id }, error: errorText(error) });
         job.steps[index].status = 'error';
         job.steps[index].detail = errorText(error);
       }
@@ -275,6 +293,10 @@ export class Publisher {
     const algorithms = this.nodesOf(request.algorithms ?? [], 'algorithm');
     if (!algorithms.length) throw badRequest('Pick at least one algorithm node');
     const id = formatSource(source);
+    this.traces.trace('basic', 'publisher', 'publish external', {
+      message: request.title.trim().slice(0, 120),
+      data: { id, algorithms: algorithms.length },
+    });
     const job = this.newJob('external', request.title, algorithms.map((node) => `Submit to ${node.name}`));
     const format = FORMATS.includes(request.format as Format) ? (request.format as Format) : undefined;
     const rating = RATINGS.includes(request.rating as Rating) ? (request.rating as Rating) : undefined;
@@ -309,7 +331,12 @@ export class Publisher {
       job.result = { id };
       job.status = library.algorithms.some((entry) => entry.submissionId) ? 'done' : 'error';
       if (job.status === 'done') rememberPublished(this.store, id, library.title);
-      if (job.status === 'error') job.error = 'No algorithm node accepted the submission';
+      if (job.status === 'error') {
+        job.error = 'No algorithm node accepted the submission';
+        this.traces.trace('error', 'publisher', 'publish external failed', { message: id, error: job.error });
+      } else {
+        this.traces.trace('basic', 'publisher', 'publish external → done', { data: { id, algorithms: library.algorithms.length } });
+      }
     });
     this.track(job, task);
     return job;

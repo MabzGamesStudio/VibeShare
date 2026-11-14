@@ -57,6 +57,8 @@ export interface NodeInfoBase {
   payments: PaymentMethodInfo[];
   /** Other nodes this operator recommends (node references). */
   peers: string[];
+  /** What this node's local tracing keeps (whether it is on and for how long). */
+  tracing?: { enabled: boolean; expirationHours: number };
 }
 
 export interface ProviderPricing {

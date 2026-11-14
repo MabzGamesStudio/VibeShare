@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry, SearchHistoryItem } from '../../src/shared/clientapi';
 import { newPageId, presetPage } from '../../src/shared/clientdefaults';
-import { api } from './api';
+import { api, traceAction, traceChange, userActionsTraced } from './api';
 import { PageIconView } from './components/feed/icons';
 import { PageEditor, pagePath } from './components/feed/PageEditor';
 import { PageView } from './components/feed/PageView';
@@ -260,6 +260,49 @@ export function App() {
     api<{ dev: boolean }>('/api/dev/info')
       .then((answer) => setDevBuild(answer.dev))
       .catch(() => setDevBuild(false));
+  }, []);
+
+  // User-action tracing (Settings → Logging → Trace logs, off by default): one delegated
+  // listener instead of instrumenting hundreds of components — a click or a field change
+  // gets its own trace timeline, which the API calls it makes join (x-vs-trace). Every
+  // handler starts with the settings check, so with tracing off this costs nothing.
+  useEffect(() => {
+    const describeClick = (target: EventTarget | null): string | null => {
+      const element = target instanceof Element ? target.closest('button, a, [role="button"], summary, input[type="checkbox"], input[type="radio"]') : null;
+      if (!element) return null;
+      const text = element.getAttribute('aria-label') || element.getAttribute('title') || (element as HTMLElement).innerText || element.tagName.toLowerCase();
+      return text.trim().replace(/\s+/g, ' ').slice(0, 60) || element.tagName.toLowerCase();
+    };
+    const describeField = (target: EventTarget | null): string => {
+      // name / placeholder / aria-label — whichever the field is best identified by.
+      const field = target as { name?: string; placeholder?: string; type?: string; id?: string; tagName?: string; getAttribute?: (name: string) => string | null } | null;
+      if (!field?.tagName) return 'field';
+      return String(field.name || field.placeholder || field.getAttribute?.('aria-label') || field.id || field.type || field.tagName.toLowerCase()).slice(0, 60);
+    };
+    const onClick = (event: Event) => {
+      if (!userActionsTraced()) return;
+      const label = describeClick(event.target);
+      if (label) traceAction(`click:${label}`);
+    };
+    const onChange = (event: Event) => {
+      if (!userActionsTraced()) return;
+      traceChange(`change:${describeField(event.target)}`);
+    };
+    const onInput = (event: Event) => {
+      if (!userActionsTraced()) return;
+      // Typing is one action, not one per keystroke: only discrete controls report here.
+      const field = event.target as HTMLInputElement | null;
+      if (field?.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'color'].includes(field.type)) return;
+      traceChange(`change:${describeField(event.target)}`);
+    };
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('change', onChange, true);
+    document.addEventListener('input', onInput, true);
+    return () => {
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('change', onChange, true);
+      document.removeEventListener('input', onInput, true);
+    };
   }, []);
 
   const pages = state?.settings.pages.filter((page) => page.sidebar) ?? [];

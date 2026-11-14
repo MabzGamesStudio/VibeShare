@@ -56,7 +56,7 @@ import {
 import { basename } from 'node:path';
 import { convertVvsh, defaultVvshConfig, quoteVvsh, type VvshConvertPricing } from './vvsh.js';
 import { defaultTiersConfig, TierManager, tierJob, withDefaultTiers, type TierState, type TiersConfig } from './tiers.js';
-import { vvshEncoderBackend } from './transcode.js';
+import { vvshEncoderBackend, setTranscodeTracing } from './transcode.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { decodeVvshChunk, decodeVvshFrames } from '../shared/vvsh-encode.js';
 import type { VvshConvertQuote, VvshHash } from '../shared/vvsh.js';
@@ -208,6 +208,26 @@ interface PushItemResult {
   error?: string;
 }
 
+/** What one endpoint check found: does it serve the content, and do the bytes match. */
+interface EndpointCheck {
+  ok: boolean;
+  url: string;
+  bytes: number;
+  chunks?: { matched: number; total: number };
+  error?: string;
+}
+
+/** What one storage-job endpoint test found across its users' endpoints. */
+interface JobTestResult {
+  ok: boolean;
+  account?: string;
+  endpoint?: string;
+  chunks?: { matched: number; total: number };
+  checked: number;
+  total: number;
+  error?: string;
+}
+
 /** A suggestion with the same content and the same value as an earlier one is not new. */
 function suggestionSignature(suggestion: { kind: string; sources?: SourceSuggestion[]; duplicateOf?: string; note?: string }): string {
   const sources = (suggestion.sources ?? [])
@@ -262,9 +282,16 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
               // No endpoint worked and no holder is left: the job has nowhere to get its data.
               if (!ok && this.service.holdersOf(job.cid!) === 0) this.service.failJob(job.id);
             })
-            .catch(() => undefined);
+            .catch((error) => {
+              // Tolerated: the pull is a recovery attempt, the job keeps its other sources.
+              this.traces.trace('error', 'provider.node', 'holder-out pull failed', {
+                error: (error as Error).message,
+                data: { account: accountId.slice(0, 16), job: job.id },
+              });
+            });
         }
-      }
+      },
+      this.traces
     );
     this.store = new ContentStore({
       indexPath: this.path('content-index.json'),
@@ -275,6 +302,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       peerFallback: (id) => (this.config.storage.usePeers ? this.service.retrieve(id) : Promise.resolve(null)),
       chunkPeers: (id) => this.fetchFromPeers(id),
       cacheFetched: () => this.config.storage.cacheFetched,
+      traces: this.traces,
     });
     this.gcTimer = setInterval(() => void this.collectGarbage(), 15 * 60_000);
     this.gcTimer.unref();
@@ -289,7 +317,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       bytesOf: (cid) => this.store.getContent(cid)?.size ?? 0,
       // A tier change always reshapes the content's storage job (created, resized, deleted).
       onChanged: (cid) => this.syncTierJob(cid),
-    });
+    }, this.traces);
+    // The vvsh encoder runs outside any instance (it is called through convertVvsh) —
+    // install this node's trace hook so its events join the requesting timeline.
+    setTranscodeTracing(this.traces);
     // Tier lifecycles: expired assignments downgrade along their chain or are forgotten.
     this.tierTimer = setInterval(() => void this.tiers.tick().catch((error) => log.warn('tier tick:', error)), 3_600_000);
     this.tierTimer.unref();
@@ -308,6 +339,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         list.push(this.createBackend(config));
       } catch (error) {
         log.error(`Storage backend ${config.id}: ${(error as Error).message}`);
+        this.traces.trace('error', 'provider.node', 'backend create failed', { error: (error as Error).message, data: { backend: config.id } });
       }
     }
     this.backendCache = { key, list };
@@ -317,18 +349,18 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private createBackend(config: BackendConfig): BlobBackend {
     switch (config.type) {
       case 'memory':
-        return new MemoryBackend(config.id, config);
+        return new MemoryBackend(config.id, config, this.traces);
       case 'local':
-        if (!this.options.dataDir && !isAbsolute(config.path)) return new MemoryBackend(config.id, config);
-        return new LocalBackend(config.id, config, this.options.dataDir);
+        if (!this.options.dataDir && !isAbsolute(config.path)) return new MemoryBackend(config.id, config, this.traces);
+        return new LocalBackend(config.id, config, this.options.dataDir, this.traces);
       case 's3':
-        return new S3Backend(config.id, config);
+        return new S3Backend(config.id, config, this.traces);
       case 'webdav':
-        return new WebDavBackend(config.id, config);
+        return new WebDavBackend(config.id, config, this.traces);
       case 'ipfs':
-        return new IpfsBackend(config.id, config);
+        return new IpfsBackend(config.id, config, this.traces);
       case 'http':
-        return new HttpBackend(config.id, config);
+        return new HttpBackend(config.id, config, this.traces);
       case 'provider': {
         const ref = parseNodeRef(config.ref);
         if (!ref) throw new Error(`Bad node reference ${config.ref}`);
@@ -360,7 +392,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             } catch (error) {
               return { ok: false, detail: (error as Error).message };
             }
-          }
+          },
+          this.traces
         );
       }
     }
@@ -599,12 +632,29 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     let data: Buffer;
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) return false;
+      if (!response.ok) {
+        this.traces.trace('dependency', 'provider.node', 'content url pull failed', {
+          message: `the endpoint answered ${response.status}`,
+          data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+        });
+        return false;
+      }
       data = Buffer.from(await response.arrayBuffer());
-    } catch {
+    } catch (error) {
+      // Tolerated: one dead link just means the next one is tried.
+      this.traces.trace('error', 'provider.node', 'content url pull failed', {
+        error: (error as Error).message,
+        data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+      });
       return false;
     }
-    if (!bytesMatchCid(data, cid)) return false; // the content does not match the cid
+    if (!bytesMatchCid(data, cid)) {
+      this.traces.trace('dependency', 'provider.node', 'content url pull failed', {
+        message: 'the bytes do not match the content id',
+        data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+      });
+      return false; // the content does not match the cid
+    }
     this.downloads.data.items[cid] = { data: data.toString('base64'), account: record.account, at: new Date().toISOString() };
     record.downloads++;
     const reward = Math.max(0, Math.round(this.config.contentUrls.creditPerDownload));
@@ -612,6 +662,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.ledger.credit(record.account, reward, 'content download', cid);
       record.earned += reward;
     }
+    this.traces.trace('dependency', 'provider.node', 'content url pulled', {
+      data: { cid: cid.slice(0, 16), url: url.slice(0, 120), bytes: data.length, account: record.account.slice(0, 16), reward },
+    });
     this.contentUrls.changed();
     this.downloads.changed();
     return true;
@@ -638,11 +691,18 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (await this.pullContentUrl(record, cid, url)) {
         record.fails = 0;
         this.contentUrls.changed();
+        this.traces.trace('basic', 'provider.node', 'content url fetched', {
+          data: { cid: cid.slice(0, 16), account: record.account.slice(0, 16) },
+        });
         return true;
       }
       record.fails = (record.fails ?? 0) + 1;
       this.contentUrls.changed();
     }
+    this.traces.trace('basic', 'provider.node', 'content url fetch', {
+      message: 'no accepted link served this content',
+      data: { cid: cid.slice(0, 16), tried: records.length },
+    });
     return false;
   }
 
@@ -662,19 +722,33 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    * a pure availability and integrity check. A test is only ever correct when the
    * returned chunks match the content id.
    */
-  async verifyEndpoint(
-    cid: string,
-    url: string,
-    timeoutMs = 30_000
-  ): Promise<{ ok: boolean; url: string; bytes: number; chunks?: { matched: number; total: number }; error?: string }> {
+  async verifyEndpoint(cid: string, url: string, timeoutMs = 30_000): Promise<EndpointCheck> {
     const target = url.startsWith('http') && !url.includes(' ') && url.endsWith(cid) ? url : `${url.replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
+    // Every check is one call to the outside world: one dependency line for its outcome,
+    // whichever way it went.
+    const report = (result: EndpointCheck): EndpointCheck => {
+      this.traces.trace('dependency', 'provider.node', 'endpoint check', {
+        data: {
+          cid: cid.slice(0, 16),
+          url: target.slice(0, 120),
+          ok: result.ok,
+          bytes: result.bytes,
+          matched: result.chunks?.matched,
+          total: result.chunks?.total,
+        },
+        error: result.error,
+      });
+      return result;
+    };
     let data: Buffer;
     try {
       const response = await fetch(target, { signal: AbortSignal.timeout(Math.max(50, timeoutMs)) });
-      if (!response.ok) return { ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}` };
+      if (!response.ok) return report({ ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}` });
       data = Buffer.from(await response.arrayBuffer());
     } catch (error) {
-      return { ok: false, url: target, bytes: 0, error: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      this.traces.trace('error', 'provider.node', 'endpoint check failed', { error: message, data: { cid: cid.slice(0, 16), url: target.slice(0, 120) } });
+      return report({ ok: false, url: target, bytes: 0, error: message });
     }
     const manifest = this.store.getManifest(cid);
     if (manifest?.chunks.length) {
@@ -686,20 +760,20 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         if (chunkIdOf(slice) === chunk.id) matched++;
       }
       const chunks = { matched, total: manifest.chunks.length };
-      if (matched === manifest.chunks.length) return { ok: true, url: target, bytes: data.length, chunks };
-      if (bytesMatchCid(data, cid)) return { ok: true, url: target, bytes: data.length, chunks };
-      return {
+      if (matched === manifest.chunks.length) return report({ ok: true, url: target, bytes: data.length, chunks });
+      if (bytesMatchCid(data, cid)) return report({ ok: true, url: target, bytes: data.length, chunks });
+      return report({
         ok: false,
         url: target,
         bytes: data.length,
         chunks,
         error: `${chunks.total - chunks.matched} of ${chunks.total} chunks did not match the expected hashes`,
-      };
+      });
     }
     if (!bytesMatchCid(data, cid)) {
-      return { ok: false, url: target, bytes: data.length, error: 'The returned data does not match the expected hash' };
+      return report({ ok: false, url: target, bytes: data.length, error: 'The returned data does not match the expected hash' });
     }
-    return { ok: true, url: target, bytes: data.length, chunks: { matched: 1, total: 1 } };
+    return report({ ok: true, url: target, bytes: data.length, chunks: { matched: 1, total: 1 } });
   }
 
   /**
@@ -710,22 +784,27 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    * failure threshold); when every endpoint of a user fails, that user is red failed
    * and out of the job.
    */
-  async testStorageJob(
-    jobId: string,
-    onlyAccount?: string
-  ): Promise<{
-    ok: boolean;
-    account?: string;
-    endpoint?: string;
-    chunks?: { matched: number; total: number };
-    checked: number;
-    total: number;
-    error?: string;
-  }> {
+  async testStorageJob(jobId: string, onlyAccount?: string): Promise<JobTestResult> {
     const job = this.service.jobs().find((entry) => entry.id === jobId);
     if (!job) throw notFound('No such job');
+    // One summary per test run — the endpoint checks themselves trace one line each.
+    const report = (result: JobTestResult): JobTestResult => {
+      this.traces.trace('basic', 'provider.node', 'storage job test', {
+        data: {
+          job: jobId,
+          account: result.account?.slice(0, 16),
+          ok: result.ok,
+          checked: result.checked,
+          total: result.total,
+          matched: result.chunks?.matched,
+          chunks: result.chunks?.total,
+        },
+        error: result.error,
+      });
+      return result;
+    };
     const cid = job.cid;
-    if (!cid) return { ok: false, checked: 0, total: 0, error: 'This job has no content id — there is nothing to fetch from its endpoints' };
+    if (!cid) return report({ ok: false, checked: 0, total: 0, error: 'This job has no content id — there is nothing to fetch from its endpoints' });
     const holders = this.service
       .assignmentsForAdmin()
       .filter(
@@ -735,7 +814,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           (!onlyAccount || assignment.accountId === onlyAccount)
       );
     if (!holders.length) {
-      return { ok: false, checked: 0, total: 0, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' };
+      return report({ ok: false, checked: 0, total: 0, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' });
     }
     const threshold = job.failedRequestsBeforeFailure ?? 3;
     let checked = 0;
@@ -763,7 +842,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       }
       if (served) {
         servedCount++;
-        if (onlyAccount) return { ok: true, account: holder.accountId, endpoint: served.url, chunks: served.chunks, checked, total };
+        if (onlyAccount) return report({ ok: true, account: holder.accountId, endpoint: served.url, chunks: served.chunks, checked, total });
         continue;
       }
       // No endpoint of this user served the content: red failed for the user.
@@ -771,12 +850,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         this.service.failHolder(holder.id);
       }
       if (onlyAccount) {
-        return { ok: false, account: holder.accountId, checked, total, error: `No endpoint of ${holder.accountId} served the content (${records.length} tried)` };
+        return report({ ok: false, account: holder.accountId, checked, total, error: `No endpoint of ${holder.accountId} served the content (${records.length} tried)` });
       }
     }
-    return servedCount
-      ? { ok: true, checked, total }
-      : { ok: false, checked, total, error: 'No endpoint served the content' };
+    return report(
+      servedCount ? { ok: true, checked, total } : { ok: false, checked, total, error: 'No endpoint served the content' }
+    );
   }
 
   /**
@@ -812,8 +891,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             await client.fetch(`/v1/peers/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120000 });
             sent++;
           }
-        } catch {
+        } catch (error) {
+          // One unreachable peer must not stop the round — counted, traced, carried on.
           errors++;
+          this.traces.trace('error', 'provider.node', 'peer sync error', {
+            error: (error as Error).message,
+            data: { peer: peer.ref.slice(0, 48) },
+          });
         }
       }
       // Receive: pull chunks this node lacks, up to the receive budget.
@@ -828,6 +912,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       }
       if (sent >= sendBudget && received >= receiveBudget) break;
     }
+    this.traces.trace('basic', 'provider.node', 'peer sync round', { data: { sent, received, errors } });
     return { sent, received, errors };
   }
 
@@ -888,9 +973,22 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       try {
         const response = await this.peerClient(peer).fetch(`/v1/peers/chunks/${encodeURIComponent(id)}`, { timeoutMs: 30_000 });
         const data = Buffer.from(await response.arrayBuffer());
-        if (chunkIdOf(data) === id) return data;
+        if (chunkIdOf(data) === id) {
+          this.traces.trace('dependency', 'provider.node', 'peer chunk fetched', {
+            data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12), bytes: data.length },
+          });
+          return data;
+        }
+        this.traces.trace('error', 'provider.node', 'peer chunk fetch failed', {
+          message: 'the bytes did not match the chunk id',
+          data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12) },
+        });
       } catch (error) {
         log.debug(`Peer has no chunk ${id.slice(0, 12)}: ${(error as Error).message}`);
+        this.traces.trace('error', 'provider.node', 'peer chunk fetch failed', {
+          error: (error as Error).message,
+          data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12) },
+        });
       }
     }
     return null;
@@ -964,14 +1062,26 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         result.bytes += data.length;
       }
     } catch (error) {
+      this.traces.trace('error', 'provider.node', 'content push failed', {
+        error: (error as Error).message,
+        data: { ref: ref.slice(0, 48), cid: cid.slice(0, 16), sent: result.sent, missing: result.missing },
+      });
       return { ...result, error: (error as Error).message };
     }
     try {
       await client.json(`/v1/peers/manifests/${encodeURIComponent(cid)}`, { method: 'PUT', body: manifest, timeoutMs: 60_000 });
       result.manifest = true;
     } catch (error) {
+      this.traces.trace('error', 'provider.node', 'content push failed', {
+        error: (error as Error).message,
+        message: 'the manifest did not land on the target',
+        data: { ref: ref.slice(0, 48), cid: cid.slice(0, 16), sent: result.sent, missing: result.missing },
+      });
       return { ...result, error: (error as Error).message };
     }
+    this.traces.trace('basic', 'provider.node', 'content pushed', {
+      data: { ref: ref.slice(0, 48), cid: cid.slice(0, 16), sent: result.sent, skipped: result.skipped, missing: result.missing, bytes: result.bytes },
+    });
     return result;
   }
 
@@ -1390,6 +1500,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.uploads.data.uploads[cid] = { manifest, uploader, createdAt: Date.now() };
       this.uploads.changed();
       const missing = [...new Set(manifest.chunks.map((chunk) => chunk.id))].filter((id) => !this.store.hasChunk(id));
+      this.traces.trace('basic', 'provider.node', 'upload accepted', {
+        data: { cid: cid.slice(0, 16), chunks: manifest.chunks.length, bytes: manifest.size, missing: missing.length, cost },
+      });
       return { cid, status: 'pending', missing, cost };
     });
 
@@ -1421,6 +1534,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       delete this.uploads.data.uploads[cid];
       this.uploads.changed();
       this.autoJob(cid, upload.manifest);
+      this.traces.trace('basic', 'provider.node', 'upload committed', {
+        data: { cid: cid.slice(0, 16), chunks: upload.manifest.chunks.length, bytes: upload.manifest.size, uploader: upload.uploader.slice(0, 16) },
+      });
       log.info(`Stored ${upload.manifest.name} (${cid.slice(0, 16)}…, ${(upload.manifest.size / MiB).toFixed(1)} MiB)`);
       return { cid, status: 'ready' };
     });
@@ -1626,6 +1742,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           } catch (error) {
             job.error = error instanceof Error ? error.message : String(error);
             job.status = 'error';
+            // The catch keeps the failure on the job (polled by the client) — traced
+            // here as well, because that state is the only report it gets.
+            this.traces.trace('error', 'provider.node', 'conversion failed', {
+              error: job.error,
+              data: { job: jobId, account: account.id.slice(0, 16), bytes: job.declared },
+            });
           } finally {
             job.at = Date.now();
           }
@@ -1675,6 +1797,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           })(),
         };
       });
+      this.traces.trace('basic', 'provider.node', 'catalog built', { data: { offset, limit, items: items.length } });
       return { items, next: items.length === limit ? offset + limit : undefined };
     });
 
@@ -1688,10 +1811,16 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const assigned = this.config.tiers.auto
       ? this.tiers.assign(cid, this.store.getContent(cid)?.size ?? 0, manifest.meta?.title ?? manifest.name)
       : undefined;
-    if (assigned) return;
+    if (assigned) {
+      this.traces.trace('basic', 'provider.node', 'auto job', {
+        message: 'the tier plan owns this content',
+        data: { cid: cid.slice(0, 16), tier: assigned.tier },
+      });
+      return;
+    }
     const auto = this.config.storageService.auto;
     if (!this.config.storageService.enabled || !auto.enabled) return;
-    this.service.createJob({
+    const job = this.service.createJob({
       cid,
       title: manifest.meta?.title ?? manifest.name,
       chunks: manifest.chunks,
@@ -1699,6 +1828,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       durationSeconds: auto.durationDays * 86400,
       rewards: auto.rewards,
       requireIdentity: auto.requireIdentity,
+    });
+    this.traces.trace('basic', 'provider.node', 'auto job', {
+      message: 'automatic storage job opened',
+      data: { cid: cid.slice(0, 16), job: job.id, replicas: auto.replicas },
     });
   }
 
@@ -1724,7 +1857,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     // scaled to the content's size, the rest is taken as-is.
     const settings = tierJob(state.plan);
     const mib = Math.max(1, Math.round((manifest.size ?? 0) / MiB));
-    this.service.createJob({
+    const job = this.service.createJob({
       cid,
       title: manifest.meta?.title ?? manifest.name,
       chunks: manifest.chunks,
@@ -1742,6 +1875,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       failedRequestsBeforeFailure: settings.failedRequestsBeforeFailure,
       requireIdentity: this.config.storageService.auto.requireIdentity,
       managed: true,
+    });
+    this.traces.trace('basic', 'provider.node', 'tier job synced', {
+      data: { cid: cid.slice(0, 16), tier: state.tier, job: job.id, copies },
     });
   }
 
@@ -1761,6 +1897,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         await this.testStorageJob(job.id);
       } catch (error) {
         log.debug('endpoint tests:', (error as Error).message);
+        this.traces.trace('error', 'provider.node', 'endpoint test failed', {
+          error: (error as Error).message,
+          data: { job: job.id },
+        });
       }
     }
   }
@@ -1972,6 +2112,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         const pushed = await this.pushItem(peer.ref, cid);
         results.push({ peer: peer.ref, sent: pushed.sent, skipped: pushed.skipped + pushed.missing, error: pushed.error });
       }
+      this.traces.trace('basic', 'provider.node', 'peers push', { data: { cid: cid.slice(0, 16), peers: targets.length, sent: results.reduce((sum, r) => sum + r.sent, 0) } });
       return { results };
     });
     // Manual content sync (admin GUI): one content to one provider the admin named — a
@@ -2001,6 +2142,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           fetched++;
         } else missing++;
       }
+      this.traces.trace('basic', 'provider.node', 'peers fetch', { data: { cid: String(body.cid ?? '').slice(0, 16), fetched, missing } });
       return { fetched, missing };
     });
     // Automatic syncing of content bytes with peers: run a round now, or set how often it
@@ -2109,7 +2251,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       }>(ctx.req);
       const manifest = body.cid ? this.store.getManifest(body.cid) : undefined;
       if (!manifest) throw notFound('No such content on this node');
-      return this.service.createJob({
+      const job = this.service.createJob({
         cid: body.cid,
         title: manifest.meta?.title ?? manifest.name,
         chunks: manifest.chunks,
@@ -2119,10 +2261,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         requireIdentity: body.requireIdentity,
         openUntil: body.openUntil,
       });
+      this.traces.trace('basic', 'provider.node', 'storage job create', {
+        data: { job: job.id, cid: job.cid?.slice(0, 16), chunks: job.chunkIds.length, replicas: job.replicas },
+      });
+      return job;
     });
     router.post('/v1/admin/storage/jobs/:id/close', (ctx) => {
       this.requireAdmin(ctx);
       this.service.closeJob(ctx.params.id);
+      this.traces.trace('basic', 'provider.node', 'storage job close', { data: { job: ctx.params.id } });
       return { ok: true };
     });
     router.delete('/v1/admin/storage/jobs/:id', (ctx) => {
@@ -2188,6 +2335,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         this.tiers.setTier(cid, body.tier, { manual: true });
       }
       if (body.extendDays && body.extendDays > 0) this.tiers.extend(cid, body.extendDays);
+      this.traces.trace('basic', 'provider.node', 'tiers update', {
+        data: { cid: cid.slice(0, 16), tier: body.tier, extendDays: body.extendDays },
+      });
       return { tier: this.tiers.stateOf(cid) };
     });
     router.delete('/v1/admin/tiers/:cid', async (ctx) => {
@@ -2215,6 +2365,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     validateManifest(manifest);
     const record = await this.store.addContent(manifest, 'operator');
     this.autoJob(record.cid, manifest);
+    this.traces.trace('basic', 'provider.node', 'content imported', {
+      data: { cid: record.cid.slice(0, 16), chunks: manifest.chunks.length, bytes: manifest.size },
+    });
     return { cid: record.cid, manifest };
   }
 
@@ -2228,6 +2381,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     );
     const record = await this.store.addContent(manifest, 'operator');
     this.autoJob(record.cid, manifest);
+    this.traces.trace('basic', 'provider.node', 'content imported', {
+      data: { cid: record.cid.slice(0, 16), chunks: manifest.chunks.length, bytes: manifest.size },
+    });
     return { cid: record.cid, manifest };
   }
 

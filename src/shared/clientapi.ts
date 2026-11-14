@@ -4,6 +4,7 @@ import type { Manifest } from './content.js';
 import type { CommentBlock, CommentOrder, CommentVotes } from './comments.js';
 import type { ContentItem, CreatorInfo, GroupInfo, Invoice, LedgerEntry, NodeInfo, Preferences, StorageAssignment, TopicInfo, AccountView } from './protocol.js';
 import type { Embed, ExternalSource } from './sources.js';
+import type { TraceSettings } from './tracing.js';
 import type { VvshFile } from './vvsh.js';
 import type { CreatorKind, Format, Rating, SuggestLevel } from './taxonomy.js';
 
@@ -348,6 +349,8 @@ export interface Settings {
   historyMode: 'pages' | 'lazy';
   /** Keep debug logs of what the app asks of the nodes (Settings → Logs). Off by default. */
   debugLogs: boolean;
+  /** Local tracing: off by default. See TraceSettings (levels, expiration) in tracing.ts. */
+  tracing: TraceSettings;
   ipfsGateway: string;
   profile: { name: string; kind: CreatorKind };
   storageService: StorageServiceSettings;

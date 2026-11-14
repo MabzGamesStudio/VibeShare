@@ -505,7 +505,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
-    this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null);
+    this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null, this.traces);
     this.contributions = new JsonFile(this.path('contributions.json'), () => ({
       votes: {},
       suggestions: {},
@@ -531,7 +531,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       () => this.config.crawler,
       this.path('crawler.json'),
       (items) => this.ingest(items),
-      (url) => this.transport(url.href)?.fetch
+      (url) => this.transport(url.href)?.fetch,
+      this.traces
     );
   }
 
@@ -551,6 +552,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       this.lastPrune = Date.now();
       this.registry.prune(config.maxEntries);
     }
+    this.traces.trace('basic', 'algorithm.crawler', 'function:ingest', {
+      message: `${added} new of ${items.length} discovered`,
+      data: { items: items.length, added },
+    });
     return added;
   }
 
@@ -563,20 +568,35 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const url = entry.thumbnailUrl;
     if (!/^https?:\/\//.test(url)) return;
     this.thumbFetching++;
+    const started = Date.now();
     void (async () => {
+      // One event per preview fetch: what was asked for and what came of it.
+      let outcome = 'stored';
       try {
         const send = this.transport(url)?.fetch ?? fetch;
         const response = await send(url, { signal: AbortSignal.timeout(15_000) });
-        if (!response.ok) return;
         const type = (response.headers.get('content-type') ?? '').split(';')[0];
-        if (!/^image\/(jpeg|png|webp)$/.test(type)) return;
-        const bytes = Buffer.from(await response.arrayBuffer());
-        if (!bytes.length || bytes.length > 200 * 1024) return;
-        this.registry.setThumbnail(entry.id, `data:${type};base64,${bytes.toString('base64')}`);
+        if (!response.ok) outcome = `http ${response.status}`;
+        else if (!/^image\/(jpeg|png|webp)$/.test(type)) outcome = `not an image (${type.slice(0, 30) || 'no type'})`;
+        else {
+          const bytes = Buffer.from(await response.arrayBuffer());
+          if (!bytes.length) outcome = 'empty image';
+          else if (bytes.length > 200 * 1024) outcome = 'too large';
+          else this.registry.setThumbnail(entry.id, `data:${type};base64,${bytes.toString('base64')}`);
+        }
       } catch (error) {
+        outcome = 'failed';
         log.debug(`Preview of ${entry.id}: ${(error as Error).message}`);
+        this.traces.trace('error', 'algorithm.thumbnails', 'function:cacheThumbnail', {
+          message: `${entry.id.slice(0, 24)} preview failed`,
+          error: (error as Error).message,
+        });
       } finally {
         this.thumbFetching--;
+        this.traces.trace('dependency', 'algorithm.thumbnails', 'fetch preview', {
+          message: `${entry.id.slice(0, 24)} · ${outcome}`,
+          data: { id: entry.id.slice(0, 32), url: url.slice(0, 120), outcome, ms: Date.now() - started },
+        });
       }
     })();
   }
@@ -670,7 +690,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private bySource(entries: Entry[]): Entry[] {
     const blocked = new Set(this.config.crawler.blockedSources);
     const servable = blocked.size ? entries.filter((entry) => !(entry.origin === 'crawler' && blocked.has(sourceKeyOf(entry)))) : entries;
-    return prioritize(servable, this.config.sources.priorities);
+    return prioritize(servable, this.config.sources.priorities, this.traces);
   }
 
   private charge(ctx: Ctx, price: number, reason: string): Account | undefined {
@@ -731,7 +751,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     try {
       return BloomFilter.from(record.filter);
-    } catch {
+    } catch (error) {
+      // A stored filter that no longer reads is dropped from the request, not fatal.
+      this.traces.trace('error', 'algorithm.bloom', 'function:storedBloom', {
+        message: `${accountId.slice(0, 16)} stored filter unreadable`,
+        error: (error as Error).message,
+      });
       return null;
     }
   }
@@ -742,7 +767,11 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     if (!record) return null;
     try {
       return BloomFilter.from(record.filter);
-    } catch {
+    } catch (error) {
+      this.traces.trace('error', 'algorithm.bloom', 'function:accountBloom', {
+        message: `${accountId.slice(0, 16)} account filter unreadable`,
+        error: (error as Error).message,
+      });
       return null;
     }
   }
@@ -786,10 +815,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   /** Leaves out content the user has seen: any of its cid or links colliding is enough. */
   private withoutSeen(entries: Entry[], filters: BloomFilter[]): Entry[] {
     if (!filters.length) return entries;
-    return entries.filter((entry) => {
+    const kept = entries.filter((entry) => {
       const identity = { id: entry.id, contentId: entry.contentId, link: entry.link, sources: entry.sources };
       return !filters.some((filter) => filter.seesContent(identity));
     });
+    // One summary of the seen-filter pass: how much it hid, never what it hid.
+    this.traces.trace('basic', 'algorithm.bloom', 'function:withoutSeen', {
+      message: `${entries.length - kept.length} of ${entries.length} items already seen`,
+      data: { filters: filters.length, before: entries.length, hidden: entries.length - kept.length },
+    });
+    return kept;
   }
 
   // -------------------------------------------------------------------------
@@ -1087,9 +1122,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       await client.json(`/v1/uploads/${cid}/commit`, { method: 'POST', body: {} });
       section.remote = cid;
       for (const block of section.blocks) delete block.data;
+      this.traces.trace('dependency', 'algorithm.comments', 'function:offloadComments', {
+        message: `provider kept ${cid.slice(0, 24)}`,
+        data: { cid: cid.slice(0, 32), blocks: section.blocks.length },
+      });
     } catch (error) {
       // The data stays here while the provider cannot take it.
       log.debug(`Comment data upload: ${(error as Error).message}`);
+      this.traces.trace('error', 'algorithm.comments', 'function:offloadComments', {
+        message: `${section.blocks.length} blocks kept here`,
+        error: (error as Error).message,
+      });
     }
   }
 
@@ -1103,7 +1146,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const response = await client.fetch(`/v1/chunks/${chunk.id}?cid=${remote}`);
       parts.push(Buffer.from(await response.arrayBuffer()));
     }
-    return JSON.parse(Buffer.concat(parts).toString()) as (CommentData | null)[];
+    const data = JSON.parse(Buffer.concat(parts).toString()) as (CommentData | null)[];
+    this.traces.trace('dependency', 'algorithm.comments', 'function:fetchCommentData', {
+      message: `${remote.slice(0, 24)} · ${manifest.chunks.length} chunks`,
+      data: { cid: remote.slice(0, 32), chunks: manifest.chunks.length, comments: data.length },
+    });
+    return data;
   }
 
   protected registerRoutes(): void {
@@ -1127,6 +1175,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         seed: String(body.seed ?? new Date().toISOString().slice(0, 13)),
         now: Date.now(),
         config: this.config.ranking,
+        trace: this.traces,
       });
       // An explore page is always led by a few VibeShare-published pieces, even ones the
       // reader has seen before; everything after them respects the seen filters.
@@ -1136,12 +1185,24 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         seen
       );
       const page = pageOf(this.bySource([...first, ...rest]), body.cursor, this.limitOf(body.limit));
+      // One summary per feed page: the strategy, the primary blend and what went out.
+      this.traces.trace('basic', 'algorithm.feed', 'function:feedPage', {
+        message: `${this.config.ranking.strategy} · ${page.items.length} of ${ranked.length} items`,
+        data: {
+          strategy: this.config.ranking.strategy,
+          candidates: ranked.length,
+          primary: first.length,
+          items: page.items.length,
+          seenFilters: seen.length,
+        },
+      });
       return { ...page, items: page.items.map((entry) => this.clientView(entry, body.previews !== false, first.includes(entry))) } satisfies Page<ContentItem>;
     });
 
     router.post('/v1/search', async (ctx) => {
       const body = await readJson<SearchRequest>(ctx.req);
       if (typeof body.query !== 'string') throw badRequest('query is required');
+      const started = Date.now();
       this.charge(ctx, this.config.pricing.search, 'search');
       const seen = this.seenFilters(ctx, body);
       // The first page of a search also asks other platforms (briefly) for the query.
@@ -1174,6 +1235,19 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       );
       const results = this.bySource([...first, ...rest]);
       const page = pageOf(results, body.cursor, this.limitOf(body.limit));
+      // One summary per search: how long the query took and how much it found.
+      const ms = Date.now() - started;
+      this.traces.trace('basic', 'algorithm.search', 'function:searchPage', {
+        message: `${body.query.length} char query · ${searched.length} matches · ${ms} ms`,
+        data: {
+          queryLength: body.query.length,
+          matches: searched.length,
+          results: results.length,
+          items: page.items.length,
+          seenFilters: seen.length,
+          ms,
+        },
+      });
       return { ...page, items: page.items.map((entry) => this.clientView(entry, body.previews !== false, first.includes(entry))) } satisfies Page<ContentItem>;
     });
 
@@ -1181,12 +1255,25 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const body = await readJson<{ ids?: string[] }>(ctx.req);
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 200).map(String) : [];
       this.charge(ctx, this.config.pricing.lookup, 'lookup');
-      return { items: ids.map((id) => this.lookup(id)) };
+      const items = ids.map((id) => this.lookup(id));
+      // One summary per lookup batch (the per-id decisions live in the registry).
+      const counts = { listed: 0, blocked: 0, unknown: 0 };
+      for (const item of items) counts[item.status === 'listed' || item.status === 'blocked' ? item.status : 'unknown']++;
+      this.traces.trace('basic', 'algorithm.lookup', 'function:lookup', {
+        message: `${ids.length} ids · ${counts.listed} listed · ${counts.blocked} blocked · ${counts.unknown} unknown`,
+        data: { ids: ids.length, ...counts },
+      });
+      return { items };
     });
 
     router.get('/v1/content/:id', (ctx) => {
       this.charge(ctx, this.config.pricing.lookup, 'lookup');
-      return this.lookup(ctx.params.id);
+      const result = this.lookup(ctx.params.id);
+      this.traces.trace('basic', 'algorithm.lookup', 'function:lookup', {
+        message: `${ctx.params.id.slice(0, 24)} · ${result.status}`,
+        data: { id: ctx.params.id.slice(0, 32), status: result.status },
+      });
+      return result;
     });
 
     // Seen-content bloom filters kept here for a while: the operator's tiers say how many
@@ -1215,13 +1302,22 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const expiresAt = new Date(from + Number(tier.durationSeconds) * 1000).toISOString();
       this.blooms.data.stored[account.id] = { filter: filter.toJSON(), expiresAt };
       this.blooms.changed();
+      this.traces.trace('basic', 'algorithm.bloom', 'function:storeBloom', {
+        message: `${account.id.slice(0, 12)} · ${tier.id} · until ${expiresAt.slice(0, 10)}`,
+        data: { account: account.id.slice(0, 16), tier: tier.id, maxBits: tier.maxBits, renewed: Boolean(previous), expiresAt },
+      });
       return { filter: filter.toJSON(), expiresAt, tiers: this.config.bloom.storage.tiers };
     });
 
     router.delete('/v1/bloom', (ctx) => {
       const account = this.auth.require(ctx);
+      const existed = Boolean(this.blooms.data.stored[account.id]);
       delete this.blooms.data.stored[account.id];
       this.blooms.changed();
+      this.traces.trace('basic', 'algorithm.bloom', 'function:dropBloom', {
+        message: `${account.id.slice(0, 12)} · ${existed ? 'dropped' : 'nothing stored'}`,
+        data: { account: account.id.slice(0, 16), removed: existed },
+      });
       return { tiers: this.config.bloom.storage.tiers };
     });
 
@@ -1246,6 +1342,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const updatedAt = new Date().toISOString();
       this.blooms.data.accounts[account.id] = { filter: filter.toJSON(), updatedAt };
       this.blooms.changed();
+      this.traces.trace('basic', 'algorithm.bloom', 'function:storeAccountFilter', {
+        message: `${account.id.slice(0, 12)} · ${this.config.bloom.accountMaxBits} bits max`,
+        data: { account: account.id.slice(0, 16), maxBits: this.config.bloom.accountMaxBits, updatedAt },
+      });
       return { filter: filter.toJSON(), updatedAt, maxBits: this.config.bloom.accountMaxBits };
     });
 
@@ -1254,6 +1354,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const existed = Boolean(this.blooms.data.accounts[account.id]);
       delete this.blooms.data.accounts[account.id];
       if (existed) this.blooms.changed();
+      this.traces.trace('basic', 'algorithm.bloom', 'function:dropAccountFilter', {
+        message: `${account.id.slice(0, 12)} · ${existed ? 'dropped' : 'nothing stored'}`,
+        data: { account: account.id.slice(0, 16), removed: existed },
+      });
       return { maxBits: this.config.bloom.accountMaxBits };
     });
 
@@ -1286,7 +1390,21 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
     router.post('/v1/comments/:id', async (ctx) => {
       const account = this.auth.require(ctx);
-      const block = await this.postComment(ctx.params.id, account, await readJson<CommentPostBody>(ctx.req));
+      const body = await readJson<CommentPostBody>(ctx.req);
+      const block = await this.postComment(ctx.params.id, account, body);
+      const { section } = this.findCommentSection(ctx.params.id);
+      // Post or edit, with the account and how big the chain stands now.
+      this.traces.trace('basic', 'algorithm.comments', body.editOf ? 'function:editComment' : 'function:postComment', {
+        message: `${account.id.slice(0, 12)} · ${block.id.slice(0, 16)} · ${section?.blocks.length ?? 0} blocks`,
+        data: {
+          content: baseId(ctx.params.id).slice(0, 32),
+          comment: block.id.slice(0, 24),
+          account: account.id.slice(0, 16),
+          edit: Boolean(body.editOf),
+          anonymous: Boolean(body.anonymous),
+          blocks: section?.blocks.length ?? 0,
+        },
+      });
       return { block };
     });
 
@@ -1299,8 +1417,20 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     });
 
     router.post('/v1/comments/:id/:comment/remove', async (ctx) => {
-      this.auth.require(ctx);
+      const account = this.auth.require(ctx);
       await this.removeComment(ctx.params.id, ctx.params.comment, await readJson<{ key?: string; sig?: string }>(ctx.req));
+      const { section } = this.findCommentSection(ctx.params.id);
+      // The data goes, the header stays: how many of each are left.
+      this.traces.trace('basic', 'algorithm.comments', 'function:removeComment', {
+        message: `${account.id.slice(0, 12)} · ${ctx.params.comment.slice(0, 16)} · ${section?.hidden.length ?? 0} hidden`,
+        data: {
+          content: baseId(ctx.params.id).slice(0, 32),
+          comment: ctx.params.comment.slice(0, 24),
+          account: account.id.slice(0, 16),
+          hidden: section?.hidden.length ?? 0,
+          blocks: section?.blocks.length ?? 0,
+        },
+      });
       return { removed: true };
     });
 
@@ -1568,6 +1698,16 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     };
     this.contributions.data.groupSuggestions[suggestion.id] = suggestion;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:suggestGroup', {
+      message: `${suggestion.id} · ${group.id.slice(0, 24)}`,
+      data: {
+        id: suggestion.id,
+        group: group.id.slice(0, 32),
+        add: add.length,
+        remove: remove.length,
+        account: account.id.slice(0, 16),
+      },
+    });
     return { suggestion, newInfo: true, credited: 0 };
   }
 
@@ -1614,6 +1754,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     };
     store[suggestion.id] = suggestion;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:suggestTopic', {
+      message: `${suggestion.id} · ${topic.id.slice(0, 24)}`,
+      data: { id: suggestion.id, topic: topic.id.slice(0, 32), account: account.id.slice(0, 16) },
+    });
     return { suggestion, newInfo: true, credited: 0 };
   }
 
@@ -1640,6 +1784,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     suggestion.credited = credited;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:paySuggestion', {
+      message: `${suggestion.id} accepted · ${credited} credits`,
+      data: { id: suggestion.id, kind: reason, credited, account: suggestion.accountId.slice(0, 16) },
+    });
     return credited;
   }
 
@@ -1858,6 +2006,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.contributions.changed();
     const needed = this.config.rewards.autoAcceptAgreement;
     if (needed > 0 && body.kind !== 'report' && suggestion.votes.length >= needed) this.acceptSuggestion(suggestion);
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:suggest', {
+      message: `${suggestion.kind} ${suggestion.id} · ${suggestion.votes.length} agreeing`,
+      data: {
+        id: suggestion.id,
+        kind: suggestion.kind,
+        content: entry.id.slice(0, 32),
+        account: account.id.slice(0, 16),
+        agreeing: suggestion.votes.length,
+        accepted: suggestion.status === 'accepted',
+      },
+    });
     const { votes, ...rest } = suggestion;
     return { ...rest, agreeing: votes.length };
   }
@@ -1914,6 +2073,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (account && reward > 0 && this.canEarn(account)) this.ledger.credit(account.id, reward, `accepted ${suggestion.kind}`, suggestion.id);
     }
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:acceptSuggestion', {
+      message: `${suggestion.kind} ${suggestion.id} accepted`,
+      data: { id: suggestion.id, kind: suggestion.kind, content: suggestion.contentId.slice(0, 32), votes: suggestion.votes.length },
+    });
   }
 
   /** The accounts of a link request, cleaned: platform, handle and the link, when given. */
@@ -1999,6 +2162,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       }
       const creator = this.registry.upsertCreator({ id: creatorId, name: body.name, kind: body.kind, keys: [proof.key], accounts });
       this.linkBack(creatorId, accounts, body.symmetric);
+      this.traces.trace('basic', 'algorithm.suggestions', 'function:linkAccounts', {
+        message: `${creatorId.slice(0, 24)} · ${accounts.length} accounts linked`,
+        data: { creator: creatorId.slice(0, 32), accounts: accounts.length, signed: true, account: account.id.slice(0, 16) },
+      });
       return { linked: true, creator };
     }
     // Unsigned: only external links to the creator, and only where the operator allows it.
@@ -2027,6 +2194,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     };
     store[proposal.id] = proposal;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:linkAccounts', {
+      message: `${creatorId.slice(0, 24)} · ${accounts.length} accounts proposed`,
+      data: { creator: creatorId.slice(0, 32), accounts: accounts.length, signed: false, proposal: proposal.id, account: account.id.slice(0, 16) },
+    });
     return { linked: false, proposal };
   }
 
@@ -2047,6 +2218,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     proposal.status = 'accepted';
     proposal.reviewedAt = new Date().toISOString();
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:acceptAccountLink', {
+      message: `${proposal.id} accepted · ${merged.length} accounts`,
+      data: { id: proposal.id, creator: proposal.creatorId.slice(0, 32), accounts: merged.length },
+    });
     return creator;
   }
 
@@ -2093,6 +2268,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     };
     store[suggestion.id] = suggestion;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:suggestCreatorContent', {
+      message: `${suggestion.id} · ${creatorId.slice(0, 24)}`,
+      data: { id: suggestion.id, creator: creatorId.slice(0, 32), content: identity.key.slice(0, 32), account: account.id.slice(0, 16) },
+    });
     return { suggestion, newInfo: true, credited: 0 };
   }
 
@@ -2120,6 +2299,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     suggestion.credited = credited;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:acceptCreatorContent', {
+      message: `${suggestion.id} accepted · ${credited} credits`,
+      data: { id: suggestion.id, creator: suggestion.creatorId.slice(0, 32), content: suggestion.contentId.slice(0, 32), credited },
+    });
     return credited;
   }
 
@@ -2150,6 +2333,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     };
     store[suggestion.id] = suggestion;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:suggestCreatorIcon', {
+      message: `${suggestion.id} · ${creatorId.slice(0, 24)}`,
+      data: { id: suggestion.id, creator: creatorId.slice(0, 32), account: account.id.slice(0, 16) },
+    });
     return { suggestion, newInfo: true, credited: 0 };
   }
 
@@ -2168,6 +2355,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     suggestion.credited = credited;
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.suggestions', 'function:acceptCreatorIcon', {
+      message: `${suggestion.id} accepted · ${credited} credits`,
+      data: { id: suggestion.id, creator: suggestion.creatorId.slice(0, 32), credited },
+    });
     return credited;
   }
 
@@ -2246,9 +2437,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const newInfo = updated.length > 0;
     let credited = 0;
     let multiplier = 1;
+    // The platform these numbers come from, however the client named it.
+    const source = body.source ? String(body.source).slice(0, 32) : sourceKeyOf({ id: entry.id, adapter: entry.adapter });
     if (newInfo) {
-      const source = body.source ? String(body.source).slice(0, 32) : sourceKeyOf({ id: entry.id, adapter: entry.adapter });
-      multiplier = claimMultiplier(claimRuleFor(this.config.claims, source), metrics, publishedAt ?? entry.publishedAt).multiplier;
+      multiplier = claimMultiplier(claimRuleFor(this.config.claims, source), metrics, publishedAt ?? entry.publishedAt, undefined, this.traces).multiplier;
       const claims = this.config.claims;
       if (claims.base > 0 && this.canEarn(account) && this.ledger.daily(account, 'claims') < claims.dailyCap) {
         this.ledger.addDaily(account, 'claims', 1);
@@ -2260,6 +2452,18 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       entry.updatedAt = new Date().toISOString();
       this.registry.changed();
     }
+    // What came of the platform metrics this client reported (one event per claim).
+    this.traces.trace('dependency', 'algorithm.metrics', 'function:claim', {
+      message: `${source.slice(0, 24)} · ${newInfo ? `${updated.length} new` : 'nothing new'}`,
+      data: {
+        platform: source.slice(0, 32),
+        ok: newInfo,
+        updated: updated.length,
+        credited,
+        multiplier: Math.round(multiplier * 100) / 100,
+        account: account.id.slice(0, 16),
+      },
+    });
     return { known, newInfo, credited, multiplier, updated };
   }
 
@@ -2305,6 +2509,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.contributions.data.submissions[submission.id] = submission;
     this.contributions.changed();
     if (this.config.policy.autoListSubmissions) this.acceptSubmission(submission, {});
+    this.traces.trace('basic', 'algorithm.submissions', 'function:submit', {
+      message: `${submission.id} · ${identity.key.slice(0, 24)} · ${submission.status}`,
+      data: {
+        id: submission.id,
+        content: identity.key.slice(0, 32),
+        account: account.id.slice(0, 16),
+        thumbnail: submission.hasThumbnail,
+        verifiedCreator: Boolean(verifiedCreator),
+        status: submission.status,
+      },
+    });
     return submission;
   }
 
@@ -2343,6 +2558,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     submission.status = 'accepted';
     submission.reviewedAt = new Date().toISOString();
     this.contributions.changed();
+    this.traces.trace('basic', 'algorithm.submissions', 'function:acceptSubmission', {
+      message: `${submission.id} accepted → ${entry.id.slice(0, 24)}`,
+      data: { id: submission.id, content: entry.id.slice(0, 32), creator: creatorId?.slice(0, 32), account: submission.accountId.slice(0, 16) },
+    });
     return entry;
   }
 
@@ -2676,10 +2895,27 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         body: batch,
         timeoutMs: 120_000,
       });
+      this.traces.trace('dependency', 'algorithm.peers', 'push batch', {
+        message: `${cat} → ${refText.slice(0, 36)} · ${sent} sent`,
+        data: {
+          ref: refText.slice(0, 80),
+          category: cat,
+          sent,
+          done,
+          oversized,
+          accepted: report.entries.accepted + report.topics.accepted + report.creators.accepted + report.groups.accepted + report.comments.accepted,
+          skipped: report.entries.skipped + report.topics.skipped + report.creators.skipped + report.groups.skipped + report.comments.skipped,
+        },
+      });
       return { ...base, category: cat, sent, cursor: done ? null : next, done, report, oversized };
     } catch (error) {
       // The batch did not land: the cursor that was passed in still names it, so the
       // console's Continue/Try again sends exactly this batch again.
+      this.traces.trace('error', 'algorithm.peers', 'push batch', {
+        message: `${cat} → ${refText.slice(0, 36)} · batch kept for retry`,
+        error: (error as Error).message,
+        data: { ref: refText.slice(0, 80), category: cat, sent },
+      });
       return { ...base, category: cat, sent: 0, cursor: cursor ?? null, done: false, error: (error as Error).message, oversized };
     }
   }
@@ -2746,6 +2982,21 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         note(`comments: ${(error as Error).message}`);
       }
     }
+    // One summary per batch — a bad record is skipped and explained back to the pushing
+    // node (tolerated), so it is recorded as the failure it is, without one event per item.
+    const accepted = report.entries.accepted + report.topics.accepted + report.creators.accepted + report.groups.accepted + report.comments.accepted;
+    const skipped = report.entries.skipped + report.topics.skipped + report.creators.skipped + report.groups.skipped + report.comments.skipped;
+    this.traces.trace(skipped ? 'error' : 'basic', 'algorithm.peers', 'function:importPeerBatch', {
+      message: `${accepted} accepted · ${skipped} skipped`,
+      data: {
+        topics: report.topics,
+        creators: report.creators,
+        groups: report.groups,
+        entries: report.entries,
+        comments: report.comments,
+        errors: report.errors.slice(0, 3),
+      },
+    });
     return report;
   }
 
@@ -2959,10 +3210,30 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         let adopted = 0;
         if (job.adopt) for (const item of items) (this.adoptPeerEntry(item), adopted++);
         results.push({ peer: entry.ref, items: items.length, adopted });
+        // One outcome per peer asked (each is its own outgoing call).
+        this.traces.trace('dependency', 'algorithm.peers', 'peer discover', {
+          message: `${entry.ref.slice(0, 48)} · ${items.length} items · ${adopted} adopted`,
+          data: { peer: entry.ref.slice(0, 80), items: items.length, adopted },
+        });
       } catch (error) {
         results.push({ peer: entry.ref, items: 0, adopted: 0, error: (error as Error).message });
+        this.traces.trace('error', 'algorithm.peers', 'peer discover', {
+          message: entry.ref.slice(0, 48),
+          error: (error as Error).message,
+          data: { peer: entry.ref.slice(0, 80) },
+        });
       }
     }
+    // One summary of the round (a peer failing is tolerated — the round goes on).
+    this.traces.trace('basic', 'algorithm.peers', 'function:runPeerSearch', {
+      message: `${results.length} peers · ${results.reduce((sum, r) => sum + r.items, 0)} items`,
+      data: {
+        peers: results.length,
+        items: results.reduce((sum, r) => sum + r.items, 0),
+        adopted: results.reduce((sum, r) => sum + r.adopted, 0),
+        failed: results.filter((r) => r.error).length,
+      },
+    });
     return results;
   }
 
@@ -2971,15 +3242,24 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.stopPeering();
     // A new node with bootstrap seeds finds its first peers right away.
     if (this.config.peering.bootstrap?.length) {
-      void this.bootstrapPeers().catch((error) => log.debug(`Peer bootstrap: ${(error as Error).message}`));
+      void this.bootstrapPeers().catch((error) => {
+        log.debug(`Peer bootstrap: ${(error as Error).message}`);
+        this.traces.trace('error', 'algorithm.peers', 'function:bootstrapPeers', { error: (error as Error).message });
+      });
     }
     const job = this.config.peering.job;
     if (!job.enabled) return;
     const interval = Math.max(5_000, Math.round(Number(job.intervalMs) || 3_600_000));
     this.peeringTimer = setInterval(() => {
-      void this.runPeerSearch().catch((error) => log.debug(`Peer-search job: ${(error as Error).message}`));
+      void this.runPeerSearch().catch((error) => {
+        log.debug(`Peer-search job: ${(error as Error).message}`);
+        this.traces.trace('error', 'algorithm.peers', 'function:runPeerSearch', { error: (error as Error).message });
+      });
       // Keep widening the peer set over time (peer exchange), so reach stays broad.
-      void this.bootstrapPeers().catch((error) => log.debug(`Peer bootstrap: ${(error as Error).message}`));
+      void this.bootstrapPeers().catch((error) => {
+        log.debug(`Peer bootstrap: ${(error as Error).message}`);
+        this.traces.trace('error', 'algorithm.peers', 'function:bootstrapPeers', { error: (error as Error).message });
+      });
     }, interval);
     this.peeringTimer.unref?.();
   }
@@ -3046,6 +3326,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const learned: string[] = [];
     for (const ref of sources) {
       if (learned.length > max * 3) break;
+      const before = learned.length;
       try {
         const answer = await this.peerClient({ ref }).json<{ self?: string; peers?: string[] }>('/v1/peers/peers', { timeoutMs: 15_000 });
         for (const candidate of [answer.self, ...(answer.peers ?? [])]) {
@@ -3053,8 +3334,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           if (!ref2 || known.has(ref2) || learned.includes(ref2)) continue;
           if (parseNodeRef(ref2)) learned.push(ref2);
         }
-      } catch {
+        this.traces.trace('dependency', 'algorithm.peers', 'peer exchange', {
+          message: `${ref.slice(0, 48)} · ${learned.length - before} learned`,
+          data: { peer: ref.slice(0, 80), learned: learned.length - before },
+        });
+      } catch (error) {
         // The seed or peer is offline; try the next one.
+        this.traces.trace('error', 'algorithm.peers', 'peer exchange', {
+          message: ref.slice(0, 48),
+          error: (error as Error).message,
+          data: { peer: ref.slice(0, 80) },
+        });
       }
     }
     const chosen = this.diversify(learned, room);
@@ -3065,6 +3355,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       added.push(ref);
     }
     if (added.length) this.configFile.changed();
+    this.traces.trace('basic', 'algorithm.peers', 'function:bootstrapPeers', {
+      message: `${learned.length} learned · ${added.length} peers added`,
+      data: { learned: learned.length, added: added.length, peers: peering.peers.length },
+    });
     return added;
   }
 
@@ -3169,23 +3463,41 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const entry = this.registry.upsert({ ...rest, origin: rest.origin ?? 'operator' });
       if (typeof thumbnail === 'string') this.registry.setThumbnail(entry.id, thumbnail);
       else this.cacheThumbnail(entry);
+      this.traces.trace('basic', 'algorithm.admin', 'function:saveContent', {
+        message: `${entry.id.slice(0, 24)} · ${entry.status}`,
+        data: { id: entry.id.slice(0, 32), status: entry.status },
+      });
       return this.registry.get(entry.id);
     });
     router.post('/v1/admin/content/:id/block', async (ctx) => {
       admin(ctx);
       const body = await readJson<{ reason?: string }>(ctx.req);
-      return this.registry.block(ctx.params.id, body.reason);
+      const entry = this.registry.block(ctx.params.id, body.reason);
+      this.traces.trace('basic', 'algorithm.admin', 'function:blockContent', {
+        message: `${entry.id.slice(0, 24)} blocked`,
+        data: { id: entry.id.slice(0, 32), reason: (body.reason ?? '').slice(0, 80) },
+      });
+      return entry;
     });
     router.post('/v1/admin/blocklist', async (ctx) => {
       admin(ctx);
       const body = await readJson<{ ids?: string[]; reason?: string }>(ctx.req, 4 * 1024 * 1024);
       const ids = (body.ids ?? []).filter((id) => parseContentId(String(id)));
       for (const id of ids) this.registry.block(id, body.reason);
+      this.traces.trace('basic', 'algorithm.admin', 'function:blockList', {
+        message: `${ids.length} ids blocked`,
+        data: { ids: ids.length, reason: (body.reason ?? '').slice(0, 80) },
+      });
       return { blocked: ids.length };
     });
     router.delete('/v1/admin/content/:id', (ctx) => {
       admin(ctx);
-      return { removed: this.registry.remove(ctx.params.id) };
+      const removed = this.registry.remove(ctx.params.id);
+      this.traces.trace('basic', 'algorithm.admin', 'function:forgetContent', {
+        message: `${ctx.params.id.slice(0, 24)} · ${removed ? 'removed' : 'unknown'}`,
+        data: { id: ctx.params.id.slice(0, 32), removed },
+      });
+      return { removed };
     });
     // The seen-content filters kept here for accounts: the operator may see them all and
     // drop any of them. Expired paid copies are swept up while listing.
@@ -3254,7 +3566,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     // Flushing a page's comment data: every block, vote and hiding goes, the page starts over.
     router.delete('/v1/admin/comments/:id', (ctx) => {
       admin(ctx);
-      return { flushed: this.flushComments(ctx.params.id) };
+      const flushed = this.flushComments(ctx.params.id);
+      this.traces.trace('basic', 'algorithm.admin', 'function:flushComments', {
+        message: `${ctx.params.id.slice(0, 24)} · ${flushed ? 'flushed' : 'no comments'}`,
+        data: { content: baseId(ctx.params.id).slice(0, 32), flushed },
+      });
+      return { flushed };
     });
     router.put('/v1/admin/comments/:id', async (ctx) => {
       admin(ctx);
@@ -3263,6 +3580,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (!section) throw notFound('No comment section on this page');
       section.shown = body.shown !== false;
       this.comments.changed();
+      this.traces.trace('basic', 'algorithm.admin', 'function:setCommentsShown', {
+        message: `${ctx.params.id.slice(0, 24)} · data ${section.shown ? 'shown' : 'withheld'}`,
+        data: { content: baseId(ctx.params.id).slice(0, 32), shown: section.shown, blocks: section.blocks.length },
+      });
       return this.adminComments(ctx.params.id);
     });
     router.post('/v1/admin/comments/:id/:comment/:action', async (ctx) => {
@@ -3274,6 +3595,15 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (ctx.params.action === 'hide' && at < 0) section.hidden.push(ctx.params.comment);
       if (ctx.params.action === 'show' && at >= 0) section.hidden.splice(at, 1);
       this.comments.changed();
+      this.traces.trace('basic', 'algorithm.admin', 'function:setCommentHidden', {
+        message: `${ctx.params.comment.slice(0, 16)} · ${ctx.params.action}`,
+        data: {
+          content: baseId(ctx.params.id).slice(0, 32),
+          comment: ctx.params.comment.slice(0, 24),
+          hidden: ctx.params.action === 'hide',
+          hiddenCount: section.hidden.length,
+        },
+      });
       return this.adminComments(ctx.params.id);
     });
     router.get('/v1/admin/creators', (ctx) => {
@@ -3324,6 +3654,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         suggestion.status = 'rejected';
         suggestion.reviewedAt = new Date().toISOString();
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:rejectSuggestion', {
+          message: `${suggestion.kind} ${suggestion.id} rejected`,
+          data: { id: suggestion.id, kind: suggestion.kind, content: suggestion.contentId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3351,6 +3685,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:deleteCreatorSuggestion', {
+          message: `${ctx.params.id} deleted`,
+          data: { id: ctx.params.id, creator: suggestion.creatorId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3377,6 +3715,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:deleteIconSuggestion', {
+          message: `${ctx.params.id} deleted`,
+          data: { id: ctx.params.id, creator: suggestion.creatorId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3402,6 +3744,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:deleteAccountLink', {
+          message: `${ctx.params.id} deleted`,
+          data: { id: ctx.params.id, creator: proposal.creatorId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3486,6 +3832,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:deleteGroupSuggestion', {
+          message: `${ctx.params.id} deleted`,
+          data: { id: ctx.params.id, group: suggestion.groupId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3544,6 +3894,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       } else if (ctx.params.action === 'delete') {
         delete store[ctx.params.id];
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:deleteTopicSuggestion', {
+          message: `${ctx.params.id} deleted`,
+          data: { id: ctx.params.id, topic: suggestion.topicId.slice(0, 32) },
+        });
       } else throw notFound();
       return { ok: true };
     });
@@ -3573,6 +3927,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         submission.note = body.note;
         submission.reviewedAt = new Date().toISOString();
         this.contributions.changed();
+        this.traces.trace('basic', 'algorithm.admin', 'function:rejectSubmission', {
+          message: `${submission.id} rejected`,
+          data: { id: submission.id, content: submission.contentId.slice(0, 32), note: (body.note ?? '').slice(0, 80) },
+        });
         return submission;
       }
       throw notFound();
@@ -3626,6 +3984,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       const seeds = this.configFile.data.crawler.adapters.web.seeds;
       if (!seeds.includes(url.toString())) seeds.push(url.toString());
       this.configFile.changed();
+      this.traces.trace('basic', 'algorithm.admin', 'function:addSeed', {
+        message: `${url.host} · ${seeds.length} seeds`,
+        data: { url: url.toString().slice(0, 120), seeds: seeds.length },
+      });
       return { seeds };
     });
     router.post('/v1/admin/content/bulk', async (ctx) => {
@@ -3637,6 +3999,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         else if (body.status === 'blocked') this.registry.block(id, body.reason);
         else if (body.status === 'listed') this.registry.upsert({ id, status: 'listed', origin: 'operator' });
       }
+      this.traces.trace('basic', 'algorithm.admin', 'function:bulkReview', {
+        message: `${ids.length} ids · ${body.status ?? 'listed'}`,
+        data: { ids: ids.length, status: body.status ?? 'listed', reason: (body.reason ?? '').slice(0, 80) },
+      });
       return { updated: ids.length };
     });
     router.post('/v1/admin/import', async (ctx) => {
@@ -3683,8 +4049,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           });
           if (answer.entry && body.adopt) this.adoptPeerEntry(answer.entry);
           results.push({ peer: entry.ref, entry: answer.entry ?? undefined });
+          this.traces.trace('dependency', 'algorithm.peers', 'peer metadata', {
+            message: `${entry.ref.slice(0, 48)} · ${answer.entry ? 'found' : 'unknown'}`,
+            data: { peer: entry.ref.slice(0, 80), ref: ref.slice(0, 80), found: Boolean(answer.entry), adopted: Boolean(answer.entry && body.adopt) },
+          });
         } catch (error) {
           results.push({ peer: entry.ref, error: (error as Error).message });
+          this.traces.trace('error', 'algorithm.peers', 'peer metadata', {
+            message: entry.ref.slice(0, 48),
+            error: (error as Error).message,
+            data: { peer: entry.ref.slice(0, 80) },
+          });
         }
       }
       return { results };
@@ -3703,8 +4078,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           });
           if (body.adopt) for (const item of answer.items) this.adoptPeerEntry(item);
           results.push({ peer: entry.ref, items: answer.items });
+          this.traces.trace('dependency', 'algorithm.peers', 'peer discover', {
+            message: `${entry.ref.slice(0, 48)} · ${answer.items.length} items`,
+            data: { peer: entry.ref.slice(0, 80), items: answer.items.length, adopted: body.adopt ? answer.items.length : 0 },
+          });
         } catch (error) {
           results.push({ peer: entry.ref, items: [], error: (error as Error).message });
+          this.traces.trace('error', 'algorithm.peers', 'peer discover', {
+            message: entry.ref.slice(0, 48),
+            error: (error as Error).message,
+            data: { peer: entry.ref.slice(0, 80) },
+          });
         }
       }
       return { results };
@@ -3737,6 +4121,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         items: { cid: string; name: string; createdAt: string; meta?: SubmissionRequest; sources?: string[]; creator?: { id: string; name?: string; kind?: CreatorKind } }[];
         next?: number;
       }>(`${ref.url}/v1/catalog?offset=${offset}&limit=100`, { transport: this.transport(ref.url) });
+      this.traces.trace('dependency', 'algorithm.import', 'provider catalog', {
+        message: `${ref.url.slice(0, 40)} · ${page.items.length} items`,
+        data: { provider: ref.url.slice(0, 80), offset, items: page.items.length },
+      });
       for (const item of page.items) {
         const id = [item.cid, ...(item.sources ?? [])].join('~');
         const known = this.registry.get(item.cid);
@@ -3777,6 +4165,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
     this.contributions.changed();
     log.info(`Queued ${queued} items from ${ref.url} for review`);
+    this.traces.trace('basic', 'algorithm.import', 'function:importCatalog', {
+      message: `${queued} queued · ${skipped} skipped`,
+      data: { provider: ref.url.slice(0, 80), queued, skipped },
+    });
     return { queued, skipped };
   }
 
@@ -3785,7 +4177,13 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     try {
       const manifest = validateManifest(await requestJson(`${providerUrl}/v1/content/${cid}`, { transport: this.transport(providerUrl) }));
       return contentIdOf(manifest) === cid ? manifest.creator?.id : undefined;
-    } catch {
+    } catch (error) {
+      // The manifest check is swallowed into "no verified creator"; the import goes on.
+      this.traces.trace('error', 'algorithm.import', 'function:verifyCreator', {
+        message: `${cid.slice(0, 24)} unverifiable`,
+        error: (error as Error).message,
+        data: { cid: cid.slice(0, 32), provider: providerUrl.slice(0, 80) },
+      });
       return undefined;
     }
   }

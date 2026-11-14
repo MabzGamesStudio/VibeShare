@@ -1,5 +1,7 @@
 import { log } from '../../shared/log.js';
 import { JsonFile } from '../../shared/store.js';
+import { currentTraceId } from '../../shared/tracecontext.js';
+import type { TraceStore } from '../../shared/tracing-node.js';
 import { TOPICS, type Rating } from '../../shared/taxonomy.js';
 import { flickr, openverse, wikimedia, type FlickrConfig, type OpenverseConfig, type WikimediaConfig } from './adapters/images.js';
 import { bluesky, lemmy, mastodon, type BlueskyConfig, type LemmyConfig, type MastodonConfig } from './adapters/social.js';
@@ -224,7 +226,9 @@ export class Crawler {
     statePath: string | null,
     private readonly ingest: Ingest,
     /** A fetch through Tor for this URL when the node sends the crawler through Tor. */
-    transport?: (url: URL) => typeof fetch | undefined
+    transport?: (url: URL) => typeof fetch | undefined,
+    /** The node's trace log, when it keeps one: cycles, adapter fetches and failures. */
+    private readonly traces?: TraceStore
   ) {
     this.fetcher = new PoliteFetcher({
       userAgent: config().userAgent,
@@ -357,6 +361,7 @@ export class Crawler {
     const id = adapter?.id ?? 'none';
     return {
       fetcher: this.fetcher,
+      traces: this.traces,
       api: async (url, request = {}) => {
         const units = Math.max(1, request.units ?? 1);
         if (!this.budgetLeft(id, purpose, units)) throw new BudgetUsed(id);
@@ -447,6 +452,15 @@ export class Crawler {
     stats.runs++;
     stats.lastRun = new Date().toISOString();
     this.store.changed();
+    // One timeline per unit of crawl work (joining the request's own when an operator
+    // runs one by hand), so the start, the fetch outcome and the finish sit together.
+    const traceId = this.traces ? (currentTraceId() ?? this.traces.recorder.start({ kind: 'api', label: `crawl:${lane}` })) : undefined;
+    const started = Date.now();
+    this.traces?.trace('basic', 'algorithm.crawler', 'crawl cycle start', {
+      traceId,
+      message: `${lane}${target ? ` · ${target.slice(0, 60)}` : ''}`,
+      data: { adapter: lane, target: (target ?? '').slice(0, 120) || undefined },
+    });
     let found = 0;
     let added = 0;
     let unit: string | undefined = target;
@@ -485,15 +499,32 @@ export class Crawler {
         added = this.take(result.items, lane);
         if (result.links?.length) this.queueLinks(result.links.map((link) => ({ url: link.url })), []);
       }
+      // The adapter's fetch outcome for this unit (one per platform fetch).
+      this.traces?.trace('dependency', 'algorithm.crawler', 'fetch outcome', {
+        traceId,
+        message: `${lane} · ${(unit ?? '').slice(0, 60)} · ${found} found`,
+        data: { adapter: lane, target: (unit ?? '').slice(0, 120), found, added },
+      });
     } catch (error) {
       // A spent budget is not a failure: that adapter rests until tomorrow.
       if (error instanceof BudgetUsed) return { adapter: lane, target: unit, found: 0, added: 0 };
       if (error instanceof RobotsDisallowed || error instanceof SiteBlocked) stats.blocked++;
       else stats.errors++;
       stats.lastError = `${unit ?? ''}: ${this.explain(error)}`.slice(0, 300);
+      this.traces?.trace('error', 'algorithm.crawler', 'fetch outcome', {
+        traceId,
+        message: `${lane} · ${(unit ?? '').slice(0, 60)}`,
+        error: this.explain(error),
+        data: { adapter: lane, target: (unit ?? '').slice(0, 120), blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked },
+      });
       throw error;
     } finally {
       this.store.changed();
+      this.traces?.trace('basic', 'algorithm.crawler', 'crawl cycle finish', {
+        traceId,
+        message: `${lane} · ${found} found · ${added} added · ${Date.now() - started} ms`,
+        data: { adapter: lane, target: (unit ?? '').slice(0, 120), units: 1, found, added, ms: Date.now() - started },
+      });
     }
     return { adapter: lane, target: unit, found, added };
   }
@@ -530,19 +561,35 @@ export class Crawler {
               const stats = this.stats(adapter.id);
               try {
                 const items = await adapter.search!(this.contextFor(adapter, 'search'), this.adapterConfig(adapter.id), text);
-                return this.take(items, adapter.id);
+                const added = this.take(items, adapter.id);
+                // One outcome per platform the query fanned out to.
+                this.traces?.trace('dependency', 'algorithm.crawler', 'search outcome', {
+                  message: `${adapter.id} · "${text.slice(0, 40)}" · ${added} added`,
+                  data: { adapter: adapter.id, query: text.slice(0, 60), found: items.length, added },
+                });
+                return added;
               } catch (error) {
                 if (error instanceof BudgetUsed) return 0;
                 if (error instanceof RobotsDisallowed || error instanceof SiteBlocked) stats.blocked++;
                 else stats.errors++;
                 stats.lastError = `search "${text}": ${this.explain(error)}`.slice(0, 300);
+                this.traces?.trace('error', 'algorithm.crawler', 'search outcome', {
+                  message: `${adapter.id} · "${text.slice(0, 40)}"`,
+                  error: this.explain(error),
+                  data: { adapter: adapter.id, query: text.slice(0, 60), blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked },
+                });
                 return 0;
               }
             })
         );
         this.searchCache.set(key, Date.now() + config.searchCacheMinutes * 60_000);
         if (this.searchCache.size > 1000) this.searchCache.delete(this.searchCache.keys().next().value!);
-        return results.reduce((sum, count) => sum + count, 0);
+        const total = results.reduce((sum, count) => sum + count, 0);
+        this.traces?.trace('basic', 'algorithm.crawler', 'function:search', {
+          message: `"${text.slice(0, 40)}" · ${total} added from ${results.length} platforms`,
+          data: { query: key.slice(0, 60), adapters: results.length, added: total },
+        });
+        return total;
       })().finally(() => this.searching.delete(key));
     if (!running) this.searching.set(key, all);
     const timeout = new Promise<number>((resolve) => {

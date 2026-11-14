@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import type { TraceStore } from '../../shared/tracing-node.js';
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -24,7 +25,7 @@ export interface S3SignInput {
 }
 
 /** AWS Signature Version 4 for S3 requests. Returns the headers to send (including Authorization). */
-export function signS3Request(input: S3SignInput): Record<string, string> {
+export function signS3Request(input: S3SignInput, traces?: TraceStore): Record<string, string> {
   const date = input.date ?? new Date();
   const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '');
   const day = amzDate.slice(0, 8);
@@ -56,6 +57,10 @@ export function signS3Request(input: S3SignInput): Record<string, string> {
   const signingKey = hmac(hmac(hmac(hmac(`AWS4${input.secretAccessKey}`, day), input.region), service), 'aws4_request');
   const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
   const { host: _host, ...rest } = headers;
+  // Signing is the prelude to an S3 request — one dependency line per signed call.
+  if (traces?.recorder.shouldLog('dependency')) {
+    traces.trace('dependency', 'provider.s3sign', 'sign request', { data: { method: input.method, host: input.url.host, service } });
+  }
   return {
     ...rest,
     authorization: `AWS4-HMAC-SHA256 Credential=${input.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,

@@ -115,7 +115,13 @@ export async function identifyLink(ctx: CrawlContext, link: string, hint?: { tit
   if (endpoint) {
     try {
       data = (await ctx.fetcher.get(endpoint, { accept: 'application/json', maxBytes: 200_000 })).json<OEmbed>();
-    } catch {
+    } catch (error) {
+      // The oEmbed answer is swallowed here when a title hint stands in (or nothing comes of it).
+      ctx.traces?.trace('error', 'algorithm.oembed', 'function:identifyLink', {
+        message: `${platform} · ${link.slice(0, 60)}`,
+        error: (error as Error).message,
+        data: { platform, link: link.slice(0, 120) },
+      });
       if (!hint?.title) return null; // nothing to show for it
     }
   }

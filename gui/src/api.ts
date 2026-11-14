@@ -4,6 +4,7 @@
 // development it can be passed as ?t=… instead.
 
 import type { NodeEntry } from '../../src/shared/clientapi';
+import type { TraceSettings } from '../../src/shared/tracing';
 import { APP_BASE } from './util';
 
 /** True in the static web build (normal routes, backend in the browser). */
@@ -58,6 +59,65 @@ function authHeaders(): Record<string, string> {
   return token ? { 'x-vs-token': token } : {};
 }
 
+// ---------------------------------------------------------------------------
+// User-action tracing (Settings → Logging → Trace logs)
+//
+// While the user has trace logs on with the detailed level, every click and change
+// starts one timeline in the daemon's trace log: a detail event posted to
+// /api/tracing/events carries the fresh trace id, and the API calls that follow send
+// it as `x-vs-trace` so the daemon's request timeline joins the same one. Off by
+// default — with the setting off nothing is posted and no header is sent.
+
+/** How long a user-action trace id keeps tagging the API calls that follow it. */
+const ACTION_TRACE_MS = 30_000;
+
+let traceDetail = false;
+let actionTrace: { id: string; until: number } | null = null;
+
+/** Kept fresh from the client settings (state.tsx); off turns the whole feature quiet. */
+export function setTraceSettings(settings: TraceSettings | null): void {
+  traceDetail = Boolean(settings?.enabled && settings?.levels.detail);
+  if (!traceDetail) actionTrace = null;
+}
+
+/** Whether user actions are being traced right now (guard before any label building). */
+export function userActionsTraced(): boolean {
+  return traceDetail;
+}
+
+/** The trace id of the last user action, until its short expiry lapses. */
+function currentActionTrace(): string | undefined {
+  if (!traceDetail || !actionTrace) return undefined;
+  if (Date.now() > actionTrace.until) {
+    actionTrace = null;
+    return undefined;
+  }
+  return actionTrace.id;
+}
+
+function startAction(label: string): void {
+  if (!traceDetail) return;
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  actionTrace = { id, until: Date.now() + ACTION_TRACE_MS };
+  // Fire and forget, and never through api(): a trace line neither fails what the user
+  // was doing nor starts a timeline of its own for its own logging.
+  send('/api/tracing/events', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'content-type': 'application/json' },
+    body: JSON.stringify({ level: 'detail', component: 'gui', action: label, traceId: id, initiator: { kind: 'user-action', label } }),
+  }).catch(() => undefined);
+}
+
+/** One user action (a button, a link): its own timeline, which the next calls join. */
+export function traceAction(label: string): void {
+  startAction(label);
+}
+
+/** One change (a field, a toggle): recorded and followed exactly the same way. */
+export function traceChange(label: string): void {
+  startAction(label);
+}
+
 /**
  * Calls the listener with the node list (status and credits) whenever it changes in the
  * client backend: Server-Sent Events from the daemon, messages from the web client's
@@ -94,9 +154,11 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  const trace = currentActionTrace();
   const response = await send(path, {
     method: init.method ?? (init.body !== undefined ? 'POST' : 'GET'),
-    headers: { ...authHeaders(), 'content-type': 'application/json' },
+    // The user action's trace id (when one is current) joins this call to its timeline.
+    headers: { ...authHeaders(), ...(trace ? { 'x-vs-trace': trace } : {}), 'content-type': 'application/json' },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
   const text = await response.text();

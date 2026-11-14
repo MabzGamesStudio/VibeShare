@@ -1,6 +1,7 @@
 // Where content comes from ("source origin types"): VibeShare itself or another platform.
 // Operators choose which sources the crawler may use and how strongly each is favoured.
 import { parseContentId } from '../shared/sources.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 
 export interface SourceInfo {
   key: string;
@@ -130,10 +131,20 @@ export function priorityOf(key: string, priorities: Record<string, number>): num
  * ranking's order is kept within a source). With every source at the same priority the
  * ranking is unchanged.
  */
-export function prioritize<T extends { id: string; adapter?: string }>(items: T[], priorities: Record<string, number>): T[] {
-  return items
+export function prioritize<T extends { id: string; adapter?: string }>(
+  items: T[],
+  priorities: Record<string, number>,
+  /** The node's trace log, when it keeps one: one summary of how the weights applied. */
+  traces?: TraceStore
+): T[] {
+  const kept = items
     .map((item, index) => ({ item, index, priority: priorityOf(sourceKeyOf(item), priorities) }))
     .filter(({ priority }) => priority > 0)
     .sort((a, b) => b.priority - a.priority || a.index - b.index)
     .map(({ item }) => item);
+  traces?.trace('basic', 'algorithm.sources', 'function:prioritize', {
+    message: `${kept.length} of ${items.length} items kept by source priority`,
+    data: { items: items.length, kept: kept.length, hidden: items.length - kept.length },
+  });
+  return kept;
 }

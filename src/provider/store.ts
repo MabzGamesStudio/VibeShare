@@ -1,6 +1,7 @@
 import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../shared/content.js';
 import { log } from '../shared/log.js';
 import { JsonFile } from '../shared/store.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 import type { BlobBackend } from './storage/backends.js';
 
 export interface ChunkRecord {
@@ -86,6 +87,8 @@ export interface StoreOptions {
   chunkPeers?: (chunkId: string) => Promise<Buffer | null>;
   /** Write chunks fetched from peers or read-only backends back into writable backends. */
   cacheFetched?: () => boolean;
+  /** The node's trace log (off by default; absent keeps every hook a no-op). */
+  traces?: TraceStore;
 }
 
 /**
@@ -129,10 +132,31 @@ export class ContentStore {
         stored++;
       } catch (error) {
         log.warn(`Backend ${backend.id} failed to store ${id.slice(0, 12)}: ${(error as Error).message}`);
+        this.options.traces?.trace('error', 'provider.store', 'chunk store failed', {
+          error: (error as Error).message,
+          data: { backend: backend.id, chunk: id.slice(0, 12) },
+        });
       }
     }
-    if (stored === 0) throw new Error('No storage backend accepted the chunk');
+    if (stored === 0) {
+      this.options.traces?.trace('error', 'provider.store', 'chunk store failed', { message: 'no storage backend accepted the chunk', data: { chunk: id.slice(0, 12) } });
+      throw new Error('No storage backend accepted the chunk');
+    }
     this.index.changed();
+    // One summary line per write; the guard keeps the hot per-chunk loops allocation-free
+    // while tracing is off.
+    const traces = this.options.traces;
+    if (traces?.recorder.shouldLog('basic')) {
+      traces.trace('basic', 'provider.store', 'chunk stored', { data: { chunk: id.slice(0, 12), bytes: data.length, backends: stored } });
+    }
+  }
+
+  /** One summary line per read outcome; guarded so hot reads stay allocation-free when off. */
+  private readTrace(id: string, bytes: number, from: string): void {
+    const traces = this.options.traces;
+    if (traces?.recorder.shouldLog('basic')) {
+      traces.trace('basic', 'provider.store', 'chunk read', { data: { chunk: id.slice(0, 12), bytes, from } });
+    }
   }
 
   /**
@@ -141,7 +165,10 @@ export class ContentStore {
    */
   async getChunk(id: string, options: { peers?: boolean } = {}): Promise<Buffer | null> {
     const cached = this.cache.get(id);
-    if (cached) return cached;
+    if (cached) {
+      this.readTrace(id, cached.length, 'cache');
+      return cached;
+    }
     const record = this.index.data.chunks[id];
     const backends = this.sortedBackends();
     const known = backends.filter((backend) => record && backend.id in record.locations);
@@ -152,13 +179,22 @@ export class ContentStore {
         if (!data) continue;
         if (chunkIdOf(data) !== id) {
           log.warn(`Backend ${backend.id} returned wrong bytes for ${id.slice(0, 12)}`);
+          this.options.traces?.trace('error', 'provider.store', 'chunk read failed', {
+            message: 'a backend returned bytes that do not match the chunk id',
+            data: { backend: backend.id, chunk: id.slice(0, 12) },
+          });
           continue;
         }
         this.cache.set(id, data);
         if (!known.includes(backend) && record) await this.remember(id, data, backend);
+        this.readTrace(id, data.length, backend.id);
         return data;
       } catch (error) {
         log.debug(`Backend ${backend.id} could not read ${id.slice(0, 12)}: ${(error as Error).message}`);
+        this.options.traces?.trace('error', 'provider.store', 'chunk read failed', {
+          error: (error as Error).message,
+          data: { backend: backend.id, chunk: id.slice(0, 12) },
+        });
       }
     }
     if (this.options.peerFallback && options.peers !== false) {
@@ -166,6 +202,8 @@ export class ContentStore {
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
         if (record) await this.remember(id, data);
+        // Client holders of the storage service handed the bytes over (a paid retrieval).
+        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from holders', { data: { chunk: id.slice(0, 12), bytes: data.length } });
         return data;
       }
     }
@@ -175,8 +213,19 @@ export class ContentStore {
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
         if (record) await this.remember(id, data);
+        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from peers', { data: { chunk: id.slice(0, 12), bytes: data.length } });
         return data;
       }
+    }
+    if (record) {
+      // The index says this chunk is stored, yet nothing could read it: a real read
+      // failure, not just a miss.
+      this.options.traces?.trace('error', 'provider.store', 'chunk read failed', {
+        message: 'stored chunk could not be read from any source',
+        data: { chunk: id.slice(0, 12) },
+      });
+    } else {
+      this.readTrace(id, 0, 'none');
     }
     return null;
   }
@@ -213,7 +262,18 @@ export class ContentStore {
     // Manifests are tiny; keeping copies next to the chunks lets another node (or a
     // reinstall) pointed at the same storage recover the content.
     const writable = this.sortedBackends().filter((b) => b.writable).slice(0, Math.max(1, this.options.replication()));
-    await Promise.all(writable.map((backend) => backend.put(`m-${cid}`, Buffer.from(text)).catch(() => undefined)));
+    await Promise.all(
+      writable.map((backend) =>
+        backend.put(`m-${cid}`, Buffer.from(text)).catch((error) => {
+          // Tolerated: these copies are a recovery aid, the index already holds the
+          // manifest, so a failing one must not fail the content.
+          this.options.traces?.trace('error', 'provider.store', 'manifest copy failed', {
+            error: (error as Error).message,
+            data: { backend: backend.id, cid: cid.slice(0, 16) },
+          });
+        })
+      )
+    );
     const record: ContentRecord = {
       cid,
       name: manifest.name,
@@ -231,6 +291,9 @@ export class ContentStore {
     this.index.data.contents[cid] = record;
     this.index.data.order.push(cid);
     this.index.changed();
+    this.options.traces?.trace('basic', 'provider.store', 'content added', {
+      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size, uploader: uploader.slice(0, 16) },
+    });
     return record;
   }
 
@@ -264,6 +327,9 @@ export class ContentStore {
     this.index.data.contents[cid] = record;
     this.index.data.order.push(cid);
     this.index.changed();
+    this.options.traces?.trace('basic', 'provider.store', 'content adopted', {
+      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size },
+    });
     return record;
   }
 
@@ -321,7 +387,8 @@ export class ContentStore {
     delete this.index.data.manifests[cid];
     this.index.data.order = this.index.data.order.filter((id) => id !== cid);
     const backends = this.options.backends();
-    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) {
+    const ids = new Set(manifest.chunks.map((chunk) => chunk.id));
+    for (const id of ids) {
       const record = this.index.data.chunks[id];
       if (!record) continue;
       record.refs--;
@@ -335,6 +402,7 @@ export class ContentStore {
     }
     for (const backend of backends.filter((b) => b.writable)) await backend.delete(`m-${cid}`).catch(() => undefined);
     this.index.changed();
+    this.options.traces?.trace('basic', 'provider.store', 'content deleted', { data: { cid: cid.slice(0, 16), chunks: ids.size } });
     return true;
   }
 
@@ -347,7 +415,8 @@ export class ContentStore {
     const manifest = this.getManifest(cid);
     if (!manifest) return false;
     const backends = this.options.backends();
-    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) {
+    const ids = new Set(manifest.chunks.map((chunk) => chunk.id));
+    for (const id of ids) {
       const record = this.index.data.chunks[id];
       if (!record) continue;
       for (const [backendId, locator] of Object.entries(record.locations)) {
@@ -357,6 +426,7 @@ export class ContentStore {
       this.cache.delete(id);
     }
     this.index.changed();
+    this.options.traces?.trace('basic', 'provider.store', 'content bytes released', { data: { cid: cid.slice(0, 16), chunks: ids.size } });
     return true;
   }
 
@@ -385,6 +455,7 @@ export class ContentStore {
       removed++;
     }
     if (removed) this.index.changed();
+    this.options.traces?.trace('basic', 'provider.store', 'garbage collected', { data: { removed } });
     return removed;
   }
 

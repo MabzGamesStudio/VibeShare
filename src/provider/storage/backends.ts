@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { request, RemoteError } from '../../shared/http.js';
+import type { TraceStore } from '../../shared/tracing-node.js';
 import { signS3Request } from './s3sign.js';
 
 /**
@@ -95,22 +96,48 @@ function shard(key: string): string {
   return key.slice(3, 5) || '00';
 }
 
+/**
+ * One line per backend operation — dependency, because a backend is an external store
+ * this node calls; a failed operation gets an error line instead. The guard inside keeps
+ * the hot per-chunk calls allocation-free while tracing is off.
+ */
+function backendTrace(
+  traces: TraceStore | undefined,
+  id: string,
+  level: 'dependency' | 'error',
+  action: string,
+  key: string,
+  detail: Record<string, unknown> = {},
+  error?: string
+): void {
+  if (!traces?.recorder.shouldLog(level)) return;
+  traces.trace(level, 'provider.backends', action, { data: { backend: id, key: key.slice(0, 16), ...detail }, error });
+}
+
 export class MemoryBackend implements BlobBackend {
   readonly type = 'memory';
   readonly writable: boolean;
   private blobs = new Map<string, Buffer>();
-  constructor(readonly id: string, config?: CommonConfig) {
+  constructor(
+    readonly id: string,
+    config?: CommonConfig,
+    private readonly traces?: TraceStore
+  ) {
     this.writable = config?.write !== false;
   }
   async put(key: string, data: Buffer) {
     this.blobs.set(key, Buffer.from(data));
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
     return undefined;
   }
   async get(key: string) {
-    return this.blobs.get(key) ?? null;
+    const data = this.blobs.get(key) ?? null;
+    backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: Boolean(data), bytes: data?.length ?? 0 });
+    return data;
   }
   async delete(key: string) {
     this.blobs.delete(key);
+    backendTrace(this.traces, this.id, 'dependency', 'delete', key);
   }
   async check() {
     return { ok: true, detail: `${this.blobs.size} blobs in memory` };
@@ -121,7 +148,12 @@ export class LocalBackend implements BlobBackend {
   readonly type = 'local';
   readonly writable: boolean;
   private dir: string;
-  constructor(readonly id: string, config: LocalBackendConfig, dataDir: string | null) {
+  constructor(
+    readonly id: string,
+    config: LocalBackendConfig,
+    dataDir: string | null,
+    private readonly traces?: TraceStore
+  ) {
     this.dir = isAbsolute(config.path) || !dataDir ? config.path : join(dataDir, config.path);
     this.writable = config.write !== false;
   }
@@ -130,22 +162,33 @@ export class LocalBackend implements BlobBackend {
   }
   async put(key: string, data: Buffer) {
     const file = this.file(key);
-    if (existsSync(file)) return undefined;
+    if (existsSync(file)) {
+      backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length, existed: true });
+      return undefined;
+    }
     await mkdir(join(this.dir, shard(key)), { recursive: true });
     const temp = `${file}.${process.pid}.tmp`;
     await writeFile(temp, data);
     await rename(temp, file);
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
     return undefined;
   }
   async get(key: string) {
     try {
-      return await readFile(this.file(key));
-    } catch {
+      const data = await readFile(this.file(key));
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+      return data;
+    } catch (error) {
+      // A missing file is a normal miss; anything else is a read failure that this
+      // catch swallows into null.
+      const miss = (error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR';
+      backendTrace(this.traces, this.id, miss ? 'dependency' : 'error', 'get', key, { found: false }, miss ? undefined : (error as Error).message);
       return null;
     }
   }
   async delete(key: string) {
     await rm(this.file(key), { force: true });
+    backendTrace(this.traces, this.id, 'dependency', 'delete', key);
   }
   async check() {
     try {
@@ -164,7 +207,8 @@ export class S3Backend implements BlobBackend {
   readonly writable: boolean;
   constructor(
     readonly id: string,
-    private config: S3BackendConfig
+    private config: S3BackendConfig,
+    private readonly traces?: TraceStore
   ) {
     this.writable = config.write !== false;
   }
@@ -182,31 +226,53 @@ export class S3Backend implements BlobBackend {
   }
 
   private async send(method: string, url: URL, body?: Buffer): Promise<Response> {
-    const headers = signS3Request({
-      method,
-      url,
-      body,
-      region: this.config.region,
-      accessKeyId: this.config.accessKeyId,
-      secretAccessKey: this.config.secretAccessKey,
-    });
+    const headers = signS3Request(
+      {
+        method,
+        url,
+        body,
+        region: this.config.region,
+        accessKeyId: this.config.accessKeyId,
+        secretAccessKey: this.config.secretAccessKey,
+      },
+      this.traces
+    );
     return fetch(url, { method, headers, body, signal: AbortSignal.timeout(60000) });
   }
 
   async put(key: string, data: Buffer) {
     const response = await this.send('PUT', this.url(key), data);
-    if (!response.ok) throw new Error(`S3 PUT ${key}: ${response.status} ${await response.text()}`);
+    if (!response.ok) {
+      const message = `S3 PUT ${key}: ${response.status} ${await response.text()}`;
+      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      throw new Error(message);
+    }
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
     return undefined;
   }
   async get(key: string) {
     const response = await this.send('GET', this.url(key));
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`S3 GET ${key}: ${response.status}`);
-    return Buffer.from(await response.arrayBuffer());
+    if (response.status === 404) {
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+      return null;
+    }
+    if (!response.ok) {
+      const message = `S3 GET ${key}: ${response.status}`;
+      backendTrace(this.traces, this.id, 'error', 'get', key, { status: response.status }, message);
+      throw new Error(message);
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+    return data;
   }
   async delete(key: string) {
     const response = await this.send('DELETE', this.url(key));
-    if (!response.ok && response.status !== 404) throw new Error(`S3 DELETE ${key}: ${response.status}`);
+    if (!response.ok && response.status !== 404) {
+      const message = `S3 DELETE ${key}: ${response.status}`;
+      backendTrace(this.traces, this.id, 'error', 'delete', key, { status: response.status }, message);
+      throw new Error(message);
+    }
+    backendTrace(this.traces, this.id, 'dependency', 'delete', key);
   }
   async check() {
     try {
@@ -228,7 +294,8 @@ export class WebDavBackend implements BlobBackend {
   private madeDirs = new Set<string>();
   constructor(
     readonly id: string,
-    private config: WebDavBackendConfig
+    private config: WebDavBackendConfig,
+    private readonly traces?: TraceStore
   ) {
     this.writable = config.write !== false;
   }
@@ -244,21 +311,43 @@ export class WebDavBackend implements BlobBackend {
     const dir = shard(key);
     if (!this.madeDirs.has(dir)) {
       const made = await fetch(`${this.base()}/${dir}/`, { method: 'MKCOL', headers: this.headers() });
-      if (!made.ok && made.status !== 405 && made.status !== 301) throw new Error(`WebDAV MKCOL: ${made.status}`);
+      if (!made.ok && made.status !== 405 && made.status !== 301) {
+        const message = `WebDAV MKCOL: ${made.status}`;
+        backendTrace(this.traces, this.id, 'error', 'put', key, { status: made.status }, message);
+        throw new Error(message);
+      }
       this.madeDirs.add(dir);
     }
     const response = await fetch(`${this.base()}/${dir}/${key}`, { method: 'PUT', headers: this.headers(), body: data });
-    if (!response.ok) throw new Error(`WebDAV PUT ${key}: ${response.status}`);
+    if (!response.ok) {
+      const message = `WebDAV PUT ${key}: ${response.status}`;
+      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      throw new Error(message);
+    }
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
     return undefined;
   }
   async get(key: string) {
     const response = await fetch(`${this.base()}/${shard(key)}/${key}`, { headers: this.headers() });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`WebDAV GET ${key}: ${response.status}`);
-    return Buffer.from(await response.arrayBuffer());
+    if (response.status === 404) {
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+      return null;
+    }
+    if (!response.ok) {
+      const message = `WebDAV GET ${key}: ${response.status}`;
+      backendTrace(this.traces, this.id, 'error', 'get', key, { status: response.status }, message);
+      throw new Error(message);
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+    return data;
   }
   async delete(key: string) {
-    await fetch(`${this.base()}/${shard(key)}/${key}`, { method: 'DELETE', headers: this.headers() });
+    const response = await fetch(`${this.base()}/${shard(key)}/${key}`, { method: 'DELETE', headers: this.headers() });
+    // The status is ignored on purpose (delete is idempotent) — a failing one is still
+    // worth an error line so it is not invisible.
+    if (!response.ok && response.status !== 404) backendTrace(this.traces, this.id, 'error', 'delete', key, { status: response.status }, `WebDAV DELETE ${key}: ${response.status}`);
+    else backendTrace(this.traces, this.id, 'dependency', 'delete', key);
   }
   async check() {
     try {
@@ -275,7 +364,8 @@ export class IpfsBackend implements BlobBackend {
   readonly writable: boolean;
   constructor(
     readonly id: string,
-    private config: IpfsBackendConfig
+    private config: IpfsBackendConfig,
+    private readonly traces?: TraceStore
   ) {
     this.writable = config.write !== false;
   }
@@ -293,22 +383,45 @@ export class IpfsBackend implements BlobBackend {
       body: form,
       headers: this.headers(),
     });
-    if (!response.ok) throw new Error(`IPFS add: ${response.status}`);
+    if (!response.ok) {
+      const message = `IPFS add: ${response.status}`;
+      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      throw new Error(message);
+    }
     const text = await response.text();
     const result = JSON.parse(text.trim().split('\n').pop() ?? '{}') as { Hash?: string };
-    if (!result.Hash) throw new Error('IPFS add returned no hash');
+    if (!result.Hash) {
+      backendTrace(this.traces, this.id, 'error', 'put', key, {}, 'IPFS add returned no hash');
+      throw new Error('IPFS add returned no hash');
+    }
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
     return result.Hash;
   }
   async get(_key: string, locator?: string) {
-    if (!locator) return null;
+    if (!locator) {
+      backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: false });
+      return null;
+    }
     const response = this.config.gatewayUrl
       ? await fetch(`${this.config.gatewayUrl.replace(/\/$/, '')}/ipfs/${locator}`)
       : await fetch(this.api(`cat?arg=${locator}`), { method: 'POST', headers: this.headers() });
-    if (!response.ok) return null;
-    return Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      // No locator content at404; anything else is a swallowed failure.
+      if (response.status !== 404) backendTrace(this.traces, this.id, 'error', 'get', _key, { status: response.status }, `IPFS get: ${response.status}`);
+      else backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: false, status: 404 });
+      return null;
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: true, bytes: data.length });
+    return data;
   }
   async delete(_key: string, locator?: string) {
-    if (locator) await fetch(this.api(`pin/rm?arg=${locator}`), { method: 'POST', headers: this.headers() });
+    if (locator) {
+      const response = await fetch(this.api(`pin/rm?arg=${locator}`), { method: 'POST', headers: this.headers() });
+      // Unpin failures are ignored on purpose — the trace line keeps them visible.
+      if (!response.ok) backendTrace(this.traces, this.id, 'error', 'delete', _key, { status: response.status }, `IPFS pin/rm: ${response.status}`);
+      else backendTrace(this.traces, this.id, 'dependency', 'delete', _key);
+    }
   }
   async check() {
     try {
@@ -326,7 +439,8 @@ export class HttpBackend implements BlobBackend {
   readonly writable = false;
   constructor(
     readonly id: string,
-    private config: HttpBackendConfig
+    private config: HttpBackendConfig,
+    private readonly traces?: TraceStore
   ) {}
   async put(): Promise<string | undefined> {
     throw new Error('HTTP mirrors are read-only');
@@ -337,9 +451,17 @@ export class HttpBackend implements BlobBackend {
         headers: this.config.headers,
         timeoutMs: 30000,
       });
-      return Buffer.from(await response.arrayBuffer());
+      const data = Buffer.from(await response.arrayBuffer());
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+      return data;
     } catch (error) {
-      if (error instanceof RemoteError && error.status === 404) return null;
+      if (error instanceof RemoteError && error.status === 404) {
+        backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+        return null;
+      }
+      // Rethrown to the caller; the failure is traced here because this catch knows
+      // which mirror it came from.
+      backendTrace(this.traces, this.id, 'error', 'get', key, {}, (error as Error).message);
       throw error;
     }
   }
@@ -356,14 +478,25 @@ export class ProviderBackend implements BlobBackend {
   constructor(
     readonly id: string,
     private fetchChunk: (key: string) => Promise<Buffer | null>,
-    private describe: () => Promise<{ ok: boolean; detail: string }>
+    private describe: () => Promise<{ ok: boolean; detail: string }>,
+    private readonly traces?: TraceStore
   ) {}
   async put(): Promise<string | undefined> {
     throw new Error('Other providers are read-only backends');
   }
   async get(key: string) {
-    if (!key.startsWith('vc1') && !key.startsWith('m-vs1')) return null;
-    return this.fetchChunk(key);
+    if (!key.startsWith('vc1') && !key.startsWith('m-vs1')) {
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false });
+      return null;
+    }
+    try {
+      const data = await this.fetchChunk(key);
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: Boolean(data), bytes: data?.length ?? 0 });
+      return data;
+    } catch (error) {
+      backendTrace(this.traces, this.id, 'error', 'get', key, {}, (error as Error).message);
+      throw error;
+    }
   }
   async delete() {}
   async check() {

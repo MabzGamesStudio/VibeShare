@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ClientState, NodeEntry, Settings } from '../../src/shared/clientapi';
 import { useLocation } from 'react-router-dom';
-import { api, errorMessage, onNodesChanged } from './api';
+import { api, errorMessage, onNodesChanged, setTraceSettings } from './api';
 import { setBlockExternalEmbeds, setContentPreviews } from './media';
 import { postToast, setToastSaving } from './components/toasts';
 import { embedsAllowed, loadConsent, onConsentChange } from './consent';
@@ -107,6 +107,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setContentPreviews(state?.settings.showContentPreviews !== false);
   }, [state?.settings.showContentPreviews]);
+
+  // Trace logs (Settings → Logging): the GUI records its user actions into the daemon's
+  // trace log only while the user has that on, with the detailed level picked.
+  useEffect(() => setTraceSettings(state?.settings.tracing ?? null), [state?.settings.tracing]);
 
   const value = useMemo<AppContext>(
     () => ({

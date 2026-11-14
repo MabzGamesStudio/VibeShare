@@ -10,6 +10,7 @@ import type { ProviderInfo, StorageAssignment, StorageOffer, StorageTask } from 
 import { isChunkId } from '../shared/sources.js';
 import { errorText, type NodeManager } from './nodes.js';
 import type { ClientStore } from './state.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 const GiB = 1024 ** 3;
 
@@ -37,7 +38,8 @@ export class StorageWorker {
     private readonly store: ClientStore,
     private readonly nodes: NodeManager,
     dataDir: string | null,
-    private readonly intervalMs = 60_000
+    private readonly intervalMs = 60_000,
+    private readonly traces: TraceLog = NO_TRACES
   ) {
     this.dir = join(dataDir ?? join(tmpdir(), 'vibeshare-client'), 'service');
     mkdirSync(this.dir, { recursive: true });
@@ -123,6 +125,10 @@ export class StorageWorker {
             try {
               const assignment = await client.json<StorageAssignment>(`/v1/services/storage/offers/${offer.id}/accept`, { method: 'POST' });
               this.note(`Accepted "${offer.title ?? offer.id}" from ${provider.name} (${(offer.bytes / 1024 ** 2).toFixed(1)} MiB)`);
+              this.traces.trace('basic', 'service', 'storage job accepted', {
+                message: provider.name,
+                data: { node: provider.id, offer: offer.id, bytes: offer.bytes },
+              });
               offered += offer.bytes;
               accepted++;
               state.assignments.push(assignment);
@@ -145,6 +151,7 @@ export class StorageWorker {
           complete = false;
           state.online = false;
           state.error = errorText(error);
+          this.traces.trace('error', 'service', 'storage sync failed', { message: provider.name, data: { node: provider.id }, error: errorText(error) });
         }
       }
       if (complete) await this.cleanup();
@@ -168,10 +175,19 @@ export class StorageWorker {
       // The job's data is not available right now — stay in "downloading" and try on
       // the next sync instead of dropping everything else the provider has to offer.
       this.note(`Could not finish ${assignment.id.slice(0, 12)}… from ${provider.name}: ${errorText(error)}`);
+      this.traces.trace('error', 'service', 'storage download failed', {
+        message: provider.name,
+        data: { node: provider.id, assignment: assignment.id.slice(0, 12) },
+        error: errorText(error),
+      });
       return false;
     }
     const ready = await client.json<StorageAssignment>(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
     Object.assign(assignment, ready);
+    this.traces.trace('dependency', 'service', `POST /v1/services/storage/assignments/${assignment.id.slice(0, 12)}/ready`, {
+      message: provider.name,
+      data: { node: provider.id, chunks: assignment.chunkIds.length },
+    });
     return true;
   }
 
@@ -228,8 +244,17 @@ export class StorageWorker {
         .json<{ credited: number; balance?: number }>(`/v1/services/storage/tasks/${task.id}`, { method: 'POST', raw: body });
       if (result.balance !== undefined) this.nodes.setBalance(provider.id, result.balance);
       if (result.credited) this.note(`Earned ${result.credited} credits from ${provider.name} (${task.type})`);
+      this.traces.trace('dependency', 'service', `POST /v1/services/storage/tasks/${task.id.slice(0, 12)}`, {
+        message: provider.name,
+        data: { node: provider.id, type: task.type, credited: result.credited },
+      });
     } catch (error) {
       this.note(`Task from ${provider.name} failed: ${errorText(error)}`);
+      this.traces.trace('error', 'service', 'storage task failed', {
+        message: provider.name,
+        data: { node: provider.id, type: task.type },
+        error: errorText(error),
+      });
       // A failed answer usually means the provider took us out of the job — re-check at
       // once so we stop polling and delete the data like we should.
       await this.refresh(provider).catch(() => undefined);
@@ -284,6 +309,9 @@ export class StorageWorker {
         reports.push(report);
       }
     }
+    this.traces.trace('basic', 'service', 'storage verify', {
+      data: { reports: reports.length, complete: reports.filter((report) => report.complete).length },
+    });
     return reports;
   }
 
@@ -311,9 +339,15 @@ export class StorageWorker {
           Object.assign(assignment, await this.nodes.client(node).json(`/v1/services/storage/assignments/${assignment.id}/release`, { method: 'POST' }));
         } catch (error) {
           this.note(`Could not release ${assignment.id}: ${errorText(error)}`);
+          this.traces.trace('error', 'service', 'storage release failed', {
+            message: node.name,
+            data: { node: node.id, assignment: assignment.id.slice(0, 12) },
+            error: errorText(error),
+          });
         }
       }
     }
+    this.traces.trace('basic', 'service', 'storage released', { data: { provider: providerId ?? 'all' } });
     await this.cleanup();
   }
 
@@ -329,6 +363,7 @@ export class StorageWorker {
       assignment.status = 'released';
     }
     await this.cleanup();
+    this.traces.trace('basic', 'service', 'storage job released', { message: assignmentId.slice(0, 12), data: { node: providerId } });
     return true;
   }
 

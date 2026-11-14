@@ -1,4 +1,5 @@
 import type { ContentMedia } from '../../shared/protocol.js';
+import type { TraceStore } from '../../shared/tracing-node.js';
 import { TOPICS, type CreatorKind, type Format, type Rating } from '../../shared/taxonomy.js';
 import type { ApiRequest, Fetched, PoliteFetcher } from './fetcher.js';
 
@@ -35,6 +36,8 @@ export interface CrawlContext {
   api(url: string, request?: ApiRequest & { units?: number }): Promise<Fetched>;
   /** An OAuth app token (client credentials), fetched once and kept until it expires. */
   token(get: () => Promise<{ token: string; expiresIn?: number }>): Promise<string>;
+  /** The node's trace log, when it keeps one: fetch outcomes and parse failures. */
+  traces?: TraceStore;
 }
 
 /** An official API that needs the operator's own key: where to get one, what it needs. */

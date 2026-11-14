@@ -1,6 +1,7 @@
 // Default client settings, preset pages and helpers shared by the desktop/CLI client
 // and the static web client. Browser-safe: no Node imports.
 import { DEFAULT_SHORT_BUTTONS, SHORT_BUTTONS, type BloomFilterSettings, type PageConfig, type PageFilters, type PagePreset, type Settings } from './clientapi.js';
+import { defaultTraceSettings, normalizeTraceSettings } from './tracing.js';
 import { BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX } from './bloom.js';
 import type { Preferences } from './protocol.js';
 import { baseLanguage } from './language.js';
@@ -89,6 +90,7 @@ export function defaultSettings(): Settings {
     vvshScrubWidth: 220,
     historyMode: 'pages',
     debugLogs: false,
+    tracing: defaultTraceSettings(),
     ipfsGateway: 'https://ipfs.io',
     profile: { name: '', kind: 'person' },
     storageService: { enabled: false, quotaGiB: 5, providers: [], perProvider: {} },
@@ -220,6 +222,7 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   merged.historyMode = merged.historyMode === 'lazy' ? 'lazy' : 'pages';
   merged.watchHistory = merged.watchHistory === true;
   merged.logContributions = merged.logContributions === true;
+  merged.tracing = normalizeTraceSettings(merged.tracing);
   merged.subscriptionOrder = (['random', 'az', 'za', 'recent'] as const).includes(merged.subscriptionOrder as 'random')
     ? merged.subscriptionOrder
     : 'subscribed';
@@ -368,6 +371,11 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     profile: { ...current.profile, ...(patch.profile ?? {}) },
     storageService: { ...current.storageService, ...(patch.storageService ?? {}) },
     tor: { ...current.tor, ...(patch.tor ?? {}) },
+    tracing: {
+      ...current.tracing,
+      ...(patch.tracing ?? {}),
+      levels: { ...current.tracing.levels, ...(patch.tracing?.levels ?? {}) },
+    },
     selectedBloom: { ...current.selectedBloom, ...(patch.selectedBloom ?? {}) },
     previewBloom: { ...current.previewBloom, ...(patch.previewBloom ?? {}) },
     searchBloom: { ...current.searchBloom, ...(patch.searchBloom ?? {}) },
@@ -387,6 +395,7 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
   // Toast messages: saved copies are off by default; the bell icon is on unless removed.
   next.toastHistory = Boolean(next.toastHistory);
   next.logContributions = Boolean(next.logContributions);
+  next.tracing = normalizeTraceSettings(next.tracing);
   next.toastIcon = next.toastIcon !== false;
   // Seen-content bloom filters: the size is one of 1, 10, 100, … bits; the preview filter
   // either hides what was previewed or only pushes it down among the other previews.

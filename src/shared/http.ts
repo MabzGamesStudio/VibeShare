@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { badRequest, HttpError, notFound } from './errors.js';
 import { log } from './log.js';
+import { runWithTrace } from './tracecontext.js';
 
 export * from './errors.js';
 export * from './remote.js';
@@ -137,6 +138,15 @@ export interface ServeOptions {
   fallback?: (ctx: Ctx) => Promise<boolean> | boolean;
   /** Runs before routing; throw an HttpError to reject the request. */
   guard?: (ctx: Ctx) => void;
+  /**
+   * Local tracing of every API request (off by default downstream): called with the
+   * request label and the error, if any — one timeline per call.
+   */
+  trace?: {
+    request: (label: string, body: unknown) => string;
+    done: (traceId: string) => void;
+    failed: (traceId: string, error: unknown) => void;
+  };
 }
 
 export function createHttpServer(options: ServeOptions): Server {
@@ -164,9 +174,17 @@ export function createHttpServer(options: ServeOptions): Server {
         throw notFound(`No route for ${req.method} ${url.pathname}`);
       }
       ctx.params = found.params;
-      const result = await found.handler(ctx);
-      if (result !== undefined && !res.headersSent) sendJson(res, 200, result);
-      else if (!res.writableEnded && !res.headersSent) res.writeHead(204).end();
+      const label = `${req.method} ${url.pathname}`;
+      const traceId = options.trace?.request(label, undefined);
+      try {
+        const result = await (traceId ? runWithTrace(traceId, () => found.handler(ctx)) : found.handler(ctx));
+        if (traceId) options.trace?.done(traceId);
+        if (result !== undefined && !res.headersSent) sendJson(res, 200, result);
+        else if (!res.writableEnded && !res.headersSent) res.writeHead(204).end();
+      } catch (error) {
+        if (traceId) options.trace?.failed(traceId, error);
+        throw error;
+      }
     } catch (error) {
       if (res.headersSent) {
         res.destroy();

@@ -61,6 +61,7 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
         .client(entry)
         .json<{ receipt: PaymentReceipt }>(`/v1/payments/invoices/${encodeURIComponent(invoiceId)}/receipt`);
       recordReceipt(core.store, receipt);
+      core.traces.trace('basic', 'payments', 'receipt kept', { message: invoiceId, data: { node: entry.id } });
     } catch {
       // A node that does not sign receipts (an older build) simply has none to keep.
     }
@@ -176,6 +177,10 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     const invoice = await nodes.client(entry).json<Invoice>(`/v1/payments/${encodeURIComponent(String(body.method))}/invoices`, {
       body: { credits: body.credits },
     });
+    core.traces.trace('dependency', 'payments', `POST /v1/payments/${String(body.method)}/invoices`, {
+      message: entry.name,
+      data: { node: entry.id, credits: body.credits },
+    });
     // The operator's payment request is a receipt of its own — kept on this device.
     await saveReceipt(entry, invoice.id);
     return invoice;
@@ -191,6 +196,10 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       timeoutMs: 30000,
     });
     nodes.setBalance(entry.id, result.balance);
+    core.traces.trace('dependency', 'payments', `POST /v1/payments/${String(method)}/claim`, {
+      message: entry.name,
+      data: { node: entry.id, balance: result.balance },
+    });
     // Save what the node granted (and the transfer proof) as the receipt for this payment.
     await saveReceipt(entry, typeof rest.invoiceId === 'string' ? rest.invoiceId : undefined);
     return result;

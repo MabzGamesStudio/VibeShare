@@ -10,6 +10,7 @@ import type {
   StorageTask,
 } from '../shared/protocol.js';
 import { JsonFile } from '../shared/store.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 import type { Account, Ledger } from '../commerce/ledger.js';
 
 export interface StorageServiceConfig {
@@ -110,7 +111,9 @@ export class StorageService {
     /** Reads a chunk; `peers: false` restricts it to the provider's own storage. */
     private readonly readChunk: (id: string, options?: { peers?: boolean }) => Promise<Buffer | null>,
     /** A holder that failed a retrieval: the node pulls the job's data from their URLs instead. */
-    private readonly onHolderOut?: (accountId: string, job?: StorageJob) => void
+    private readonly onHolderOut?: (accountId: string, job?: StorageJob) => void,
+    /** The node's trace log (off by default; absent keeps every hook a no-op). */
+    private readonly traces?: TraceStore
   ) {
     this.store = new JsonFile<ServiceData>(path, () => ({ jobs: {}, assignments: {} }));
     this.timer = setInterval(() => void this.tick().catch((error) => log.warn('storage service tick:', error)), 5000);
@@ -173,6 +176,9 @@ export class StorageService {
     };
     this.data.jobs[job.id] = job;
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'job created', {
+      data: { job: job.id, cid: job.cid?.slice(0, 16), chunks: job.chunkIds.length, bytes: job.bytes, replicas: job.replicas, managed: job.managed ?? false },
+    });
     return job;
   }
 
@@ -195,6 +201,7 @@ export class StorageService {
     if (patch.maxLatencyMs !== undefined) job.maxLatencyMs = Math.max(50, Math.round(patch.maxLatencyMs));
     if (patch.failedRequestsBeforeFailure !== undefined) job.failedRequestsBeforeFailure = Math.max(1, Math.round(patch.failedRequestsBeforeFailure));
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'job updated', { data: { job: id } });
   }
 
   closeJob(id: string): void {
@@ -202,6 +209,7 @@ export class StorageService {
     if (!job) throw notFound('No such job');
     job.status = 'closed';
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'job closed', { data: { job: id } });
   }
 
   /** Removes a job entirely: its assignments and pending tasks go with it. */
@@ -218,6 +226,7 @@ export class StorageService {
       if (assignment.jobId === id) delete this.data.assignments[assignmentId];
     }
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'job deleted', { data: { job: id } });
     return true;
   }
 
@@ -227,6 +236,8 @@ export class StorageService {
     if (!job || job.status === 'failed') return;
     job.status = 'failed';
     this.store.changed();
+    // Not a crash — the job simply has nowhere left to get its data from.
+    this.traces?.trace('error', 'provider.service', 'job failed', { message: 'no endpoint and no holder can serve the data', data: { job: id, cid: job.cid?.slice(0, 16) } });
   }
 
   jobs(): (StorageJob & { holders: number; assignments: number })[] {
@@ -313,6 +324,9 @@ export class StorageService {
     };
     this.data.assignments[assignment.id] = assignment;
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'assignment accepted', {
+      data: { assignment: assignment.id, job: job.id, account: account.id.slice(0, 16), bytes: job.bytes },
+    });
     return this.view(assignment);
   }
 
@@ -336,6 +350,7 @@ export class StorageService {
     if (assignment.status !== 'downloading') return this.view(assignment);
     assignment.status = 'active';
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'assignment active', { data: { assignment: assignment.id, job: assignment.jobId } });
     // The first challenge comes right away; the upfront reward is paid once it passes.
     void this.challenge(assignment);
     return this.view(assignment);
@@ -346,6 +361,7 @@ export class StorageService {
     if (LIVE.includes(assignment.status)) {
       assignment.status = 'released';
       this.store.changed();
+      this.traces?.trace('basic', 'provider.service', 'assignment released', { data: { assignment: assignment.id, job: assignment.jobId } });
     }
     return this.view(assignment);
   }
@@ -451,6 +467,9 @@ export class StorageService {
     if (credited > 0) {
       assignment.earned += credited;
       this.ledger.credit(account.id, credited, `storage ${task.type}`, assignment.id);
+      this.traces?.trace('basic', 'provider.service', 'reward paid', {
+        data: { account: account.id.slice(0, 16), type: task.type, credits: credited, assignment: assignment.id },
+      });
     }
     this.store.changed();
     if (!ok) {
@@ -468,6 +487,11 @@ export class StorageService {
     if (!LIVE.includes(assignment.status)) return;
     assignment.status = 'failed';
     this.store.changed();
+    // A tolerated failure: the holder is out, but the job lives on (URLs and other holders).
+    this.traces?.trace('error', 'provider.service', 'holder out', {
+      message: 'a holder no longer counts for this job',
+      data: { assignment: assignment.id, job: assignment.jobId, account: assignment.accountId.slice(0, 16) },
+    });
     this.onHolderOut?.(assignment.accountId, this.data.jobs[assignment.jobId]);
   }
 
@@ -491,10 +515,20 @@ export class StorageService {
     assignment.lastChallengeAt = Date.now();
     const nonce = randomBytes(16).toString('hex');
     // Never from client storage: that would ask the holders to answer their own challenge.
-    const own = await this.readChunk(chunkId, { peers: false }).catch(() => null);
+    const own = await this.readChunk(chunkId, { peers: false }).catch((error) => {
+      // Tolerated: without its own copy the challenge simply asks for the chunk itself.
+      this.traces?.trace('error', 'provider.service', 'challenge read failed', {
+        error: (error as Error).message,
+        data: { chunk: chunkId.slice(0, 12) },
+      });
+      return null;
+    });
     // With its own copy the provider asks for a proof; without one it asks for the chunk itself.
     const expected = own ? sha256hex(Buffer.concat([Buffer.from(nonce), own])) : undefined;
     this.addTask({ type: 'challenge', assignmentId: assignment.id, accountId: assignment.accountId, chunkId, nonce: expected ? nonce : undefined, expected });
+    this.traces?.trace('basic', 'provider.service', 'challenge scheduled', {
+      data: { assignment: assignment.id, account: assignment.accountId.slice(0, 16), chunk: chunkId.slice(0, 12), proof: Boolean(expected) },
+    });
   }
 
   /**
@@ -506,14 +540,24 @@ export class StorageService {
     const holders = Object.values(this.data.assignments).filter(
       (a) => a.status === 'active' && a.chunkIds.includes(chunkId) && this.isOnline(a.accountId)
     );
-    if (!holders.length) return null;
+    if (!holders.length) {
+      this.traces?.trace('basic', 'provider.service', 'retrieval skipped', {
+        message: 'no online holder has this chunk',
+        data: { chunk: chunkId.slice(0, 12) },
+      });
+      return null;
+    }
     const chosen = holders.sort(() => Math.random() - 0.5).slice(0, 2);
+    this.traces?.trace('basic', 'provider.service', 'retrieval scheduled', { data: { chunk: chunkId.slice(0, 12), holders: chosen.length } });
     return new Promise<Buffer | null>((resolve) => {
       let pending = chosen.length;
       let done = false;
       const settle = (data: Buffer | null) => {
         done = true;
         clearTimeout(timer);
+        this.traces?.trace('basic', 'provider.service', 'retrieval result', {
+          data: { chunk: chunkId.slice(0, 12), ok: Boolean(data), bytes: data?.length ?? 0 },
+        });
         resolve(data);
       };
       const timer = setTimeout(() => !done && settle(null), this.config().taskTimeoutSeconds * 1000);
@@ -536,6 +580,11 @@ export class StorageService {
       if (Date.parse(task.deadline) > now) continue;
       this.tasks.delete(id);
       for (const waiter of task.waiters) waiter(null);
+      // A missed deadline is a tolerated failure: the holder pays for it, not this node.
+      this.traces?.trace('error', 'provider.service', 'task timed out', {
+        message: `no answer to the ${task.type} in time`,
+        data: { task: id, type: task.type, assignment: task.assignmentId, account: task.accountId.slice(0, 16) },
+      });
       if (task.type === 'challenge') {
         const assignment = this.data.assignments[task.assignmentId];
         if (assignment) assignment.challenges.failed++;
@@ -573,9 +622,15 @@ export class StorageService {
       if (outstanding) continue;
       if (this.isOnline(assignment.accountId)) await this.challenge(assignment);
       else {
+        // Offline holders are tolerated: the missed challenge counts against the pass
+        // ratio, the job and its other holders carry on.
         assignment.lastChallengeAt = now;
         assignment.challenges.failed++;
         this.store.changed();
+        this.traces?.trace('error', 'provider.service', 'challenge failed', {
+          message: 'holder offline',
+          data: { assignment: assignment.id, account: assignment.accountId.slice(0, 16) },
+        });
       }
     }
   }
@@ -590,11 +645,17 @@ export class StorageService {
       if (reward > 0) {
         assignment.earned += reward;
         this.ledger.credit(assignment.accountId, reward, 'storage completed', assignment.id);
+        this.traces?.trace('basic', 'provider.service', 'reward paid', {
+          data: { account: assignment.accountId.slice(0, 16), type: 'completion', credits: reward, assignment: assignment.id },
+        });
       }
     } else {
       assignment.status = 'failed';
     }
     this.store.changed();
+    this.traces?.trace('basic', 'provider.service', 'assignment finished', {
+      data: { assignment: assignment.id, job: assignment.jobId, status: assignment.status, passed, failed },
+    });
   }
 
   /** Live holders of one content across its jobs (client nodes keeping copies). */

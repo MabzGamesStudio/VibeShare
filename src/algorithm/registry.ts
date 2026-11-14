@@ -6,6 +6,7 @@ import type { ContentItem, ContentMedia, ContentOrigin, CreatorInfo, LookupResul
 import type { Discovered } from './crawler/types.js';
 import { baseId, formatSource, isNativeId, parseContentId, parseSource, sourceFromUrl } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 import {
   CREATOR_KINDS,
   FORMATS,
@@ -151,7 +152,9 @@ export class Registry {
 
   constructor(
     path: string | null,
-    private readonly thumbDir: string | null
+    private readonly thumbDir: string | null,
+    /** The node's trace log, when it keeps one. Per-record decisions go to it at detail level. */
+    private readonly traces?: TraceStore
   ) {
     // Written at most every two seconds: the crawler keeps adding entries.
     this.store = new JsonFile<RegistryData>(path, () => ({ entries: {}, creators: {} }), 2000);
@@ -241,7 +244,12 @@ export class Registry {
       if (!this.creator(id)) throw badRequest(`Unknown creator ${id}`);
       if (!members.includes(id)) members.push(id);
     }
-    return this.upsertCreator({ id: group.id, name: group.name, kind: 'group', members: members.slice(0, 500) });
+    const updated = this.upsertCreator({ id: group.id, name: group.name, kind: 'group', members: members.slice(0, 500) });
+    this.traces?.trace('detail', 'algorithm.registry', 'function:setMembers', {
+      message: `${group.id.slice(0, 24)} · ${updated.members?.length ?? 0} members`,
+      data: { group: group.id.slice(0, 32), added: add.length, removed: remove.length, total: updated.members?.length ?? 0 },
+    });
+    return updated;
   }
 
   // -------------------------------------------------------------------------
@@ -277,6 +285,10 @@ export class Registry {
     };
     (this.store.data.topics ??= {})[topic.id] = topic;
     this.changed();
+    this.traces?.trace('detail', 'algorithm.registry', 'function:upsertTopic', {
+      message: `${topic.id.slice(0, 16)} · ${existing ? 'edited' : 'created'} · ${topic.status}`,
+      data: { id: topic.id.slice(0, 32), name: topic.name.slice(0, 40), created: !existing, status: topic.status },
+    });
     return { topic, created: !existing };
   }
 
@@ -350,6 +362,13 @@ export class Registry {
     if (entry.status !== 'blocked') delete entry.reason;
     this.store.data.entries[entry.id] = entry;
     this.changed();
+    // One listing decision per content id (a new entry, or one whose status moved).
+    if (!existing || existing.status !== entry.status) {
+      this.traces?.trace('detail', 'algorithm.registry', 'function:upsert', {
+        message: `${entry.id.slice(0, 24)} · ${entry.status}${existing ? ` (was ${existing.status})` : ''}`,
+        data: { id: entry.id.slice(0, 32), status: entry.status, created: !existing, reason: entry.reason?.slice(0, 80) },
+      });
+    }
     return entry;
   }
 
@@ -366,6 +385,10 @@ export class Registry {
     this.thumbs.delete(key);
     if (this.thumbDir) rmSync(join(this.thumbDir, this.thumbKey(key)), { force: true });
     this.changed();
+    this.traces?.trace('detail', 'algorithm.registry', 'function:remove', {
+      message: `${key.slice(0, 24)} · unknown again`,
+      data: { id: key.slice(0, 32), status: 'unknown' },
+    });
     return true;
   }
 
@@ -394,6 +417,10 @@ export class Registry {
     };
     this.store.data.creators[record.id] = record;
     this.changed();
+    this.traces?.trace('detail', 'algorithm.registry', 'function:upsertCreator', {
+      message: `${record.id.slice(0, 24)} · ${record.kind} · ${record.status}`,
+      data: { id: record.id.slice(0, 48), kind: record.kind, created: !existing, status: record.status, members: record.members?.length },
+    });
     return record;
   }
 
@@ -417,6 +444,10 @@ export class Registry {
       entry.thumbnail = true;
       this.changed();
     }
+    this.traces?.trace('detail', 'algorithm.registry', 'function:setThumbnail', {
+      message: `${baseId(id).slice(0, 24)} · ${bytes.length} bytes`,
+      data: { id: baseId(id).slice(0, 32), bytes: bytes.length, known: Boolean(entry) },
+    });
   }
 
   thumbnail(key: string): Buffer | null {
@@ -475,11 +506,25 @@ export class Registry {
 
   lookup(id: string): LookupResult {
     const entry = this.get(id);
-    if (!entry || entry.status === 'pending') return { id, status: 'unknown' };
-    if (entry.status === 'blocked') return { id, status: 'blocked', reason: entry.reason };
-    const creator = this.creator(entry.creatorId);
-    if (creator?.status === 'blocked') return { id, status: 'blocked', reason: 'the creator is blocked' };
-    return this.view(entry);
+    const creatorBlocked = entry && entry.status !== 'pending' && entry.status !== 'blocked' && this.creator(entry.creatorId)?.status === 'blocked';
+    const result: LookupResult =
+      !entry || entry.status === 'pending'
+        ? { id, status: 'unknown' }
+        : entry.status === 'blocked'
+          ? { id, status: 'blocked', reason: entry.reason }
+          : creatorBlocked
+            ? { id, status: 'blocked', reason: 'the creator is blocked' }
+            : this.view(entry);
+    // The listing decision of one content id, with the reason when there is one.
+    this.traces?.trace('detail', 'algorithm.registry', 'function:lookup', {
+      message: `${id.slice(0, 24)} · ${result.status}`,
+      data: {
+        id: id.slice(0, 32),
+        status: result.status,
+        reason: result.status === 'blocked' ? result.reason?.slice(0, 80) : undefined,
+      },
+    });
+    return result;
   }
 
   /** Listed entries that pass the viewer's preferences and the node's own rating ceiling. */
@@ -583,7 +628,17 @@ export class Registry {
    */
   upsertDiscovered(item: Discovered, policy: { autoList: boolean; defaultRating: Rating }): 'added' | 'known' | 'invalid' {
     const parsed = parseContentId(item.id);
-    if (!parsed || !item.title) return 'invalid';
+    // What came of one discovered item, per content id.
+    const decision = (result: 'added' | 'known' | 'invalid', status?: string): void => {
+      this.traces?.trace('detail', 'algorithm.registry', 'function:upsertDiscovered', {
+        message: `${item.id.slice(0, 24)} · ${result}${status ? ` · ${status}` : ''}`,
+        data: { id: item.id.slice(0, 32), decision: result, status, adapter: item.adapter },
+      });
+    };
+    if (!parsed || !item.title) {
+      decision('invalid');
+      return 'invalid';
+    }
     const now = new Date().toISOString();
     const existing = this.store.data.entries[parsed.base];
     if (existing) {
@@ -599,6 +654,7 @@ export class Registry {
         existing.pageUrl ??= item.pageUrl;
       }
       this.changed();
+      decision('known', existing.status);
       return 'known';
     }
     if (item.creator && !this.store.data.creators[item.creator.id]) {
@@ -643,6 +699,7 @@ export class Registry {
       platformStats: item.stats as Record<string, number> | undefined,
     };
     this.changed();
+    decision('added', this.store.data.entries[parsed.base].status);
     return 'added';
   }
 
@@ -655,7 +712,13 @@ export class Registry {
       .sort((a, b) => a.addedAt.localeCompare(b.addedAt))
       .slice(0, crawled.length - max);
     for (const entry of removable) delete this.store.data.entries[entry.id];
-    if (removable.length) this.changed();
+    if (removable.length) {
+      this.changed();
+      this.traces?.trace('basic', 'algorithm.registry', 'function:prune', {
+        message: `${removable.length} crawler entries dropped`,
+        data: { dropped: removable.length, kept: this.all().length, max },
+      });
+    }
     return removable.length;
   }
 

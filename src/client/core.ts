@@ -58,6 +58,7 @@ import { emptySavedState, prepareClientSave } from './model.js';
 import { errorText, NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
 import { rememberPublished } from './published.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 export type FeedKind = 'feed' | 'search' | 'latest';
 
@@ -108,6 +109,8 @@ export interface ClientCoreOptions {
   ) => Promise<Record<string, Uint8Array[]>>;
   /** Whether local publishing has a usable native FFmpeg backend. */
   encoderInfo?: () => Promise<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }>;
+  /** The daemon's trace log; a no-op in the browser build (tracing is a daemon feature). */
+  traces?: TraceLog;
 }
 
 export class ClientCore {
@@ -119,15 +122,18 @@ export class ClientCore {
   readonly uploads: UploadStore;
   /** The bloom filters of content the user has seen (selected, previewed, sent to nodes). */
   readonly blooms: BloomBook;
+  /** The daemon's trace log (a no-op without one). */
+  readonly traces: TraceLog;
 
   constructor(readonly options: ClientCoreOptions) {
     this.store = options.store;
     this.cache = options.cache;
     this.uploads = options.uploads;
-    this.nodes = new NodeManager(this.store, options.transport);
-    this.fetcher = new Fetcher(this.nodes, this.cache);
-    this.publisher = new Publisher(this.store, this.nodes, options.uploads);
-    this.blooms = new BloomBook(this.store);
+    this.traces = options.traces ?? NO_TRACES;
+    this.nodes = new NodeManager(this.store, options.transport, this.traces);
+    this.fetcher = new Fetcher(this.nodes, this.cache, this.traces);
+    this.publisher = new Publisher(this.store, this.nodes, options.uploads, this.traces);
+    this.blooms = new BloomBook(this.store, this.traces);
     // Hidden profiles are encrypted at rest: what is written out is the sealed form.
     this.store.data.prepare = prepareClientSave;
     const storeChanged = this.store.changed.bind(this.store);
@@ -238,6 +244,13 @@ export class ClientCore {
   async collect(kind: FeedKind, body: Record<string, unknown>, cursor?: string): Promise<FeedResponse> {
     if (kind === 'search') this.rememberSearch(String(body.query ?? ''));
     const nodes = this.algorithmsFor(kind);
+    // Entry and result of the feed/search flow: which page was asked of how many nodes,
+    // and what came back (counts and statuses only — never the items themselves).
+    const component = kind === 'latest' ? 'core.subscriptions' : `core.${kind}`;
+    this.traces.trace('basic', component, `${kind} page`, {
+      message: kind === 'search' ? String(body.query ?? '').slice(0, 120) : undefined,
+      data: { nodes: nodes.length, cursor: Boolean(cursor) },
+    });
     const errors: FeedResponse['errors'] = [];
     if (!nodes.length) return { items: [], errors: [{ node: '', name: 'Client', error: 'No algorithm node is enabled' }] };
     const cursors = decodeCursor(cursor) ?? {};
@@ -276,12 +289,14 @@ export class ClientCore {
       for (const node of candidates) {
         try {
           const page = await ask(node, 24);
+          const shown = this.nativeFirst(
+            seenContent
+              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
+              : page.items.filter(wanted).map((item) => this.feedItem(node, item))
+          );
+          this.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
           return {
-            items: this.nativeFirst(
-              seenContent
-                ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
-                : page.items.filter(wanted).map((item) => this.feedItem(node, item))
-            ),
+            items: shown,
             cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
             errors,
           };
@@ -289,6 +304,7 @@ export class ClientCore {
           errors.push({ node: node.id, name: node.name, error: errorText(error) });
         }
       }
+      this.traces.trace('basic', component, `${kind} page → failed`, { data: { errors: errors.length }, error: errors[0]?.error });
       return { items: [], errors };
     }
 
@@ -320,8 +336,10 @@ export class ClientCore {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
+    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items) : items);
+    this.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
     return {
-      items: this.nativeFirst(seenContent ? this.applySeenFilters(items) : items),
+      items: shown,
       cursor: more ? encodeCursor(next) : undefined,
       errors,
     };
@@ -329,6 +347,10 @@ export class ClientCore {
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */
   async browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
+    this.traces.trace('basic', 'core.browse', `browse ${body.source ?? 'feed'}`, {
+      message: body.query ? String(body.query).slice(0, 120) : undefined,
+      data: { sort: body.sort, cursor: Boolean(body.cursor) },
+    });
     const preferences = pagePreferences(this.settings.preferences, body.filters);
     // The creators the user subscribes to join the page's creator picks (on unless the page
     // turned its "Subscribed creators" button off) — sent at the creators slider's level.
@@ -380,6 +402,7 @@ export class ClientCore {
   async content(id: string): Promise<ContentView> {
     const parsed = parseContentId(id);
     if (!parsed) throw badRequest('Not a content id');
+    this.traces.trace('basic', 'core.lookup', 'content lookup', { message: parsed.base });
     const view: ContentView = {
       id: parsed.full,
       base: parsed.base,
@@ -470,6 +493,9 @@ export class ClientCore {
     // no "*watched" on its first open — from the second open on it does.
     const identity = { id: view.id, contentId: view.item?.contentId, link: view.item?.link };
     if (this.blooms.sees('selected', identity)) view.seen = true;
+    this.traces.trace('basic', 'core.lookup', `content lookup → ${view.status}`, {
+      data: { native: view.native, embeds: view.embeds.length, providerErrors: view.providerErrors.length, seen: Boolean(view.seen) },
+    });
     return view;
   }
 
@@ -1165,11 +1191,23 @@ export class ClientCore {
   private async askJson<T>(node: NodeEntry, path: string, body: unknown, auth: boolean, timeoutMs?: number): Promise<T> {
     const client = this.nodes.client(node);
     try {
-      return await client.json<T>(path, { body, auth, timeoutMs });
+      const result = await client.json<T>(path, { body, auth, timeoutMs });
+      this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth } });
+      return result;
     } catch (error) {
-      if (auth || !(error instanceof RemoteError) || error.status !== 401) throw error;
+      if (auth || !(error instanceof RemoteError) || error.status !== 401) {
+        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth }, error: errorText(error) });
+        throw error;
+      }
       void this.nodes.refresh(node);
-      return await client.json<T>(path, { body, auth: true, timeoutMs });
+      try {
+        const result = await client.json<T>(path, { body, auth: true, timeoutMs });
+        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth: true } });
+        return result;
+      } catch (error) {
+        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth: true }, error: errorText(error) });
+        throw error;
+      }
     }
   }
 
@@ -1183,8 +1221,10 @@ export class ClientCore {
       [...this.nodes.active('algorithm'), ...this.nodes.active('provider')].map(async (entry) => {
         try {
           const result = await this.nodes.client(entry).json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
+          this.traces.trace('dependency', 'core', 'POST /v1/reports', { message: entry.name, data: { node: entry.id, credited: result.credited } });
           return { node: entry.id, name: entry.name, ...result };
         } catch (error) {
+          this.traces.trace('dependency', 'core', 'POST /v1/reports', { message: entry.name, data: { node: entry.id }, error: errorText(error) });
           return { node: entry.id, name: entry.name, error: errorText(error) };
         }
       })
@@ -1207,8 +1247,13 @@ export class ClientCore {
       this.nodes.active('algorithm').map(async (entry) => {
         try {
           const result = await this.nodes.client(entry).json<ClaimResponse>('/v1/claims', { body: { id, metrics, source, publishedAt } });
+          this.traces.trace('dependency', 'core', 'POST /v1/claims', {
+            message: entry.name,
+            data: { node: entry.id, credited: result.credited, multiplier: result.multiplier },
+          });
           return { node: entry.id, name: entry.name, ...result };
         } catch (error) {
+          this.traces.trace('dependency', 'core', 'POST /v1/claims', { message: entry.name, data: { node: entry.id }, error: errorText(error) });
           return { node: entry.id, name: entry.name, error: errorText(error) };
         }
       })
@@ -1650,6 +1695,7 @@ export class ClientCore {
     }
   ): Promise<{ cid: string; manifest: Manifest; objects: number; listed: number }> {
     const client = this.nodes.client(node);
+    this.traces.trace('basic', 'core.publish', 'publish vvsh', { message: options.name, data: { node: node.id, bytes: source.length } });
     const config = options.config ?? DEFAULT_VVSH_BUILD;
     const webm = options.encoder === 'ffmpeg' && this.options.transcodeVvsh
       ? await this.options.transcodeVvsh(source, config, options.totalSeconds)
@@ -1679,6 +1725,7 @@ export class ClientCore {
     const cid = contentIdOf(signed);
     const listed = await this.submitVvshToAlgorithms(cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, cid, signed.meta?.title ?? signed.name);
+    this.traces.trace('basic', 'core.publish', 'publish vvsh → done', { data: { cid, objects, listed } });
     return { cid, manifest: signed, objects, listed };
   }
 
@@ -1728,6 +1775,7 @@ export class ClientCore {
     }
   ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number; warnings: string[] }> {
     const client = this.nodes.client(node);
+    this.traces.trace('basic', 'core.publish', 'convert vvsh', { message: options.name, data: { node: node.id, bytes: options.data.length } });
     const warnings: string[] = [];
     const retryOnce = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
       try {
@@ -1788,7 +1836,11 @@ export class ClientCore {
       options.onProgress?.(converted.progress ?? 0);
     }
     warnings.push(...(converted.warnings ?? []));
-    if (converted.status === 'error' || !converted.manifest) throw new Error(converted.error || 'Provider conversion failed');
+    if (converted.status === 'error' || !converted.manifest) {
+      const why = converted.error || 'Provider conversion failed';
+      this.traces.trace('error', 'core.publish', 'convert vvsh failed', { message: node.name, error: why });
+      throw new Error(why);
+    }
     // The caller's stamp and fallback links go in before signing: the same video on two
     // providers then lands on the same content id.
     const base: Manifest = { ...converted.manifest, ...(options.createdAt ? { createdAt: options.createdAt } : {}) };
@@ -1796,8 +1848,10 @@ export class ClientCore {
     if (sources?.length) base.sources = sources;
     const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
+    this.traces.trace('dependency', 'core', 'PUT /v1/vvsh/manifest', { message: node.name, data: { node: node.id, cid: committed.cid } });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
+    this.traces.trace('basic', 'core.publish', 'convert vvsh → done', { data: { cid: committed.cid, listed, warnings: warnings.length } });
     return { cid: committed.cid, quote: converted.quote, manifest: signed, listed, warnings };
   }
 
@@ -1829,6 +1883,7 @@ export class ClientCore {
     const committed = await this.nodes.client(node).json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
+    this.traces.trace('basic', 'core.publish', 'commit vvsh', { data: { cid: committed.cid, listed, node: node.id } });
     return { cid: committed.cid, listed };
   }
 
@@ -2009,8 +2064,10 @@ export class ClientCore {
             creatorProof: sign ? { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) } : undefined,
           },
         });
+        this.traces.trace('dependency', 'core', 'POST /v1/submissions', { message: node.name, data: { node: node.id, cid } });
         listed++;
-      } catch {
+      } catch (error) {
+        this.traces.trace('dependency', 'core', 'POST /v1/submissions', { message: node.name, data: { node: node.id, cid }, error: errorText(error) });
         // The stream is published either way; listing is the algorithm node's call.
       }
     }

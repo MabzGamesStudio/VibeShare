@@ -22,6 +22,8 @@ import type { Transport } from '../shared/remote.js';
 import { isOnionUrl, torFetch, TorRouter } from '../shared/tor.js';
 import { parseContentId } from '../shared/sources.js';
 import { ensureDir } from '../shared/store.js';
+import { TRACE_LEVELS, normalizeTraceSettings, type TraceLevel } from '../shared/tracing.js';
+import { TraceStore, tracingRoutes } from '../shared/tracing-node.js';
 import { clientRoutes } from './api.js';
 import { ChunkCache } from './cache.js';
 import { ClientCore } from './core.js';
@@ -69,10 +71,20 @@ export class ClientNode {
   readonly uploads: FileUploads;
   readonly worker: StorageWorker;
   readonly token: string;
+  /** The daemon's local trace log (off by default; see Settings → Logging). */
+  readonly traces: TraceStore;
   private router = new Router();
   private server: Server | null = null;
   private refreshTimer: NodeJS.Timeout | null = null;
   private thumbs = new Map<string, { type: string; data: Buffer }>();
+  /**
+   * The `x-vs-trace` header of the request being dispatched: the guard is the only hook
+   * that sees the request before createHttpServer asks for its trace id, and the two run
+   * synchronously back to back for routed requests — so this one-slot handoff carries
+   * the GUI's user-action trace id into the request timeline without touching the
+   * shared server code.
+   */
+  private pendingTrace: string | undefined;
   /** Routes requests to nodes through Tor as the settings say. */
   readonly tor: TorRouter;
   port = 0;
@@ -81,6 +93,12 @@ export class ClientNode {
     const dir = options.dataDir ? ensureDir(options.dataDir) : null;
     this.token = options.token ?? randomToken(24);
     this.store = new ClientStore(dir);
+    // One trace log per daemon: settings come from the client settings and are saved
+    // through the same file everything else is (traces.jsonl sits beside client.json).
+    this.traces = new TraceStore('client', dir, () => this.settings.tracing, (settings) => {
+      this.store.data.data.settings.tracing = normalizeTraceSettings(settings);
+      this.store.changed();
+    });
     this.cache = new ChunkCache(dir ? join(dir, 'cache') : null, () => this.settings.cacheMiB * MiB);
     this.uploads = new FileUploads(dir);
     this.tor = new TorRouter(() => this.settings.tor);
@@ -88,6 +106,7 @@ export class ClientNode {
       store: this.store,
       cache: this.cache,
       uploads: this.uploads,
+      traces: this.traces,
       thumbnailUrl: (node, key) => `/api/thumb/${node.id}/${key}?t=${this.token}`,
       streamUrl: (base, download) => `/stream/${base}?${download ? 'download=1&' : ''}t=${this.token}`,
       embedHost: () => (this.loopbackOnly() ? 'localhost' : this.host),
@@ -108,7 +127,7 @@ export class ClientNode {
     this.nodes = this.core.nodes;
     this.fetcher = this.core.fetcher;
     this.publisher = this.core.publisher;
-    this.worker = new StorageWorker(this.store, this.nodes, dir, options.serviceIntervalMs);
+    this.worker = new StorageWorker(this.store, this.nodes, dir, options.serviceIntervalMs, this.traces);
     this.routes();
   }
 
@@ -154,6 +173,10 @@ export class ClientNode {
   }
 
   private guard(ctx: Ctx): void {
+    // A GUI user action passes its trace id along so the API calls it makes join the
+    // same timeline (see pendingTrace for why this is the place to read it).
+    const header = ctx.req.headers['x-vs-trace'];
+    this.pendingTrace = typeof header === 'string' && header.trim() ? header.trim().slice(0, 100) : undefined;
     // Stops DNS rebinding: a web page cannot reach the daemon under another host name.
     if (this.loopbackOnly() && !LOOPBACK.test(ctx.req.headers.host ?? '')) throw forbidden('Unexpected Host header');
     const path = ctx.url.pathname;
@@ -292,6 +315,34 @@ export class ClientNode {
       }
     });
 
+    // The local trace log (off by default): the same API as the node consoles' tracing
+    // tabs, behind the same /api token guard as everything else here.
+    tracingRoutes(this.router, this.traces, '/api/tracing', (ctx) => this.guard(ctx));
+    // One event from the GUI (a user action or change), kept in the timeline whose id it
+    // carries — so browser-side actions show up beside the API calls they caused.
+    r.post('/api/tracing/events', async (ctx) => {
+      const body = await readJson<{
+        level?: string;
+        component?: string;
+        action?: string;
+        message?: string;
+        data?: unknown;
+        error?: string;
+        traceId?: string;
+        initiator?: { kind?: string; label?: string };
+      }>(ctx.req);
+      const level = (TRACE_LEVELS as readonly string[]).includes(String(body.level)) ? (body.level as TraceLevel) : 'detail';
+      const label = String(body.initiator?.label ?? '').slice(0, 120);
+      this.traces.recorder.event(level, String(body.component ?? 'gui').slice(0, 80), String(body.action ?? '').slice(0, 200), {
+        message: body.message === undefined ? undefined : String(body.message).slice(0, 500),
+        data: body.data,
+        error: body.error === undefined ? undefined : String(body.error).slice(0, 500),
+        traceId: body.traceId ? String(body.traceId).slice(0, 100) : undefined,
+        initiator: label ? { kind: body.initiator?.kind === 'api' ? 'api' : 'user-action', label } : undefined,
+      });
+      return { ok: true };
+    });
+
     // Streaming and downloads (Range requests from <video>, <audio>, <img>, downloads)
     r.get('/stream/:id', async (ctx) => {
       // A .vvsh stream as byte ranges: the browser's own seeking drives it, and only the
@@ -404,6 +455,20 @@ export class ClientNode {
       router: this.router,
       name: 'client',
       guard: (ctx) => this.guard(ctx),
+      // Local tracing (off by default): one timeline per API request, joined by the
+      // user action that made it when the GUI sends `x-vs-trace` (see pendingTrace).
+      // The tracing endpoints record the events they are given themselves and are
+      // skipped here, so recording an action never spawns a second timeline of its own.
+      trace: {
+        request: (label) => {
+          const parent = this.pendingTrace;
+          this.pendingTrace = undefined;
+          if (/\/api\/tracing\//.test(label)) return '';
+          return this.traces.recorder.start({ kind: 'api', label }, parent);
+        },
+        done: (traceId) => this.traces.trace('dependency', 'api', 'request ok', { traceId }),
+        failed: (traceId, error) => this.traces.trace('error', 'api', 'request failed', { traceId, error: (error as Error).message }),
+      },
       fallback: (ctx) => (ctx.req.method === 'GET' || ctx.req.method === 'HEAD' ? this.servePage(ctx) : false),
     });
     this.server.requestTimeout = 0;

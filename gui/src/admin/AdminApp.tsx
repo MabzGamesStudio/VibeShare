@@ -8,6 +8,7 @@ import { formatBytes, timeAgo } from '../util';
 import { admin, loadToken, message, setToken } from './api';
 import { AlgorithmTabs } from './AlgorithmTabs';
 import { ProviderTabs } from './ProviderTabs';
+import { TracingTab } from './TracingTab';
 
 export interface Status {
   reference: string;
@@ -1292,6 +1293,9 @@ export function AdminApp() {
     ['accounts', 'Accounts'],
     ['payments', 'Payments'],
     ['settings', 'Settings'],
+    // Both node kinds serve the same /v1/admin/tracing endpoints, so one tab works
+    // on a provider and on a search node.
+    ['tracing', 'Tracing'],
   ];
 
   return (
@@ -1434,6 +1438,7 @@ export function AdminApp() {
       {tab === 'moderation' && <ModerationPanel />}
       {tab === 'payments' && <Payments />}
       {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} only={settingsOnly} />}
+      {tab === 'tracing' && <TracingTab />}
       {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}
       <ToastArea />
     </div>
@@ -1448,6 +1453,43 @@ export interface FieldGroup {
   /** A panel of its own under the fields, for settings that are more than one field. */
   extra?: (config: Record<string, unknown>, save: (patch: Record<string, unknown>) => Promise<void>) => ReactNode;
 }
+
+// The same logging and tracing options on both kinds of node — the console looks
+// the same on a provider and on a search node, and both keep one local trace log.
+// Every change saves through the config save like any other setting (nested
+// patches merge into config.tracing).
+const LOGGING_GROUP: FieldGroup = {
+  id: 'logging',
+  label: 'Logging and tracing',
+  fields: [
+    { path: 'tracing.enabled', label: 'Trace logs', type: 'bool', hint: 'Off by default: nothing at all is recorded until this is turned on' },
+    { path: 'tracing.expirationHours', label: 'Expire logs after (hours)', type: 'number', hint: 'Trace events older than this are pruned (default 24)' },
+    {
+      path: 'tracing.levels.basic',
+      label: 'Trace level: basic',
+      type: 'bool',
+      hint: 'Algorithms and functions. Pre-selected when tracing is first enabled',
+    },
+    {
+      path: 'tracing.levels.detail',
+      label: 'Trace level: detailed',
+      type: 'bool',
+      hint: 'User actions, button clicks, changes, function detail and data. The chatty one — not pre-selected',
+    },
+    {
+      path: 'tracing.levels.dependency',
+      label: 'Trace level: dependency',
+      type: 'bool',
+      hint: 'APIs. Pre-selected when tracing is first enabled',
+    },
+    {
+      path: 'tracing.levels.error',
+      label: 'Trace level: errors',
+      type: 'bool',
+      hint: 'Errors. Pre-selected when tracing is first enabled',
+    },
+  ],
+};
 
 const PROVIDER_GROUPS: FieldGroup[] = [
   { id: 'general', label: 'General', fields: COMMON_FIELDS },
@@ -1508,6 +1550,7 @@ const PROVIDER_GROUPS: FieldGroup[] = [
       { path: 'storageService.auto.rewards.completion', label: 'Credits at the end of the term', type: 'number' },
     ],
   },
+  LOGGING_GROUP,
 ];
 
 const ALGORITHM_GROUPS: FieldGroup[] = [
@@ -1632,4 +1675,5 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
       { path: 'console.comments.perPage', label: 'Comments: items per page', type: 'number', hint: '5–500' },
     ],
   },
+  LOGGING_GROUP,
 ];

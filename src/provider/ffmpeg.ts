@@ -4,11 +4,13 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { TraceStore } from '../shared/tracing-node.js';
 import { vvshPlan, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 
 const executable = () => process.env.VIBESHARE_FFMPEG?.trim() || 'ffmpeg';
 
-async function processOutput(args: string[], input?: Uint8Array): Promise<Buffer> {
+async function processOutput(args: string[], input?: Uint8Array, traces?: TraceStore): Promise<Buffer> {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     const child = spawn(executable(), args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
@@ -17,13 +19,29 @@ async function processOutput(args: string[], input?: Uint8Array): Promise<Buffer
     child.stderr.on('data', (data: Buffer) => {
       if (stderr.length < 32_000) stderr += data.toString('utf8').slice(0, 32_000 - stderr.length);
     });
-    child.on('error', reject);
+    child.on('error', (error) => {
+      traces?.trace('error', 'provider.ffmpeg', 'ffmpeg failed', { error: (error as Error).message });
+      reject(error);
+    });
     child.on('close', (code) => {
-      if (code === 0) resolve(Buffer.concat(stdout));
-      else reject(new Error(`FFmpeg exited with ${code}: ${stderr.trim().slice(-4000) || 'no error output'}`));
+      if (code === 0) {
+        const out = Buffer.concat(stdout);
+        // The executable is a dependency like any other API: one line per invocation.
+        traces?.trace('dependency', 'provider.ffmpeg', 'ffmpeg run', {
+          data: { args: args.length, inBytes: input?.length ?? 0, outBytes: out.length, ms: Date.now() - started },
+        });
+        resolve(out);
+      } else {
+        const message = `FFmpeg exited with ${code}: ${stderr.trim().slice(-4000) || 'no error output'}`;
+        traces?.trace('error', 'provider.ffmpeg', 'ffmpeg failed', { error: message, data: { exit: code } });
+        reject(new Error(message));
+      }
     });
     child.stdin.on('error', (error) => {
-      if (code(error) !== 'EPIPE') reject(error);
+      if (code(error) !== 'EPIPE') {
+        traces?.trace('error', 'provider.ffmpeg', 'ffmpeg failed', { error: (error as Error).message, message: 'stdin error' });
+        reject(error);
+      }
     });
     child.stdin.end(input ? Buffer.from(input) : undefined);
   });
@@ -36,13 +54,18 @@ function code(error: unknown): string {
 let availability: Promise<boolean> | undefined;
 
 /** True only when FFmpeg and both codecs required by the VVSH WebM encoding are usable. */
-export function ffmpegAvailable(): Promise<boolean> {
-  availability ??= processOutput(['-hide_banner', '-encoders'])
+export function ffmpegAvailable(traces?: TraceStore): Promise<boolean> {
+  availability ??= processOutput(['-hide_banner', '-encoders'], undefined, traces)
     .then((output) => {
       const encoders = output.toString('utf8');
       return /\blibvpx-vp9\b/.test(encoders) && /\blibopus\b/.test(encoders);
     })
-    .catch(() => false);
+    .catch((error) => {
+      // A node without FFmpeg is fine (the fallback encoder takes over), but the probe
+      // swallowed a real failure on the way there — worth an error line.
+      traces?.trace('error', 'provider.ffmpeg', 'ffmpeg probe failed', { error: (error as Error).message });
+      return false;
+    });
   return availability;
 }
 
@@ -51,10 +74,11 @@ export async function transcodeVvshFfmpeg(
   source: Uint8Array,
   config: VvshBuildConfig,
   totalSeconds: number,
-  onProgress?: (rendition: number, chunk: number, fraction: number) => void
+  onProgress?: (rendition: number, chunk: number, fraction: number) => void,
+  traces?: TraceStore
 ): Promise<Record<string, Uint8Array[]>> {
   if (!source.length) throw new Error('The uploaded video is empty');
-  if (!(await ffmpegAvailable())) throw new Error('FFmpeg with libvpx-vp9 and libopus is not available');
+  if (!(await ffmpegAvailable(traces))) throw new Error('FFmpeg with libvpx-vp9 and libopus is not available');
   const { chunkCount } = vvshPlan(totalSeconds, config);
   const output: Record<string, Uint8Array[]> = {};
   for (const [renditionIndex, rendition] of config.bitrates.entries()) {
@@ -90,7 +114,7 @@ export async function transcodeVvshFfmpeg(
         '-segment_format', 'webm', '-segment_start_number', '0', '-reset_timestamps', '1',
         join(dir, 'chunk-%06d.webm'),
       ];
-      await processOutput(args, source);
+      await processOutput(args, source, traces);
       const names = (await readdir(dir)).filter((name) => /^chunk-\d+\.webm$/.test(name)).sort();
       if (names.length !== chunkCount) {
         throw new Error(`FFmpeg produced ${names.length} chunks for ${rendition.label || rendition.id}; expected ${chunkCount}`);
@@ -104,6 +128,11 @@ export async function transcodeVvshFfmpeg(
       }
       output[rendition.id] = chunks;
     } catch (error) {
+      // This catch exists to report the failing rendition — trace the same detail.
+      traces?.trace('error', 'provider.ffmpeg', 'rendition failed', {
+        error: (error as Error).message,
+        data: { rendition: rendition.id },
+      });
       throw new Error(`Could not encode ${rendition.label || rendition.id} with FFmpeg: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       await rm(dir, { recursive: true, force: true });

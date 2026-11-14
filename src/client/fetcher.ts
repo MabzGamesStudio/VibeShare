@@ -6,6 +6,7 @@ import { RemoteError } from '../shared/remote.js';
 import { log } from '../shared/log.js';
 import type { ChunkStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 export class FetchError extends Error {
   constructor(
@@ -62,7 +63,8 @@ export class Fetcher {
 
   constructor(
     private readonly nodes: NodeManager,
-    private readonly cache: ChunkStore
+    private readonly cache: ChunkStore,
+    private readonly traces: TraceLog = NO_TRACES
   ) {}
 
   private candidates(preferred?: string): NodeEntry[] {
@@ -99,13 +101,24 @@ export class Fetcher {
         }
         const hit = { manifest, provider };
         this.manifests.set(cid, hit);
+        this.traces.trace('dependency', 'fetcher', `GET /v1/content/${cid}`, {
+          message: provider.name,
+          data: { node: provider.id, chunks: manifest.chunks.length },
+        });
         return hit;
       } catch (error) {
         const notHere = error instanceof RemoteError && error.status === 404;
+        this.traces.trace('dependency', 'fetcher', `GET /v1/content/${cid}`, {
+          message: provider.name,
+          data: { node: provider.id },
+          error: notHere ? 'Does not have it' : errorText(error),
+        });
         attempts.push({ node: provider.id, name: provider.name, error: notHere ? 'Does not have it' : errorText(error) });
       }
     }
-    throw new FetchError(mismatched ? CID_MISMATCH : 'No provider node has this content', attempts);
+    const why = mismatched ? CID_MISMATCH : 'No provider node has this content';
+    this.traces.trace('error', 'fetcher', 'manifest failed', { message: cid, error: why });
+    throw new FetchError(why, attempts);
   }
 
   /** One verified chunk: from the cache, or from a provider (paying its price). */
@@ -136,13 +149,24 @@ export class Fetcher {
           throw new Error(CID_MISMATCH);
         }
         await this.cache.put(chunkId, data);
+        this.traces.trace('dependency', 'fetcher', `GET /v1/chunks/${chunkId.slice(0, 12)}`, {
+          message: provider.name,
+          data: { node: provider.id, bytes: data.length },
+        });
         return data;
       } catch (error) {
+        this.traces.trace('dependency', 'fetcher', `GET /v1/chunks/${chunkId.slice(0, 12)}`, {
+          message: provider.name,
+          data: { node: provider.id },
+          error: errorText(error),
+        });
         attempts.push({ node: provider.id, name: provider.name, error: errorText(error) });
         log.debug(`Chunk ${chunkId.slice(0, 12)} from ${provider.name}: ${errorText(error)}`);
       }
     }
-    throw new FetchError(mismatched ? CID_MISMATCH : 'No provider could send this part of the content', attempts);
+    const why = mismatched ? CID_MISMATCH : 'No provider could send this part of the content';
+    this.traces.trace('error', 'fetcher', 'chunk failed', { message: chunkId.slice(0, 12), error: why });
+    throw new FetchError(why, attempts);
   }
 
   /** Estimated credits to fetch the whole content from a provider (ignoring free allowances and cache). */
@@ -158,6 +182,7 @@ export class Fetcher {
    * errors still become a proper status code.
    */
   async open(cid: string, range: string | null | undefined, download: boolean): Promise<ContentResponse> {
+    this.traces.trace('basic', 'fetcher', 'open', { message: cid, data: { range: range ?? null, download } });
     // Content the client ships with (the default article describing VibeShare): its full
     // bytes are always on hand, so it streams and downloads with no provider connection.
     const builtin = builtinContent(cid);
@@ -210,6 +235,7 @@ export class Fetcher {
     // its id — so what is then sent is exactly the content that cid names, or nothing.
     if (download) for (let index = first; index <= last; index++) await this.chunk(cid, index);
     const firstChunk = await this.chunk(cid, first);
+    this.traces.trace('basic', 'fetcher', 'open → ok', { data: { chunks: last - first + 1, status: partial ? 206 : 200 } });
     return { status: partial ? 206 : 200, headers, body: this.pieces(cid, manifest, firstChunk, first, last, offset, end, download ? 4 : 2) };
   }
 
@@ -243,6 +269,7 @@ export class Fetcher {
         attempts.push({ node: 'link', name: link.url, error: errorText(error) });
       }
     }
+    this.traces.trace('error', 'fetcher', 'link answer failed', { message: cid, error: 'No provider could send this content through its links' });
     throw new FetchError('No provider could send this content through its links', attempts);
   }
 

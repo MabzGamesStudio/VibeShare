@@ -6,6 +6,7 @@
 // assignments downgrade (or are forgotten) on the node's schedule. URL backups never come
 // from the same domain twice unless there is no other choice or the operator overrides it.
 import { JsonFile } from '../shared/store.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 import type { Ledger } from '../commerce/ledger.js';
 
 /** One storage medium a tier can place copies on; `backends` are the store's backend ids. */
@@ -161,7 +162,9 @@ export class TierManager {
       bytesOf?: (cid: string) => number;
       /** The content landed on a new tier (or changed tier) — its storage job follows. */
       onChanged?: (cid: string) => void;
-    } = {}
+    } = {},
+    /** The node's trace log (off by default; absent keeps every hook a no-op). */
+    private readonly traces?: TraceStore
   ) {
     this.store = new JsonFile<TierData>(path, () => ({ assignments: {} }));
   }
@@ -201,7 +204,12 @@ export class TierManager {
     if (!existing && tier) assignment.expiresAt = this.expiryFor(tier);
     this.store.data.assignments[cid] = assignment;
     this.store.changed();
-    if (!existing) this.hooks.onChanged?.(cid);
+    if (!existing) {
+      this.traces?.trace('basic', 'provider.tiers', 'tier assigned', {
+        data: { cid: cid.slice(0, 16), tier: assignment.tier, days: tier?.lifecycleDays ?? 0 },
+      });
+      this.hooks.onChanged?.(cid);
+    }
     return assignment;
   }
 
@@ -285,6 +293,9 @@ export class TierManager {
     if (!options.keepExpiry && tier) assignment.expiresAt = this.expiryFor(tier);
     this.store.data.assignments[cid] = assignment;
     this.store.changed();
+    this.traces?.trace('basic', 'provider.tiers', 'tier set', {
+      data: { cid: cid.slice(0, 16), tier: tierId, days: tier?.lifecycleDays ?? 0, manual: options.manual ?? false },
+    });
     this.hooks.onChanged?.(cid);
     return assignment;
   }
@@ -296,6 +307,7 @@ export class TierManager {
     const from = Math.max(Date.now(), assignment.expiresAt ? Date.parse(assignment.expiresAt) : Date.now());
     assignment.expiresAt = new Date(from + days * 86_400_000).toISOString();
     this.store.changed();
+    this.traces?.trace('basic', 'provider.tiers', 'tier extended', { data: { cid: cid.slice(0, 16), tier: assignment.tier, days } });
     return assignment;
   }
 
@@ -320,6 +332,9 @@ export class TierManager {
       charged += price;
       this.extend(cid, body.extendDays);
     }
+    this.traces?.trace('basic', 'provider.tiers', 'tier charged', {
+      data: { account: account.slice(0, 16), cid: cid.slice(0, 16), tier: body.tier, extendDays: body.extendDays, charged },
+    });
     return { charged, state: this.stateOf(cid)! };
   }
 
@@ -330,6 +345,12 @@ export class TierManager {
     if (!assignment) return;
     assignment.urls[url] = new Date().toISOString();
     this.store.changed();
+    // What the domain rule made of it: how many backups count now, and whether the
+    // plan's wanted number is covered.
+    const backups = this.backupCount(cid);
+    this.traces?.trace('basic', 'provider.tiers', 'url backup accepted', {
+      data: { cid: cid.slice(0, 16), domain: domainOf(url), counted: backups.counted, domains: backups.domains.length, satisfied: backups.satisfied },
+    });
     void this.maybeRelease(cid);
   }
 
@@ -358,7 +379,13 @@ export class TierManager {
     if (localCopies > 0) return;
     const { satisfied } = this.backupCount(cid);
     const holders = this.hooks.holders?.(cid) ?? 0;
-    if (satisfied || holders > 0) await this.hooks.releaseBytes(cid);
+    if (satisfied || holders > 0) {
+      this.traces?.trace('basic', 'provider.tiers', 'local bytes released', {
+        message: satisfied ? 'URL backups cover the plan' : 'client holders keep copies',
+        data: { cid: cid.slice(0, 16), holders },
+      });
+      await this.hooks.releaseBytes(cid);
+    }
   }
 
   /** Lifecycles: expired assignments downgrade along their chain, or are forgotten. */
@@ -372,9 +399,16 @@ export class TierManager {
       const tier = this.tier(assignment.tier);
       const next = tier?.downgradeTo ?? null;
       if (next && this.tier(next)) {
+        this.traces?.trace('basic', 'provider.tiers', 'tier expired', {
+          data: { cid: assignment.cid.slice(0, 16), tier: assignment.tier, downgradeTo: next },
+        });
         this.setTier(assignment.cid, next, { keepExpiry: false });
       } else {
         // No tier below: the content is deleted from memory entirely.
+        this.traces?.trace('basic', 'provider.tiers', 'assignment expired', {
+          message: 'no tier below to downgrade to',
+          data: { cid: assignment.cid.slice(0, 16), tier: assignment.tier },
+        });
         delete this.store.data.assignments[assignment.cid];
         this.store.changed();
         this.hooks.onChanged?.(assignment.cid);
@@ -388,6 +422,7 @@ export class TierManager {
     if (!this.store.data.assignments[cid]) return false;
     delete this.store.data.assignments[cid];
     this.store.changed();
+    this.traces?.trace('basic', 'provider.tiers', 'tier forgotten', { data: { cid: cid.slice(0, 16) } });
     this.hooks.onChanged?.(cid); // the content's storage job goes with it
     await (this.hooks.deleteContent?.(cid) ?? this.hooks.releaseBytes?.(cid));
     return true;

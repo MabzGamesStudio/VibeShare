@@ -1,5 +1,6 @@
 // Just enough HTML understanding for the crawler: page metadata (title, OpenGraph,
 // Twitter cards, JSON-LD) and links. Regex based on purpose — no DOM, no scripts.
+import type { TraceStore } from '../../shared/tracing-node.js';
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
 
@@ -49,9 +50,12 @@ export interface PageInfo {
   links: { href: string; text: string }[];
 }
 
-export function parseHtml(html: string, pageUrl: string): PageInfo {
+export function parseHtml(html: string, pageUrl: string, traces?: TraceStore): PageInfo {
   const head = html.slice(0, 400_000);
   const info: PageInfo = { url: pageUrl, og: {}, twitter: {}, jsonLd: [], links: [] };
+  // Broken pieces of the page are skipped as always — counted, and reported once at the
+  // end of the page instead of once per piece.
+  const skipped = { canonical: 0, jsonLd: 0, links: 0 };
   const title = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (title) info.title = cleanText(title[1], 300);
   const lang = head.match(/<html\b[^>]*\blang\s*=\s*["']?([a-zA-Z-]{2,10})/i);
@@ -72,6 +76,7 @@ export function parseHtml(html: string, pageUrl: string): PageInfo {
         info.canonical = new URL(attrs.href, pageUrl).toString();
       } catch {
         // ignore a broken canonical link
+        skipped.canonical++;
       }
     }
   }
@@ -87,6 +92,7 @@ export function parseHtml(html: string, pageUrl: string): PageInfo {
       }
     } catch {
       // invalid JSON-LD is common; skip it
+      skipped.jsonLd++;
     }
   }
   const seen = new Set<string>();
@@ -97,6 +103,7 @@ export function parseHtml(html: string, pageUrl: string): PageInfo {
     try {
       resolved = new URL(href, pageUrl);
     } catch {
+      skipped.links++;
       continue;
     }
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue;
@@ -106,6 +113,13 @@ export function parseHtml(html: string, pageUrl: string): PageInfo {
     seen.add(key);
     info.links.push({ href: key, text: cleanText(match[2], 200) });
     if (info.links.length >= 1000) break;
+  }
+  const broken = skipped.canonical + skipped.jsonLd + skipped.links;
+  if (broken) {
+    traces?.trace('error', 'algorithm.html', 'function:parseHtml', {
+      message: `${pageUrl.slice(0, 80)} · ${broken} pieces skipped`,
+      data: { page: pageUrl.slice(0, 120), ...skipped },
+    });
   }
   return info;
 }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { log } from '../shared/log.js';
 import type { Preferences } from '../shared/protocol.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 import type { Entry } from './registry.js';
 
 export const STRATEGIES = ['balanced', 'hot', 'new', 'top', 'random', 'custom'] as const;
@@ -29,6 +30,10 @@ export interface RankContext {
   config: RankingConfig;
   /** Helpers custom rankers can reuse. */
   helpers: typeof helpers;
+  /** The node's trace log, when it keeps one: one summary event per ranking. */
+  trace?: TraceStore;
+  /** Internal: built-in rankers report their winning score here, for that summary. */
+  reportTop?: (topScore: number) => void;
 }
 
 /** A custom ranker returns the items in order, or a score per item id (higher first). */
@@ -66,13 +71,14 @@ export function seededRandom(seed: string, id: string): number {
 
 export const helpers = { wilson, quality, recency, preferenceMatch, seededRandom };
 
-function byScore(items: Entry[], score: (entry: Entry) => number): Entry[] {
+function byScore(items: Entry[], score: (entry: Entry) => number, reportTop?: (topScore: number) => void): Entry[] {
   const scores = new Map(items.map((entry) => [entry.id, score(entry)]));
+  if (reportTop && scores.size) reportTop(Math.max(...scores.values()));
   return [...items].sort((a, b) => scores.get(b.id)! - scores.get(a.id)! || b.publishedAt.localeCompare(a.publishedAt));
 }
 
 const BUILT_IN: Record<Exclude<Strategy, 'custom'>, Ranker> = {
-  balanced(items, { config, now, preferences, seed }) {
+  balanced(items, { config, now, preferences, seed, reportTop }) {
     const w = config.weights;
     return byScore(
       items,
@@ -80,24 +86,29 @@ const BUILT_IN: Record<Exclude<Strategy, 'custom'>, Ranker> = {
         w.quality * quality(entry) +
         w.recency * recency(entry, now, config.halfLifeHours) +
         w.preference * preferenceMatch(entry, preferences) +
-        w.discovery * seededRandom(seed, entry.id)
+        w.discovery * seededRandom(seed, entry.id),
+      reportTop
     );
   },
-  hot(items, { config, now, preferences }) {
-    return byScore(items, (entry) => {
-      const hours = Math.max(0, (now - Date.parse(entry.publishedAt)) / 3600_000);
-      const votes = entry.likes - entry.dislikes + 1;
-      return (votes * (1 + preferenceMatch(entry, preferences))) / Math.pow(hours + 2, config.gravity);
-    });
+  hot(items, { config, now, preferences, reportTop }) {
+    return byScore(
+      items,
+      (entry) => {
+        const hours = Math.max(0, (now - Date.parse(entry.publishedAt)) / 3600_000);
+        const votes = entry.likes - entry.dislikes + 1;
+        return (votes * (1 + preferenceMatch(entry, preferences))) / Math.pow(hours + 2, config.gravity);
+      },
+      reportTop
+    );
   },
   new(items) {
     return [...items].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
   },
-  top(items) {
-    return byScore(items, (entry) => wilson(entry.likes, entry.dislikes));
+  top(items, { reportTop }) {
+    return byScore(items, (entry) => wilson(entry.likes, entry.dislikes), reportTop);
   },
-  random(items, { seed }) {
-    return byScore(items, (entry) => seededRandom(seed, entry.id));
+  random(items, { seed, reportTop }) {
+    return byScore(items, (entry) => seededRandom(seed, entry.id), reportTop);
   },
 };
 
@@ -112,7 +123,7 @@ export const STRATEGY_DESCRIPTIONS: Record<Strategy, string> = {
 
 const customCache = new Map<string, Ranker>();
 
-async function loadCustom(path: string): Promise<Ranker | null> {
+async function loadCustom(path: string, traces?: TraceStore): Promise<Ranker | null> {
   if (customCache.has(path)) return customCache.get(path)!;
   try {
     const module = (await import(pathToFileURL(path).href)) as { default?: Ranker; rank?: Ranker };
@@ -122,25 +133,60 @@ async function loadCustom(path: string): Promise<Ranker | null> {
     return ranker;
   } catch (error) {
     log.error(`Custom ranking module ${path}: ${(error as Error).message}; falling back to balanced`);
+    traces?.trace('error', 'algorithm.ranking', 'function:loadCustom', {
+      message: `${path.slice(-60)} did not load; falling back to balanced`,
+      error: (error as Error).message,
+    });
     return null;
   }
 }
 
 export async function rank(items: Entry[], context: Omit<RankContext, 'helpers'>): Promise<Entry[]> {
-  const full: RankContext = { ...context, helpers };
+  let topScore: number | undefined;
+  const full: RankContext = {
+    ...context,
+    helpers,
+    // The winning score is only asked of the strategies, so the summary can carry it.
+    reportTop: (score) => {
+      topScore = score;
+    },
+  };
   const { strategy, module } = context.config;
+  const started = Date.now();
+  let ranked: Entry[] | null = null;
   if (strategy === 'custom' && module) {
-    const ranker = await loadCustom(module);
+    const ranker = await loadCustom(module, context.trace);
     if (ranker) {
       try {
         const result = await ranker(items, full);
-        if (Array.isArray(result)) return result;
-        return byScore(items, (entry) => result[entry.id] ?? 0);
+        if (Array.isArray(result)) {
+          ranked = result;
+        } else {
+          const scores = Object.values(result);
+          if (scores.length) topScore = Math.max(...scores);
+          ranked = byScore(items, (entry) => result[entry.id] ?? 0);
+        }
       } catch (error) {
         log.error(`Custom ranking failed: ${(error as Error).message}`);
+        context.trace?.trace('error', 'algorithm.ranking', 'function:rank', {
+          message: 'the custom ranking failed; falling back to the built-in strategy',
+          error: (error as Error).message,
+        });
       }
     }
   }
-  const ranker = BUILT_IN[strategy as Exclude<Strategy, 'custom'>] ?? BUILT_IN.balanced;
-  return ranker(items, full) as Entry[];
+  if (!ranked) ranked = (BUILT_IN[strategy as Exclude<Strategy, 'custom'>] ?? BUILT_IN.balanced)(items, full) as Entry[];
+  // One summary per ranking: what strategy decided, over how many candidates, and how it scored.
+  const ms = Date.now() - started;
+  context.trace?.trace('basic', 'algorithm.ranking', 'function:rank', {
+    message: `${strategy} ranked ${items.length} candidates in ${ms} ms`,
+    data: {
+      strategy,
+      candidates: items.length,
+      returned: ranked.length,
+      ...(topScore !== undefined ? { topScore: Math.round(topScore * 1000) / 1000 } : {}),
+      ms,
+    },
+  });
+  return ranked;
 }

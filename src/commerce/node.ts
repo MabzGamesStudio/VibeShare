@@ -27,6 +27,8 @@ import {
   type SignedInfo,
 } from '../shared/protocol.js';
 import { ensureDir, JsonFile } from '../shared/store.js';
+import { normalizeTraceSettings, type TraceSettings } from '../shared/tracing.js';
+import { TraceStore, tracingRoutes } from '../shared/tracing-node.js';
 import { Auth, type SignupConfig } from './auth.js';
 import { Ledger } from './ledger.js';
 import { Moderation } from './moderation.js';
@@ -48,6 +50,8 @@ export interface BaseConfig {
   payments: PaymentConfig[];
   /** Node references this operator recommends to clients. */
   peers: string[];
+  /** Local tracing (off by default): what is recorded and for how long. */
+  tracing?: TraceSettings;
   tor: NodeTorConfig;
 }
 
@@ -116,6 +120,8 @@ export abstract class BaseNode<C extends BaseConfig> {
   readonly payments: Payments;
   /** Bans, suspensions and rate limits for accounts, IPs and peers — shared with peers. */
   readonly moderation: Moderation;
+  /** The node's local trace log (off by default; see config.tracing). */
+  readonly traces: TraceStore;
   protected readonly configFile: JsonFile<C>;
   private overrides: DeepPartial<C>;
   private server: Server | null = null;
@@ -150,6 +156,10 @@ export abstract class BaseNode<C extends BaseConfig> {
       sign: (payload) => signData(this.identity, payload),
     }));
     this.tor = new TorRouter(() => ({ mode: this.config.tor.outbound, proxy: this.config.tor.proxy }));
+    this.traces = new TraceStore(type, dir ? ensureDir(dir) : null, () => normalizeTraceSettings(this.config.tracing), async (settings) => {
+      this.configFile.data.tracing = settings;
+      this.configFile.changed();
+    });
   }
 
   /** How to send a request to a URL: through Tor when tor.outbound says so (undefined: directly). */
@@ -266,6 +276,7 @@ export abstract class BaseNode<C extends BaseConfig> {
       signup: { grant: config.signup.grant, powBits: config.signup.powBits, anonymous: config.signup.anonymous },
       payments: this.payments.info(),
       peers: config.peers.filter((peer) => parseNodeRef(peer)),
+      tracing: this.traces.info(),
     };
     return { ...base, ...this.extraInfo() } as NodeInfo;
   }
@@ -284,6 +295,8 @@ export abstract class BaseNode<C extends BaseConfig> {
   private baseRoutes(): void {
     const router = this.router;
     router.get('/v1/info', () => this.signedInfo());
+    // The local trace log (off by default): the same API on every node kind.
+    tracingRoutes(router, this.traces, '/v1/admin/tracing', (ctx) => this.requireAdmin(ctx));
     this.auth.routes(router);
     router.get('/v1/account', (ctx) => {
       const account = this.auth.require(ctx);
@@ -480,6 +493,13 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
       cors: true,
       trustProxy: this.config.trustProxy,
       name: this.type,
+      // Local tracing: one timeline per API request (dependency + error events), only
+      // recorded when the operator has tracing on.
+      trace: {
+        request: (label) => this.traces.recorder.start({ kind: 'api', label }),
+        done: (traceId) => this.traces.trace('dependency', 'api', 'request ok', { traceId }),
+        failed: (traceId, error) => this.traces.trace('error', 'api', 'request failed', { traceId, error: (error as Error).message }),
+      },
       // Bans, suspensions and rate limits apply to every request before routing — the
       // admin itself is never locked out (it is how bans get lifted again).
       guard: (ctx) => {

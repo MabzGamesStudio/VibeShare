@@ -19,12 +19,14 @@ import { api, errorMessage, IS_STATIC } from '../api';
 import { PageIconView } from '../components/feed/icons';
 import { PageEditor } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
+import { TraceSettingsForm } from '../components/Tracing';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { HOSTING_PLATFORMS } from '../earn/hosting';
 import { useApp } from '../state';
 import { chooseConsent, loadConsent } from '../consent';
 import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
 import { HistorySection } from './History';
+import { TracingSection } from './Tracing';
 import { splitList } from '../util';
 import { AUTH_LABELS } from './Nodes';
 
@@ -884,6 +886,7 @@ const SETTINGS_TABS: [string, string][] = [
   ['profiles', 'Profiles'],
   ['history', 'History'],
   ['logs', 'Logs'],
+  ['tracing', 'Tracing'],
 ];
 
 /** Which tab a deep link (settings?tab=profiles…; the old #profiles links too) lands on. */
@@ -909,6 +912,9 @@ function tabForTarget(target: string): string {
     logs: 'logs',
     log: 'logs',
     debug: 'logs',
+    tracing: 'tracing',
+    trace: 'tracing',
+    traces: 'tracing',
     toasts: 'history',
     toast: 'history',
   };
@@ -925,6 +931,7 @@ function LogsCard() {
   useEffect(() => {
     setDebugLogs(on);
   }, [on]);
+  const tracing = state?.settings.tracing;
   const lines = logLines();
   return (
     <div className="card form-stack">
@@ -939,6 +946,12 @@ function LogsCard() {
         branch), what came back, the merkle path it verified, and what the player decided to load. That is how to check that a 10-second-chunk
         video with a 60-second window loads chunks 0–6 first, and only 100–106 after skipping to chunk 100.
       </p>
+      {tracing && (
+        <TraceSettingsForm
+          settings={tracing}
+          onChange={(patch) => void updateSettings({ tracing: { ...tracing, ...patch } })}
+        />
+      )}
       {lines.length > 0 && (
         <div className="row">
           <button className="small" onClick={clearLogs}>
@@ -1317,6 +1330,8 @@ export function SettingsPage() {
       )}
 
       {tab === 'logs' && <LogsCard />}
+
+      {tab === 'tracing' && <TracingSection />}
 
       {tab === 'nodes' && <NodesSection />}
 

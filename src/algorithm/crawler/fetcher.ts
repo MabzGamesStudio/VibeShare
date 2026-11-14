@@ -1,6 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { log } from '../../shared/log.js';
+import type { TraceStore } from '../../shared/tracing-node.js';
 import { Robots } from './robots.js';
 
 export class RobotsDisallowed extends Error {
@@ -53,6 +54,8 @@ export interface FetcherOptions {
   apiDelayMs?: () => number;
   /** A fetch through Tor for this URL, when the node sends the crawler through Tor (undefined: directly). */
   transport?: (url: URL) => typeof fetch | undefined;
+  /** The node's trace log, when it keeps one: robots.txt failures are recorded there. */
+  trace?: TraceStore;
 }
 
 export interface Fetched {
@@ -189,6 +192,12 @@ export class PoliteFetcher {
         }
       } catch (error) {
         log.debug(`robots.txt of ${origin}: ${(error as Error).message}`);
+        // Unreachable robots.txt is swallowed here into "disallow all" — recorded as the
+        // failure it is, so a site going quiet is visible in the trace.
+        this.options.trace?.trace('error', 'algorithm.fetcher', 'robots.txt', {
+          message: `${origin.slice(0, 80)} unreachable`,
+          error: (error as Error).message,
+        });
         robots = Robots.disallowAll();
         ttl = ROBOTS_ERROR_TTL_MS;
       }

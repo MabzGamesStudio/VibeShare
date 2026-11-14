@@ -92,7 +92,7 @@ function sameSite(a: URL, b: URL): boolean {
 export async function crawlPage(ctx: CrawlContext, config: WebConfig, url: string, depth: number, seed: string): Promise<AdapterResult & { identify: { url: string; title?: string }[] }> {
   const response = await ctx.fetcher.get(url, { accept: 'text/html,application/xhtml+xml', maxBytes: 3_000_000 });
   if (!/html/i.test(response.contentType)) return { items: [], links: [], identify: [] };
-  const info = parseHtml(response.text(), response.url);
+  const info = parseHtml(response.text(), response.url, ctx.traces);
   const items: Discovered[] = [];
   const own = pageContent(info);
   if (own) items.push(own);

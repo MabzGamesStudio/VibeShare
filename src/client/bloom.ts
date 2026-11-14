@@ -13,6 +13,7 @@
 import { BloomFilter, BLOOM_EXPECTED_ITEMS, optimalHashCount, type BloomFilterData, type ContentIdentity } from '../shared/bloom.js';
 import type { AccountBloomSettings, BloomFilterSettings, BloomStatus } from '../shared/clientapi.js';
 import type { BloomData, ClientStoreLike } from './model.js';
+import { NO_TRACES, type TraceLog } from './trace.js';
 
 export type BloomScope = 'selected' | 'preview' | 'search' | 'account';
 
@@ -34,7 +35,10 @@ export const SCOPES_OF_EVENT: Record<'selected' | 'preview', BloomScope[]> = {
 export class BloomBook {
   private filters: Partial<Record<BloomScope, BloomFilter>> = {};
 
-  constructor(private readonly store: ClientStoreLike) {
+  constructor(
+    private readonly store: ClientStoreLike,
+    private readonly traces: TraceLog = NO_TRACES
+  ) {
     this.prune();
   }
 
@@ -109,6 +113,8 @@ export class BloomBook {
       newKeys += this.filter(scope).addContent(input);
       this.save(scope);
     }
+    // Only what actually entered a filter is worth a line — repeats change nothing.
+    if (newKeys) this.traces.trace('basic', 'blooms', 'mark', { data: { added: newKeys, scopes } });
     return newKeys;
   }
 
@@ -117,6 +123,7 @@ export class BloomBook {
     delete this.data[scope];
     this.filters[scope] = undefined;
     this.store.changed();
+    this.traces.trace('basic', 'blooms', 'reset', { message: scope });
   }
 
   /** Whether the content collides with one filter (false while that filter is off). */

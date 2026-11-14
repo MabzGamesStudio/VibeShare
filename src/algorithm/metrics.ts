@@ -5,6 +5,7 @@
 // to 1× as the post gets older. Any metric can be switched off; the overall multiplier
 // is never less than 1.
 import { SOURCE_CATALOG } from './sources.js';
+import type { TraceStore } from '../shared/tracing-node.js';
 
 export interface ClaimMetricDef {
   /** The key clients send in `ClaimRequest.metrics`. */
@@ -180,7 +181,9 @@ export function claimMultiplier(
   rule: ClaimSourceRule,
   metrics: Record<string, number>,
   publishedAt: string | undefined,
-  now: number = Date.now()
+  now: number = Date.now(),
+  /** The node's trace log, when it keeps one: the computed weights are summarised once. */
+  traces?: TraceStore
 ): { multiplier: number; parts: Record<string, number> } {
   const parts: Record<string, number> = {};
   let sum = 0;
@@ -200,5 +203,14 @@ export function claimMultiplier(
     recency = Math.max(1, (Number(rec.multiplier) || 1) * Math.exp(-ageDays / halfLife));
   }
   parts.recency = recency;
-  return { multiplier: Math.max(1, sum * recency), parts };
+  const multiplier = Math.max(1, sum * recency);
+  // The weights this claim computed to, rounded for the trace (the parts sum × recency).
+  traces?.trace('basic', 'algorithm.metrics', 'function:claimMultiplier', {
+    message: `×${Math.round(multiplier * 100) / 100} from ${Object.keys(parts).length} weights`,
+    data: {
+      multiplier: Math.round(multiplier * 1000) / 1000,
+      parts: Object.fromEntries(Object.entries(parts).map(([key, value]) => [key, Math.round(value * 1000) / 1000])),
+    },
+  });
+  return { multiplier, parts };
 }
