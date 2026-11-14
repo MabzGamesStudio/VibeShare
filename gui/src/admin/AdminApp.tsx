@@ -1320,11 +1320,17 @@ export function AdminApp() {
       <div className="tabs">
         {tabs.map(([id, label]) =>
           // Tabs with a hover menu below them: Review (the review pages), Catalog (the
-          // catalog, creators, groups and topics), Content (add pages), Accounts
-          // (moderation) and Settings (the configuration groups). The
+          // catalog, creators, groups and topics), Content (add pages), Storage (the
+          // backends and the storage jobs), Accounts (moderation) and Settings (the
+          // configuration groups). The
           // menu is fixed-positioned so the scrolling tabs bar cannot clip it — it opens
           // over the content at the top.
-          (id === 'content' && provider) || id === 'accounts' || id === 'settings' || id === 'review' || id === 'catalog' ? (
+          (id === 'content' && provider) ||
+          (id === 'storage' && provider) ||
+          id === 'accounts' ||
+          id === 'settings' ||
+          id === 'review' ||
+          id === 'catalog' ? (
             <div
               key={id}
               className="tab-menu"
@@ -1338,6 +1344,7 @@ export function AdminApp() {
                 className={`tab ${
                   tab === id ||
                   (id === 'content' && (tab === 'add-local' || tab === 'suggestions')) ||
+                  (id === 'storage' && tab === 'storage-jobs') ||
                   (id === 'accounts' && tab === 'moderation') ||
                   (id === 'review' && tab.startsWith('review')) ||
                   (id === 'catalog' && (tab === 'creators' || tab === 'groups' || tab === 'groups-topics'))
@@ -1359,6 +1366,12 @@ export function AdminApp() {
                     <>
                       <button onClick={() => (setTabMenu(null), setTab('add-local'), load())}>Add locally</button>
                       <button onClick={() => (setTabMenu(null), setTab('suggestions'), load())}>Client suggestion</button>
+                    </>
+                  )}
+                  {id === 'storage' && (
+                    <>
+                      <button onClick={() => (setTabMenu(null), setTab('storage'), load())}>Storage backends</button>
+                      <button onClick={() => (setTabMenu(null), setTab('storage-jobs'), load())}>Storage Jobs</button>
                     </>
                   )}
                   {id === 'review' && (

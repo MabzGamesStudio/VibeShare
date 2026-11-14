@@ -46,7 +46,17 @@ function readToken(): string {
   return token;
 }
 
-export const token = readToken();
+/**
+ * The daemon's local API token, read per call rather than once at module load: the meta
+ * tag can appear after this module first runs, and a restarted daemon rotates its token —
+ * a cached one would lock the GUI out of its own backend until a full reload. When there
+ * is no token, no header is sent at all: an empty `x-vs-token` would outrank the daemon's
+ * own cookie on the server side and turn every call into a 403.
+ */
+function authHeaders(): Record<string, string> {
+  const token = readToken();
+  return token ? { 'x-vs-token': token } : {};
+}
 
 /**
  * Calls the listener with the node list (status and credits) whenever it changes in the
@@ -67,7 +77,7 @@ export function onNodesChanged(listener: (nodes: NodeEntry[]) => void): () => vo
     };
   }
   // (EventSource cannot send headers; the daemon also takes its token as ?t=.)
-  const events = new EventSource(`/api/events?t=${encodeURIComponent(token)}`);
+  const events = new EventSource(`/api/events?t=${encodeURIComponent(readToken())}`);
   events.addEventListener('nodes', (event) => listener(JSON.parse((event as MessageEvent<string>).data) as NodeEntry[]));
   return () => events.close();
 }
@@ -86,7 +96,7 @@ export class ApiError extends Error {
 export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
   const response = await send(path, {
     method: init.method ?? (init.body !== undefined ? 'POST' : 'GET'),
-    headers: { 'x-vs-token': token, 'content-type': 'application/json' },
+    headers: { ...authHeaders(), 'content-type': 'application/json' },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
   const text = await response.text();
@@ -115,7 +125,8 @@ export function uploadFile(file: File, onProgress: (fraction: number) => void): 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', resolvePath('/api/upload'));
-    xhr.setRequestHeader('x-vs-token', token);
+    const auth = authHeaders();
+    if (auth['x-vs-token']) xhr.setRequestHeader('x-vs-token', auth['x-vs-token']);
     xhr.setRequestHeader('content-type', 'application/octet-stream');
     xhr.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded / event.total);
     xhr.onload = () => {
@@ -151,6 +162,6 @@ export function resolveStream(src: string): Promise<string> {
 
 /** URL that streams (or downloads) native content through the client backend. */
 export function streamUrl(base: string, download = false): string {
-  const query = [download ? 'download=1' : '', IS_STATIC ? '' : `t=${token}`].filter(Boolean).join('&');
+  const query = [download ? 'download=1' : '', IS_STATIC ? '' : `t=${readToken()}`].filter(Boolean).join('&');
   return `${resolvePath(`/stream/${base}`)}${query ? `?${query}` : ''}`;
 }

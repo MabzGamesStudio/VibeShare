@@ -55,6 +55,21 @@ export interface HostingPlatform {
   buildBaseUrl: (values: Record<string, string>) => string;
   /** The site root the panel-1 check probes (when the content folder may not exist yet). */
   buildSiteUrl?: (values: Record<string, string>) => string;
+  /**
+   * Parses a typed base URL back into the field values, so the fields and the base URL
+   * stay in sync both ways. `null` means the address does not match this platform's
+   * expected structure: the fields are then left untouched and the wizard warns instead
+   * of guessing. `values` is the current state — it disambiguates shapes the address
+   * alone cannot (GitHub's user site, GitLab subgroup paths).
+   */
+  parseBaseUrl?: (url: string, values: Record<string, string>) => Record<string, string> | null;
+  /** What a matching base URL looks like — shown in the warning when an edited one does not. */
+  describeUrlShape?: string;
+  /**
+   * Addresses the step-1 site check accepts besides the site URL itself, for platforms
+   * that serve one site under more than one address (GitLab's classic and unique domains).
+   */
+  siteUrlCandidates?: (values: Record<string, string>) => string[];
   /** Which push pipeline this platform's `publish` runs; every one of them is wired up. */
   publish?: 'github' | 'gitlab' | 'netlify' | 'cloudflare' | 'vercel' | 'firebase' | 'render' | 'appwrite' | 'surge' | 'neocities' | 'codeberg' | 'aws' | 'azure' | 'gcloud';
 }
@@ -96,6 +111,100 @@ export function contentUrl(baseUrl: string, cid: string): string {
 export function contentPath(values: Record<string, string>, cid: string): string {
   const folder = (values.folder ?? '').trim().replace(/^\/+|\/+$/g, '');
   return `${folder ? `${folder}/` : ''}${cid.trim().replace(/^\/+/, '')}`;
+}
+
+// --------------------------------------------------------------- base URL parsing
+
+/** A typed base URL split into its lower-cased host and its path parts (no empties). */
+function splitUrl(url: string): { host: string; path: string[] } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) return null;
+  return { host: parsed.hostname.toLowerCase(), path: parsed.pathname.split('/').filter(Boolean) };
+}
+
+/** Base URLs compared as addresses: no scheme, no trailing slash, no case. */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * The shared parser for platforms whose address is https://<value><suffix>/[<folder>/]:
+ * the name field is the subdomain and the path is the folder for content ids.
+ */
+function hostFolderParser(field: string, suffix: string): (url: string) => Record<string, string> | null {
+  return (url) => {
+    const split = splitUrl(url);
+    if (!split) return null;
+    const tail = suffix.toLowerCase();
+    if (!split.host.endsWith(tail)) return null;
+    const name = split.host.slice(0, -tail.length);
+    if (!name || name.endsWith('.')) return null;
+    return { [field]: name, folder: split.path.join('/') };
+  };
+}
+
+/**
+ * GitLab Pages serves one project under two addresses: the classic
+ * https://<namespace>.gitlab.io/<project-path>/ (the full path — subgroups included) and
+ * the unique domain https://<project>-<six-digit-id>.gitlab.io/ that new projects get by
+ * default (Deploy → Pages shows it). A project named <namespace>.gitlab.io is served at
+ * the root of that domain. Verified at docs.gitlab.com/user/project/pages/
+ * getting_started_part_one/ — the classic URL 308-redirects to the unique domain.
+ */
+function parseGitlabUrl(url: string, values: Record<string, string>): Record<string, string> | null {
+  const split = splitUrl(url);
+  if (!split) return null;
+  const tail = '.gitlab.io';
+  if (!split.host.endsWith(tail)) return null;
+  const namespace = split.host.slice(0, -tail.length);
+  if (!namespace) return null;
+  if (!split.path.length) {
+    // An empty path is a user/group site (a project named <namespace>.gitlab.io) or a
+    // unique domain — neither carries the project in the address, so nothing is guessed.
+    return {};
+  }
+  const project = (values.project ?? '').trim().replace(/^\/+|\/+$/g, '');
+  const joined = split.path.join('/');
+  if (project && joined.toLowerCase() === project.toLowerCase()) return { namespace };
+  if (project && joined.toLowerCase().startsWith(`${project.toLowerCase()}/`)) {
+    // The published folder is served at the site root, so at most one folder part can
+    // follow the project in the address — it maps back to the folder field.
+    return { namespace, folder: joined.slice(project.length + 1) };
+  }
+  // A trailing part equal to the current folder is that folder (…/<project>/<folder>/).
+  const folder = (values.folder ?? '').trim();
+  if (folder && split.path.length > 1 && split.path[split.path.length - 1].toLowerCase() === folder.toLowerCase()) {
+    return { namespace, project: split.path.slice(0, -1).join('/') };
+  }
+  // Otherwise the whole path is the project path: GitLab serves subgroup projects under
+  // their full path (namespace.gitlab.io/documentation/product-manual/).
+  return { namespace, project: joined };
+}
+
+/** The fallback for platforms without their own parser: map back only the folder part. */
+function genericParseBaseUrl(platform: HostingPlatform, url: string, values: Record<string, string>): Record<string, string> | null {
+  const split = splitUrl(url);
+  if (!split) return null;
+  // Where the address stops being the host and starts being the folder is unknown here:
+  // try every split and keep the first one that rebuilds exactly this address.
+  for (let keep = 0; keep <= split.path.length; keep++) {
+    const folder = split.path.slice(keep).join('/');
+    if (normalizeUrl(platform.buildBaseUrl({ ...values, folder })) === normalizeUrl(url)) return { folder };
+  }
+  return null;
+}
+
+/**
+ * Parses a typed base URL back into the fields: the platform's own parser, or the
+ * generic host-and-folder one when it has none. `null` = the structure does not match.
+ */
+export function parseHostUrl(platform: HostingPlatform, url: string, values: Record<string, string>): Record<string, string> | null {
+  return (platform.parseBaseUrl ?? ((target) => genericParseBaseUrl(platform, target, values)))(url, values);
 }
 
 /**
@@ -278,6 +387,23 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       const root = repo.toLowerCase() === `${owner.toLowerCase()}.github.io`;
       return buildUrl(`${owner}.github.io`, ...(root ? [folder] : [repo, folder]));
     },
+    // https://<owner>.github.io/<repo>/[<folder>/] — except the user site (a repository
+    // named <owner>.github.io), which Pages serves at the domain root instead.
+    parseBaseUrl: (url, values): Record<string, string> | null => {
+      const split = splitUrl(url);
+      if (!split) return null;
+      const tail = '.github.io';
+      if (!split.host.endsWith(tail)) return null;
+      const owner = split.host.slice(0, -tail.length);
+      if (!owner) return null;
+      const userSite = `${owner}.github.io`;
+      const [repo, ...folder] = split.path;
+      if (!repo) return { owner, repo: userSite, folder: '' };
+      if (repo.toLowerCase() === userSite.toLowerCase()) return { owner, repo: userSite, folder: folder.join('/') };
+      if ((values.repo ?? '').trim().toLowerCase() === userSite.toLowerCase()) return { owner, folder: split.path.join('/') };
+      return { owner, repo, folder: folder.join('/') };
+    },
+    describeUrlShape: 'https://<owner>.github.io/<repository>/[<folder>/] (the user site https://<owner>.github.io/ when the repository is <owner>.github.io)',
     publish: 'github',
   },
   {
@@ -333,6 +459,8 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'API token', secret: true, hint: 'Custom token with Account · Cloudflare Pages · Edit.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.pages.dev`, values.folder ?? ''),
+    parseBaseUrl: hostFolderParser('project', '.pages.dev'),
+    describeUrlShape: 'https://<project>.pages.dev/[<folder>/]',
     // Wired up: the push pipeline uploads each content id with the Pages direct upload API
     // (POST /accounts/<account>/pages/projects/<project>/deployments).
     publish: 'cloudflare',
@@ -342,7 +470,7 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     name: 'GitLab Pages',
     signup: 'https://gitlab.com/users/sign_up',
     docs: 'https://docs.gitlab.com/user/project/pages/',
-    about: 'Free project sites at <namespace>.gitlab.io/<project>/, published by the project pipeline. No credit card.',
+    about: 'Free project sites published by the project pipeline: at <namespace>.gitlab.io/<project>/, or at the unique domain <project>-<six-digit-id>.gitlab.io that new projects get by default. No credit card.',
     steps: [
       {
         title: 'Open the free account',
@@ -395,16 +523,22 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'See your site',
         lines: [
-          'Wait a minute, then open the address below (replace YOUR-NAME with your GitLab user or group path).',
-          'The pipeline publishes public/ as the site.',
+          'Wait a minute for the pipeline to turn green, then open the project’s Deploy → Pages (older layouts say Settings → Pages).',
+          'GitLab lists the exact address of your site there — copy the one it shows. New projects get their own unique domain (https://<project>-<six-digit-id>.gitlab.io/) by default; the classic address below works too and redirects to it.',
+          'The address never contains the published folder — the pipeline publishes public/ as the site root, so /<cid> is where each content id lands.',
+          'Fill the two fields below with the user or group path and the project name from the project page (gitlab.com/<namespace>/<project>) — they build the classic address under the fields.',
         ],
-        copies: [{ label: 'Site address', value: 'https://YOUR-NAME.gitlab.io/vibeshare-data/' }],
-        check: 'That address opens your index.html.',
+        fields: ['namespace', 'project'],
+        copies: [
+          { label: 'Classic site address (built from your answers)', value: 'https://<namespace>.gitlab.io/<project>/' },
+          { label: 'Unique domain GitLab shows under Deploy → Pages', value: 'https://<project>-<six-digit-id>.gitlab.io/' },
+        ],
+        check: 'The address GitLab shows opens your index.html — not a 404.',
       },
     ],
     fields: [
-      { id: 'namespace', label: 'User or group', placeholder: 'yourname', hint: 'The path your project lives under.' },
-      { id: 'project', label: 'Project', placeholder: 'vibeshare-data' },
+      { id: 'namespace', label: 'User or group', placeholder: 'yourname', hint: 'The path your project lives under (gitlab.com/<namespace>/<project>).' },
+      { id: 'project', label: 'Project', placeholder: 'vibeshare-data', hint: 'The project path — the last part of the project page address.' },
       { id: 'branch', label: 'Branch', default: 'main', hint: 'The branch the pages job runs on (Manage → Repository → Branches).' },
       {
         id: 'folder',
@@ -415,8 +549,26 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'Access token', secret: true, hint: 'Avatar → Edit profile → Access → Personal access tokens, scope api (read-write).' },
     ],
     // Pages publishes the folder (public/) as the site root, so the folder is not in the
-    // address: a file at public/<cid> is served at /<cid>.
-    buildBaseUrl: (values) => buildUrl(`${(values.namespace ?? '').trim()}.gitlab.io`, (values.project ?? '').trim()),
+    // address: a file at public/<cid> is served at /<cid>. A project named
+    // <namespace>.gitlab.io is the user/group site and is served at the domain root.
+    buildBaseUrl: (values) => {
+      const namespace = (values.namespace ?? '').trim();
+      const project = (values.project ?? '').trim();
+      if (!namespace || !project) return '';
+      if (project.toLowerCase() === `${namespace}.gitlab.io`.toLowerCase()) return buildUrl(`${namespace}.gitlab.io`);
+      return buildUrl(`${namespace}.gitlab.io`, project);
+    },
+    // Both documented address forms are accepted: the classic one parses into the fields,
+    // the unique domain (which does not carry the namespace or project) is kept as typed.
+    parseBaseUrl: parseGitlabUrl,
+    describeUrlShape: 'https://<namespace>.gitlab.io/<project>/ or the unique domain https://<project>-<six-digit-id>.gitlab.io/ that Deploy → Pages shows',
+    // The site check accepts the classic address beside whatever the base URL holds —
+    // with unique domains on, the classic one answers by redirecting to the unique one.
+    siteUrlCandidates: (values) => {
+      const namespace = (values.namespace ?? '').trim();
+      const project = (values.project ?? '').trim();
+      return namespace && project && project.toLowerCase() !== `${namespace}.gitlab.io`.toLowerCase() ? [buildUrl(`${namespace}.gitlab.io`, project)] : [];
+    },
     // Wired: commits each content id with the GitLab files API (POST or PUT
     // /api/v4/projects/<id>/repository/files/<path>, authenticated with PRIVATE-TOKEN).
     publish: 'gitlab',
@@ -488,6 +640,8 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.site ?? '').trim()}.netlify.app`, values.folder ?? ''),
     buildSiteUrl: (values) => buildUrl(`${(values.site ?? '').trim()}.netlify.app`),
+    parseBaseUrl: hostFolderParser('site', '.netlify.app'),
+    describeUrlShape: 'https://<site>.netlify.app/[<folder>/]',
     // Wired up: the push creates a deployment with the files API
     // (POST https://api.netlify.com/api/v1/sites/<site>/deploys), carrying everything the
     // site already serves plus the content id, and the deploy goes live by itself.
@@ -546,6 +700,8 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.vercel.app`, values.folder ?? ''),
     buildSiteUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.vercel.app`),
+    parseBaseUrl: hostFolderParser('project', '.vercel.app'),
+    describeUrlShape: 'https://<project>.vercel.app/[<folder>/]',
     // Wired up: the push pipeline creates a deployment with the REST API
     // (POST https://api.vercel.com/v13/deployments), reusing the copies Vercel already holds.
     publish: 'vercel',
@@ -623,6 +779,7 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'key', label: 'Service account key', secret: true, hint: 'Project settings → Service accounts → Generate new private key (JSON).' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.project ?? '').trim()}.web.app`, values.folder ?? ''),
+    parseBaseUrl: hostFolderParser('project', '.web.app'),
     // Wired up: the push pipeline deploys with the Hosting REST API
     // (sites/<site>/versions + release).
     publish: 'firebase',
@@ -684,6 +841,7 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'ghToken', label: 'GitHub token', secret: true, hint: 'The access token from the GitHub tab — the client commits each content id with it and Render rebuilds.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.service ?? '').trim()}.onrender.com`, values.folder ?? ''),
+    parseBaseUrl: hostFolderParser('service', '.onrender.com'),
     // Wired up: the push pipeline commits to the repository with the GitHub contents API,
     // which makes Render rebuild (and a deploy is asked for besides).
     publish: 'render',
@@ -868,6 +1026,7 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'apiKey', label: 'API key', secret: true, hint: 'Settings → API Key → Generate.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.site ?? '').trim()}.neocities.org`, values.folder ?? ''),
+    parseBaseUrl: hostFolderParser('site', '.neocities.org'),
     // Wired up: the push pipeline posts the file to the Neocities upload API
     // (POST /api/upload with the API key as the bearer token).
     publish: 'neocities',
@@ -930,6 +1089,7 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       { id: 'token', label: 'Access token', secret: true, hint: 'Settings → Applications → personal access token with repository write.' },
     ],
     buildBaseUrl: (values) => buildUrl(`${(values.user ?? '').trim()}.pages.codeberg.org`, values.folder ?? ''),
+    parseBaseUrl: hostFolderParser('user', '.pages.codeberg.org'),
     // Wired up: Codeberg runs Forgejo — the push pipeline commits through its contents
     // API (POST /api/v1/repos/<user>/<repo>/contents/<path>), the same call as GitHub's.
     publish: 'codeberg',
@@ -1321,9 +1481,12 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
     access: [
       {
         title: 'Where the project lives',
-        lines: ['Open your project: the address reads gitlab.com/NAMESPACE/PROJECT. The namespace is your user or group path.'],
+        lines: [
+          'Open your project: the address reads gitlab.com/NAMESPACE/PROJECT. The namespace is your user or group path.',
+          'Take both parts from that address only. The unique domain from Deploy → Pages (https://<project>-<six-digit-id>.gitlab.io) is a site address, not a project name — never copy its first part into the Project field.',
+        ],
         fields: ['namespace', 'project'],
-        check: 'Namespace and Project match the address of your project page.',
+        check: 'Namespace and Project match the address of your project page (gitlab.com/NAMESPACE/PROJECT).',
       },
       {
         title: 'Which branch the pipeline runs on',
@@ -1353,7 +1516,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       },
     ],
     url: urlGuide(
-      'GitLab Pages publishes the folder below (public) as the site root: a file at public/<cid> is served at /<cid>. The folder never appears in the address — a URL that still contains public/ answers 404, and GitLab may redirect the project site to a unique <project>-<hash>.gitlab.io address (the same site). The base URL under the field is exactly what providers will query.',
+      'GitLab Pages publishes the folder below (public) as the site root: a file at public/<cid> is served at /<cid>. The folder never appears in the address — a URL that still contains public/ answers 404. Paste the exact address GitLab shows under Deploy → Pages into the field below: new projects get a unique domain (https://<project>-<six-digit-id>.gitlab.io/), and the classic https://<namespace>.gitlab.io/<project>/ redirects to it — both serve the same site, and the base URL under the field is exactly what providers will query.',
       'Open the example address — 404 until the commit below is pushed and the pipeline turns green. Never put the folder in the address.'
     ),
     save: saveGuide(
@@ -1871,7 +2034,8 @@ export interface HostDraft {
   values: Record<string, string>;
   /** Which steps are ticked off, per step group (account/access/url/save): the checklist survives a reload. */
   done?: Record<string, boolean[]>;
-  /** The manually edited base URL (empty = built from the fields). */
+  /** The base URL typed over the one the fields build (empty = built from the fields; a
+   * typed one is kept verbatim while its parsed fields follow it). */
   baseUrl: string;
   label: string;
   cid: string;

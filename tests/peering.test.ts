@@ -208,3 +208,69 @@ describe('algorithm nodes peering', async () => {
     }
   });
 });
+
+describe('manual content sync', async () => {
+  const a = await startProvider({ name: 'Sync A' });
+  const b = await startProvider({ name: 'Sync B' });
+  after(async () => {
+    await a.stop();
+    await b.stop();
+  });
+
+  it('pushes one content to a named provider — manifest included — and re-runs cheaply', async () => {
+    // The target lists this node as a peer; without that it refuses the push (below).
+    await admin(b.url(), '/v1/admin/peers', { method: 'PUT', body: { peers: [{ ref: a.reference(), send: true, receive: true }] } });
+    const { cid, manifest } = await a.importBuffer(randomBytesOf(3000), { name: 'manual.bin' });
+
+    // A plain URL names the target just as well as a full node reference.
+    const first = await admin<{ sent: number; skipped: number; missing: number; manifest: boolean; error?: string }>(
+      a.url(),
+      '/v1/admin/peers/push-item',
+      { body: { ref: b.url(), cid } }
+    );
+    assert.equal(first.error, undefined);
+    assert.equal(first.sent, manifest.chunks.length);
+    assert.equal(first.missing, 0);
+    assert.equal(first.manifest, true);
+
+    // The target can serve the content: the chunks AND the manifest landed.
+    for (const chunk of manifest.chunks) assert.equal(b.store.hasChunk(chunk.id), true);
+    assert.ok(b.store.getManifest(cid), 'the manifest travels with the chunks');
+    assert.equal(b.store.getContent(cid)?.cid, cid);
+
+    // Re-running moves nothing: every push asks the target what it already has.
+    const again = await admin<{ sent: number; skipped: number; missing: number }>(a.url(), '/v1/admin/peers/push-item', {
+      body: { ref: b.reference(), cid },
+    });
+    assert.equal(again.sent, 0);
+    assert.equal(again.skipped, manifest.chunks.length);
+    assert.equal(again.missing, 0);
+  });
+
+  it('surfaces a push the target refuses', async () => {
+    const { cid, manifest } = await a.importBuffer(randomBytesOf(1500), { name: 'refused.bin' });
+    await admin(b.url(), '/v1/admin/peers', { method: 'PUT', body: { peers: [] } });
+    const refused = await admin<{ sent: number; manifest: boolean; error?: string }>(a.url(), '/v1/admin/peers/push-item', {
+      body: { ref: b.reference(), cid },
+    });
+    assert.match(refused.error ?? '', /peer|403|forbidden/i);
+    assert.equal(refused.manifest, false);
+    assert.equal(b.store.getManifest(cid), undefined);
+    assert.equal(b.store.hasChunk(manifest.chunks[0].id), false);
+  });
+
+  it('validates a pushed manifest before keeping it', async () => {
+    await admin(b.url(), '/v1/admin/peers', { method: 'PUT', body: { peers: [{ ref: a.reference(), send: true, receive: true }] } });
+    const { cid, manifest } = await a.importBuffer(randomBytesOf(1200), { name: 'checked.bin' });
+    const asPeer = clientFor(b.url(), 'identity', a.identity);
+    // Stored under an id the manifest does not hash to.
+    await assert.rejects(asPeer.json(`/v1/peers/manifests/vs1${'d'.repeat(52)}`, { method: 'PUT', body: manifest }), /does not match/);
+    // A malformed manifest is refused as well.
+    await assert.rejects(asPeer.json(`/v1/peers/manifests/${cid}`, { method: 'PUT', body: { v: 1 } }), /Invalid manifest/);
+    // The manifest that matches is kept, and the content becomes servable on the target.
+    const kept = await asPeer.json<{ ok: boolean; cid: string }>(`/v1/peers/manifests/${cid}`, { method: 'PUT', body: manifest });
+    assert.equal(kept.cid, cid);
+    assert.ok(b.store.getManifest(cid));
+    assert.equal(b.store.getContent(cid)?.cid, cid);
+  });
+});

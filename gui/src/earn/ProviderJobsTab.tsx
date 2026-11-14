@@ -5,7 +5,7 @@ import { CodeBox } from '../components/ui';
 import { downloadBlob } from '../qr';
 import { useApp } from '../state';
 import { baseKey, checkAccess, checkCids, checkFilled, checkIndex, checkSite, offerHost, type CheckResult } from './checks';
-import { buildZip, DUMMY_CID, HOSTING_PLATFORMS, contentUrl, hostingPlatform, loadDrafts, loadHosts, newHostId, platformGuide, pushHostedContent, recordUrlJobs, saveDrafts, saveHosts, type HostConfig, type HostDraft, type HostingField, type HostingStep } from './hosting';
+import { buildZip, DUMMY_CID, HOSTING_PLATFORMS, contentUrl, hostingPlatform, loadDrafts, loadHosts, newHostId, parseHostUrl, platformGuide, pushHostedContent, recordUrlJobs, saveDrafts, saveHosts, type HostConfig, type HostDraft, type HostingField, type HostingStep } from './hosting';
 
 /** The platform setup as a guided flow: one step per screen instead of all at once. */
 const PLATFORM_STEPS: [string, string][] = [
@@ -169,8 +169,19 @@ export function ProviderJobsTab() {
     ...Object.fromEntries(platform.fields.map((field) => [field.id, field.default ?? ''])),
     ...draft.values,
   };
-  const edited = Boolean(draft.baseUrl);
-  const baseUrl = (draft.baseUrl || platform.buildBaseUrl(values)).trim();
+  // One coherent base URL, kept in sync with the fields both ways: the fields build it,
+  // and a URL typed over it flows back into the fields whenever its structure matches
+  // what this platform expects (parseBaseUrl). What was typed is kept verbatim meanwhile,
+  // so the input never fights the writer; a URL that does not match leaves the fields
+  // alone and warns under the input instead of corrupting them.
+  const typed = (draft.baseUrl ?? '').trim();
+  const baseUrl = (typed || platform.buildBaseUrl(values)).trim();
+  const urlWarning =
+    typed && !parseHostUrl(platform, typed, values)
+      ? `This address does not match ${platform.name}’s expected shape (${platform.describeUrlShape ?? 'https://<host>/<folder>/'}) — the fields above are left unchanged.`
+      : null;
+  /** A field edit always wins back the URL: from here on it is rebuilt from the fields. */
+  const setField = (id: string, value: string) => update({ values: { ...values, [id]: value }, baseUrl: '' });
   // The steps behind tabs 2–4: where the access details come from, how this platform
   // serves <base>/<cid>, and what saving and offering it does.
   const guide = platformGuide(platform.id);
@@ -209,7 +220,7 @@ export function ProviderJobsTab() {
             onToggle={() => toggle(group, index)}
             fields={platform.fields}
             values={values}
-            onField={(id, value) => update({ values: { ...values, [id]: value } })}
+            onField={(id, value) => setField(id, value)}
           />
           {after?.(index)}
         </Fragment>
@@ -241,7 +252,7 @@ export function ProviderJobsTab() {
       const cids = [draft.cid, ...jobItems.map((item) => item.cid)];
       const answer =
         kind === 'site'
-          ? await checkIndex(siteUrl)
+          ? await checkIndex(siteUrl, platform.siteUrlCandidates?.(values) ?? [])
           : kind === 'access'
             ? await checkAccess(platform.id, values)
             : kind === 'filled'
@@ -250,6 +261,9 @@ export function ProviderJobsTab() {
                 ? await checkCids(baseUrl, cids)
                 : await checkSite(baseUrl);
       setResult(answer);
+    } catch (error) {
+      // A check always answers: a thrown error becomes a visible failure, never silence.
+      setResult({ ok: false, message: `The check itself failed to run: ${errorMessage(error)}` });
     } finally {
       setChecking(null);
     }
@@ -364,16 +378,22 @@ export function ProviderJobsTab() {
         className="mono"
         value={baseUrl}
         placeholder="https://you.example/baseUrl/"
-        onChange={(e) => update({ baseUrl: e.target.value })}
+        onChange={(e) => {
+          // A typed address flows back into the fields whenever its structure matches
+          // what this platform expects; the typed text stays in the field meanwhile.
+          const parsed = parseHostUrl(platform, e.target.value, values);
+          update({ baseUrl: e.target.value, ...(parsed ? { values: { ...values, ...parsed } } : {}) });
+        }}
       />
       <span className="hint">
-        Built from the fields above; edit it if the platform shows a different URL.{' '}
-        {edited && (
+        Built from the fields above and kept in sync with them — type over it to fill the fields from the address instead.{' '}
+        {typed && (
           <button type="button" className="small" onClick={() => update({ baseUrl: '' })}>
-            Suggest from fields
+            Use the URL built from the fields
           </button>
         )}
       </span>
+      {urlWarning && <span className="small check-bad">{urlWarning}</span>}
     </label>
   );
   const nameField = (
@@ -610,7 +630,7 @@ export function ProviderJobsTab() {
                     key={field.id}
                     field={field}
                     value={values[field.id] ?? ''}
-                    onChange={(value) => update({ values: { ...values, [field.id]: value } })}
+                    onChange={(value) => setField(field.id, value)}
                   />
                 ))}
               </div>
@@ -677,7 +697,7 @@ export function ProviderJobsTab() {
                   <FieldInput
                     field={field}
                     value={values[field.id] ?? ''}
-                    onChange={(value) => update({ values: { ...values, [field.id]: value } })}
+                    onChange={(value) => setField(field.id, value)}
                   />
                 </Fragment>
               ))}

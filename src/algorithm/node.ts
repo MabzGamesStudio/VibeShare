@@ -6,6 +6,7 @@ import { isKeyId, randomId, verifySignature } from '../shared/crypto.js';
 import { buildManifestFromBuffer, contentIdOf, validateManifest } from '../shared/content.js';
 import {
   blockHash,
+  checkCommentChain,
   commentDataHash,
   commentIdAt,
   commentRemovePayload,
@@ -22,6 +23,7 @@ import { parseNodeRef } from '../shared/noderef.js';
 import { NodeClient } from '../shared/nodeclient.js';
 import {
   claimSigningPayload,
+  PEER_PUSH_CATEGORIES,
   SUGGESTION_KINDS,
   type AccountLinkProposal,
   type AccountLinkResponse,
@@ -31,6 +33,8 @@ import {
   type BloomStorageTier,
   type ClaimRequest,
   type ClaimResponse,
+  type ContentMedia,
+  type ContentOrigin,
   type CreatorAccount,
   type CreatorAccountLinkRequest,
   type CreatorContentRequest,
@@ -45,8 +49,16 @@ import {
   type GroupSuggestionRequest,
   type GroupSuggestionResponse,
   type Page,
+  type PeerCatalogEntry,
+  type PeerCommentChain,
+  type PeerCreatorRecord,
   type PeerDiscoverCriteria,
   type PeerEntry,
+  type PeerImportBatch,
+  type PeerImportReport,
+  type PeerPushCategory,
+  type PeerPushResult,
+  type PeerTopicRecord,
   type Preferences,
   type ReportRequest,
   type ReportResponse,
@@ -54,6 +66,7 @@ import {
   type SubmissionRequest,
   type SuggestionKind,
   type SuggestionRequest,
+  type TagNote,
   type TopicCreateRequest,
   type TopicCreateResponse,
   type TopicInfo,
@@ -64,7 +77,7 @@ import {
 } from '../shared/protocol.js';
 import { baseId, creatorRefOf, parseContentId, parseSource } from '../shared/sources.js';
 import { JsonFile } from '../shared/store.js';
-import { FORMATS, normalizeTag, RATINGS, TOPICS, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
+import { CREATOR_KINDS, FORMATS, normalizeTag, RATINGS, TOPICS, topicIdOf, type CreatorKind, type Format, type Rating } from '../shared/taxonomy.js';
 import { rank, STRATEGY_DESCRIPTIONS, type RankingConfig } from './ranking.js';
 import { claimDefaults, claimMultiplier, claimRuleFor, type ClaimConfig } from './metrics.js';
 import { Crawler, crawlerDefaults, type CrawlerConfig } from './crawler/crawler.js';
@@ -388,6 +401,89 @@ function cleanLinks(value: unknown, max = 8): string[] {
   return [
     ...new Set(value.map((item) => String(item ?? '').trim()).filter((url) => /^https?:\/\//.test(url) && url.length <= 2048 && !/\s/.test(url))),
   ].slice(0, max);
+}
+
+// -------------------------------------------------------------------------
+// Cleaning the pieces of a peer's full-catalog batch: whatever does not type-check
+// or fit the bounds is thrown out here, so nothing malformed reaches a store.
+
+/** The first `max` items of a batch list; anything beyond the bound is not read. */
+function asArray<T>(value: unknown, max: number): T[] {
+  return Array.isArray(value) ? (value.slice(0, max) as T[]) : [];
+}
+
+/** The hash shapes the comment chain is built from (sha256 hex, or '' for no previous). */
+function isHashHex(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+const CONTENT_ORIGINS: ContentOrigin[] = ['operator', 'submission', 'crawler', 'report', 'peer'];
+
+/** Platform accounts of a creator as a peer ships them: typed, bounded, no node-filled fields. */
+function cleanAccounts(value: unknown, max = 16): CreatorAccount[] {
+  const out: CreatorAccount[] = [];
+  for (const raw of asArray(value, max)) {
+    const account = (raw ?? {}) as Partial<CreatorAccount>;
+    const platform = String(account.platform ?? '').trim().slice(0, 64);
+    const handle = String(account.handle ?? '').trim().slice(0, 120);
+    if (!platform || !handle) continue;
+    out.push({
+      platform,
+      handle,
+      url: typeof account.url === 'string' && /^https?:\/\//.test(account.url) ? account.url.slice(0, 2048) : undefined,
+      creator: typeof account.creator === 'string' ? account.creator.slice(0, 128) || undefined : undefined,
+      subscribers: Number.isFinite(account.subscribers) ? Math.max(0, Math.round(Number(account.subscribers))) : undefined,
+    });
+  }
+  return out;
+}
+
+/** One media reference (a gallery image, or the entry's media), as a peer ships it. */
+function cleanMedia(value: unknown): ContentMedia | undefined {
+  const media = (value ?? {}) as Partial<ContentMedia>;
+  const url = String(media.url ?? '').slice(0, 2048);
+  const type = String(media.type ?? '');
+  if (!url || (type !== 'image' && type !== 'video' && type !== 'audio')) return undefined;
+  const size = (raw: unknown) => (Number.isFinite(raw) ? Math.max(1, Math.round(Number(raw))) : undefined);
+  return { url, type, width: size(media.width), height: size(media.height) };
+}
+
+/** The images of a list-of-images content, in order. */
+function cleanMediaList(value: unknown, max = 64): ContentMedia[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.slice(0, max).map(cleanMedia).filter((media): media is ContentMedia => Boolean(media));
+  return out.length ? out : undefined;
+}
+
+/** Platform popularity numbers (views, likes, comments…): finite numbers only. */
+function cleanStats(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value).slice(0, 16)) {
+    const number = Number(raw);
+    if (!Number.isFinite(number)) continue;
+    out[key.slice(0, 32)] = number;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Tag notes (accepted suggestions kept on an entry), typed and bounded. */
+function cleanNotes(value: unknown, max = 32): TagNote[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: TagNote[] = [];
+  for (const raw of value.slice(0, max)) {
+    const note = (raw ?? {}) as Partial<TagNote>;
+    const kind = String(note.kind ?? '') as SuggestionKind;
+    const text = String(note.value ?? '').slice(0, 200);
+    if (!SUGGESTION_KINDS.includes(kind) || !text) continue;
+    out.push({
+      kind,
+      value: text,
+      reason: String(note.reason ?? '').slice(0, 500),
+      timestamp: Number.isFinite(note.timestamp) ? Number(note.timestamp) : undefined,
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
@@ -2374,6 +2470,461 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   }
 
   // -------------------------------------------------------------------------
+  // Full-catalog pushes (manual content sync): this node ships its whole catalog to
+  // another algorithm node in bounded batches — topics, creators and groups, content
+  // entries with their metadata and listing decisions, and the comment chains of its
+  // content pages. The admin push driver (POST /v1/admin/peers/push) moves one batch
+  // per call and reports progress per category, so the operator's console can show it
+  // and resume it; the receiving side is POST /v1/peers/import, open only to a peer
+  // this node configured to serve and strict about everything it stores.
+
+  /**
+   * A page's chain as it travels in a push: every header, and comment data only where
+   * it is verifiable — the comment carries its commenter's key and signature and the
+   * section actually sends its data. Anonymous comment data never travels (nothing
+   * proves it), and neither does hidden data: those comments go as headers only, which
+   * is exactly how clients already take them.
+   */
+  private commentSyncBlocks(section: CommentSection, data: (CommentData | null)[]): CommentBlock[] {
+    return section.blocks.map((block, index) => {
+      const comment = data[index];
+      const keep = Boolean(section.shown && comment?.key && comment.sig && !section.hidden.includes(comment.id));
+      return keep ? { ...block, data: comment as CommentData } : { prev: block.prev, dataHash: block.dataHash, hash: block.hash, id: block.id };
+    });
+  }
+
+  /** The topics of a full push: every topic record (listing decisions included), plus
+   *  the bare names this node offers in its topic list, keyed by their hash as always. */
+  private syncTopics(): { key: string; record: PeerTopicRecord }[] {
+    const byId = new Map<string, PeerTopicRecord>();
+    for (const topic of this.registry.topics(true)) {
+      byId.set(topic.id, { id: topic.id, name: topic.name, description: topic.description, icon: topic.icon, status: topic.status });
+    }
+    for (const name of this.config.topics) {
+      const id = topicIdOf(name);
+      if (!byId.has(id)) byId.set(id, { id, name, status: 'listed' });
+    }
+    return [...byId.entries()]
+      .map(([key, record]) => ({ key, record }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+
+  /** Every creator and group as it travels in a push. Proof keys stay home: they are
+   *  trust anchors (they prove creator claims), so a catalog never carries them. */
+  private syncCreators(): { key: string; record: PeerCreatorRecord }[] {
+    return Object.values(this.registry.data.creators)
+      .map((creator): { key: string; record: PeerCreatorRecord } => ({
+        key: creator.id,
+        record: {
+          id: creator.id,
+          name: creator.name,
+          kind: creator.kind,
+          description: creator.description,
+          links: creator.links,
+          accounts: creator.accounts,
+          icon: creator.icon,
+          members: creator.members,
+          status: creator.status,
+        },
+      }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+
+  /** Every content entry as it travels in a push: what the registry keeps per content.
+   *  Votes are per account and stay local, and so do thumbnail images (only a remote
+   *  thumbnail URL travels). */
+  private syncEntries(): { key: string; record: PeerCatalogEntry }[] {
+    return this.registry
+      .all()
+      .map((entry): { key: string; record: PeerCatalogEntry } => ({
+        key: entry.id,
+        record: {
+          id: entry.id,
+          contentId: entry.contentId,
+          link: entry.link,
+          sources: entry.sources,
+          status: entry.status,
+          reason: entry.reason,
+          title: entry.title,
+          description: entry.description,
+          format: entry.format,
+          rating: entry.rating,
+          topics: entry.topics,
+          topicIds: entry.topicIds,
+          language: entry.language,
+          durationSeconds: entry.durationSeconds,
+          gallery: entry.gallery,
+          creatorId: entry.creatorId,
+          providers: entry.providers.length ? entry.providers : undefined,
+          publishedAt: entry.publishedAt,
+          pageUrl: entry.pageUrl,
+          thumbnailUrl: entry.thumbnailUrl,
+          media: entry.media,
+          platformStats: entry.platformStats && Object.keys(entry.platformStats).length ? entry.platformStats : undefined,
+          notes: entry.notes.length ? entry.notes : undefined,
+          origin: entry.origin,
+        },
+      }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+
+  /** The comment chains of a full push: the pages that have comments, in a stable order. */
+  private async syncChains(): Promise<{ key: string; record: PeerCommentChain }[]> {
+    const out: { key: string; record: PeerCommentChain }[] = [];
+    const sections = Object.entries(this.comments.data.sections).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const [key, section] of sections) {
+      if (!section.blocks.length) continue;
+      out.push({ key, record: { content: key, blocks: this.commentSyncBlocks(section, await this.commentDataOf(section)) } });
+    }
+    return out;
+  }
+
+  /** How many items a full sync moves, per category. */
+  private async catalogTotals(): Promise<Record<PeerPushCategory, number>> {
+    return {
+      topics: this.syncTopics().length,
+      creators: this.syncCreators().length,
+      entries: this.registry.all().length,
+      comments: (await this.syncChains()).length,
+    };
+  }
+
+  /** Cuts a page down until its JSON fits comfortably in one bounded request. */
+  private fitBatch<T>(items: T[], limit: number, maxBytes = 3_000_000): T[] {
+    let page = items.slice(0, limit);
+    while (page.length > 1 && JSON.stringify(page).length > maxBytes) page = page.slice(0, -1);
+    return page;
+  }
+
+  /**
+   * One call of the push: one bounded batch of this catalog to one node, and how far
+   * the sync got. `category` picks what moves (a call without one only reports totals),
+   * `cursor` is the key of the last item the previous call sent — so a retry sends
+   * exactly what is still missing, and re-sending anything is harmless anyway (the
+   * receiving node upserts, and skips comment chains it already has).
+   */
+  private async pushCatalog(refText: string, category: string | undefined, cursor: string | undefined): Promise<PeerPushResult> {
+    const ref = parseNodeRef(refText);
+    if (!ref) throw badRequest('ref must be a node reference or a URL');
+    if ((cursor ?? '').length > 256) throw badRequest('cursor is too long');
+    const base = { ref: refText.trim(), totals: await this.catalogTotals() };
+    if (!category) return { ...base, category: null, sent: 0, cursor: null, done: false };
+    if (!(PEER_PUSH_CATEGORIES as readonly string[]).includes(category)) {
+      throw badRequest(`category is one of ${PEER_PUSH_CATEGORIES.join(', ')}`);
+    }
+    const cat = category as PeerPushCategory;
+    const after = cursor ?? '';
+    let batch: PeerImportBatch = {};
+    let sent = 0;
+    let done = true;
+    let next: string | null = null;
+    let oversized: number | undefined;
+
+    if (cat === 'topics') {
+      const remaining = this.syncTopics().filter((item) => item.key > after);
+      const page = this.fitBatch(remaining, 200);
+      batch = { topics: page.map((item) => item.record) };
+      sent = page.length;
+      done = page.length >= remaining.length;
+      next = page.at(-1)?.key ?? null;
+    } else if (cat === 'creators') {
+      const remaining = this.syncCreators().filter((item) => item.key > after);
+      const page = this.fitBatch(remaining, 200);
+      batch = {
+        creators: page.filter((item) => item.record.kind !== 'group').map((item) => item.record),
+        groups: page.filter((item) => item.record.kind === 'group').map((item) => item.record),
+      };
+      sent = page.length;
+      done = page.length >= remaining.length;
+      next = page.at(-1)?.key ?? null;
+    } else if (cat === 'entries') {
+      const remaining = this.syncEntries().filter((item) => item.key > after);
+      const page = this.fitBatch(remaining, 50);
+      batch = { entries: page.map((item) => item.record) };
+      sent = page.length;
+      done = page.length >= remaining.length;
+      next = page.at(-1)?.key ?? null;
+    } else {
+      // A comment chain is all or nothing: one that cannot fit a batch is left out for
+      // good (reported as oversized) rather than blocking the cursor forever.
+      const remaining = (await this.syncChains()).filter((item) => item.key > after);
+      const page: (typeof remaining)[number][] = [];
+      let blocks = 0;
+      for (const item of remaining) {
+        if (item.record.blocks.length > 1000 || JSON.stringify(item.record).length > 3_000_000) {
+          oversized = (oversized ?? 0) + 1;
+          continue;
+        }
+        if (page.length >= 8 || blocks + item.record.blocks.length > 1000) {
+          done = false;
+          break;
+        }
+        page.push(item);
+        blocks += item.record.blocks.length;
+      }
+      while (page.length > 1 && JSON.stringify(page).length > 3_000_000) {
+        page.pop();
+        done = false;
+      }
+      batch = { comments: page.map((item) => item.record) };
+      sent = page.length;
+      next = page.at(-1)?.key ?? null;
+    }
+
+    try {
+      const report = await this.peerClient({ ref: base.ref }).json<PeerImportReport>('/v1/peers/import', {
+        body: batch,
+        timeoutMs: 120_000,
+      });
+      return { ...base, category: cat, sent, cursor: done ? null : next, done, report, oversized };
+    } catch (error) {
+      // The batch did not land: the cursor that was passed in still names it, so the
+      // console's Continue/Try again sends exactly this batch again.
+      return { ...base, category: cat, sent: 0, cursor: cursor ?? null, done: false, error: (error as Error).message, oversized };
+    }
+  }
+
+  /** Takes one bounded batch of a peer's full-catalog push in. Bad items are skipped,
+   *  not fatal — one malformed record must not kill a whole sync — and every skip is
+   *  counted and explained back to the pushing node. */
+  private async importPeerBatch(batch: PeerImportBatch): Promise<PeerImportReport> {
+    const report: PeerImportReport = {
+      entries: { accepted: 0, skipped: 0 },
+      topics: { accepted: 0, skipped: 0 },
+      creators: { accepted: 0, skipped: 0 },
+      groups: { accepted: 0, skipped: 0 },
+      comments: { accepted: 0, skipped: 0 },
+      errors: [],
+    };
+    const note = (message: string) => {
+      if (report.errors.length < 10) report.errors.push(message);
+    };
+    // Topics first, then creators and groups, then the entries that refer to them, then
+    // comments — so one mixed batch resolves in the same order a full push moves them.
+    for (const raw of asArray<PeerTopicRecord>(batch.topics, 200)) {
+      try {
+        this.importPeerTopic(raw);
+        report.topics.accepted++;
+      } catch (error) {
+        report.topics.skipped++;
+        note(`topic: ${(error as Error).message}`);
+      }
+    }
+    for (const raw of asArray<PeerCreatorRecord>(batch.creators, 200)) {
+      try {
+        this.importPeerCreator(raw, false);
+        report.creators.accepted++;
+      } catch (error) {
+        report.creators.skipped++;
+        note(`creator: ${(error as Error).message}`);
+      }
+    }
+    for (const raw of asArray<PeerCreatorRecord>(batch.groups, 100)) {
+      try {
+        this.importPeerCreator(raw, true);
+        report.groups.accepted++;
+      } catch (error) {
+        report.groups.skipped++;
+        note(`group: ${(error as Error).message}`);
+      }
+    }
+    for (const raw of asArray<PeerCatalogEntry>(batch.entries, 100)) {
+      try {
+        this.importPeerEntry(raw);
+        report.entries.accepted++;
+      } catch (error) {
+        report.entries.skipped++;
+        note(`entry: ${(error as Error).message}`);
+      }
+    }
+    for (const raw of asArray<PeerCommentChain>(batch.comments, 8)) {
+      try {
+        await this.importPeerComments(raw);
+        report.comments.accepted++;
+      } catch (error) {
+        report.comments.skipped++;
+        note(`comments: ${(error as Error).message}`);
+      }
+    }
+    return report;
+  }
+
+  /**
+   * A topic as a peer ships it. Topics are keyed by the hash of their name here as
+   * everywhere: an id this node already knows edits that topic (a rename, exactly as
+   * the console edits one), and a new topic lands under its own name's hash — a peer
+   * cannot plant a record under an id this node never derived itself.
+   */
+  private importPeerTopic(raw: PeerTopicRecord): void {
+    const name = String(raw?.name ?? '').trim().slice(0, 120);
+    if (!name) throw badRequest('a topic needs a name');
+    const status = raw.status ?? 'listed';
+    if (status !== 'listed' && status !== 'blocked') throw badRequest('unknown topic status');
+    const known = typeof raw.id === 'string' && raw.id ? this.registry.topic(raw.id) : undefined;
+    if (typeof raw.id === 'string' && raw.id && !known && !/^tp1[0-9a-f]{32}$/.test(raw.id)) throw badRequest('malformed topic id');
+    this.registry.upsertTopic({
+      id: known?.id,
+      name,
+      description: raw.description === undefined ? undefined : String(raw.description).slice(0, 2000) || undefined,
+      icon: raw.icon === undefined ? undefined : this.checkedIcon(raw.icon),
+      status,
+    });
+  }
+
+  /**
+   * A creator (or a group) as a peer ships it. Proof keys are never read from the
+   * batch: keys are trust anchors (they prove creator claims and submissions), and only
+   * the operator's console or a creator's own proof brings them here. Membership ids
+   * are kept as sent — ones this node does not know simply do not resolve.
+   */
+  private importPeerCreator(raw: PeerCreatorRecord, group: boolean): void {
+    const id = String(raw?.id ?? '').trim();
+    if (!id || id.length > 128) throw badRequest('a creator needs an id of at most 128 characters');
+    const kind = String(raw?.kind ?? '') as CreatorKind;
+    if (!CREATOR_KINDS.includes(kind)) throw badRequest('unknown creator kind');
+    if (group !== (kind === 'group')) throw badRequest(group ? 'a group record needs kind group' : 'a creator record is not a group');
+    const name = String(raw?.name ?? '').trim().slice(0, 120);
+    if (!name) throw badRequest('a creator needs a name');
+    const status = raw.status ?? 'listed';
+    if (status !== 'listed' && status !== 'blocked') throw badRequest('unknown creator status');
+    this.registry.upsertCreator({
+      id,
+      name,
+      kind,
+      description: raw.description === undefined ? undefined : String(raw.description).slice(0, 2000) || undefined,
+      links: raw.links === undefined ? undefined : cleanLinks(raw.links, 16),
+      accounts: raw.accounts === undefined ? undefined : cleanAccounts(raw.accounts),
+      icon: raw.icon === undefined ? undefined : this.checkedIcon(raw.icon),
+      members: kind === 'group' && raw.members !== undefined ? cleanIds(raw.members, 500) : undefined,
+      status,
+    });
+  }
+
+  /**
+   * A content entry as a peer ships it. The registry validates the identity (a content
+   * id, a link, or both) and the taxonomy, and its upsert keeps this node's votes and
+   * stamps. The listing decision travels: whatever status the entry has there, it gets
+   * here — that is the point of a catalog sync.
+   */
+  private importPeerEntry(raw: PeerCatalogEntry): void {
+    const status = raw?.status;
+    if (status !== 'listed' && status !== 'blocked' && status !== 'pending') throw badRequest('unknown listing status');
+    const origin = raw.origin !== undefined && CONTENT_ORIGINS.includes(raw.origin) ? raw.origin : undefined;
+    const entry = this.registry.upsert({
+      id: String(raw.id ?? ''),
+      contentId: raw.contentId === undefined ? undefined : String(raw.contentId),
+      link: raw.link === undefined ? undefined : String(raw.link),
+      sources: asArray<string>(raw.sources, 32).map((source) => String(source).slice(0, 500)),
+      status,
+      reason: status === 'blocked' && raw.reason !== undefined ? String(raw.reason).slice(0, 200) : undefined,
+      title: raw.title === undefined ? undefined : String(raw.title).slice(0, 300),
+      description: raw.description === undefined ? undefined : String(raw.description).slice(0, 5000),
+      format: raw.format,
+      rating: raw.rating,
+      // Tags fold into topics here as everywhere else.
+      topics: raw.topics === undefined ? undefined : asArray<string>(raw.topics, 64).map((topic) => String(topic)),
+      language: raw.language === undefined ? undefined : String(raw.language).slice(0, 35) || undefined,
+      durationSeconds: Number.isFinite(raw.durationSeconds) ? Math.max(0, Math.round(Number(raw.durationSeconds))) : undefined,
+      gallery: cleanMediaList(raw.gallery),
+      creatorId: raw.creatorId === undefined ? undefined : String(raw.creatorId).slice(0, 128) || undefined,
+      providers: asArray<string>(raw.providers, 16).map(String).filter((provider) => parseNodeRef(provider)),
+      publishedAt: raw.publishedAt ? String(raw.publishedAt).slice(0, 40) : undefined,
+      pageUrl: raw.pageUrl === undefined ? undefined : String(raw.pageUrl).slice(0, 2048) || undefined,
+      // Thumbnails are images and do not travel in a catalog; a remote URL does.
+      thumbnailUrl: raw.thumbnailUrl === undefined ? undefined : String(raw.thumbnailUrl).slice(0, 2048) || undefined,
+      media: cleanMedia(raw.media),
+      platformStats: cleanStats(raw.platformStats),
+      notes: cleanNotes(raw.notes),
+      origin,
+    });
+    // The exact topic ids of the entry are kept when they name a topic record here (so
+    // filing survives renames); the rest falls back to the names, which is how this
+    // node derives ids everywhere.
+    if (Array.isArray(raw.topicIds)) {
+      const known = asArray<string>(raw.topicIds, 64).filter((id) => this.registry.topic(String(id)));
+      if (known.length) {
+        entry.topicIds = [...new Set([...(entry.topicIds ?? []), ...known.map(String)])].slice(0, 64);
+        this.registry.changed();
+      }
+    }
+  }
+
+  /**
+   * A content page's comment chain as a peer ships it, taken in whole or not at all.
+   * What makes it safe to take: the chain must verify end to end — headers link and
+   * hash correctly, data matches its hashes, signatures check out, and edits come from
+   * the same key (checkCommentChain, the exact rule clients apply) — every comment's id
+   * must be the one this node's own rule makes up from what the comment attaches to,
+   * and its reply-from must name the page's root or a comment earlier in the chain.
+   * Only signature-checked comment data is imported: a comment without a key travels as
+   * its header alone, so a lying peer cannot invent comments whole cloth — the worst it
+   * can do is replay comments whose commenter really signed them. Times travel as the
+   * sending node stamped them (they are not signed and cannot be checked here), and
+   * votes never travel: accounts are local. A page that already has comments keeps
+   * them: two chains each link their own history and cannot be merged.
+   */
+  private async importPeerComments(chain: PeerCommentChain): Promise<void> {
+    const key = baseId(String(chain?.content ?? ''));
+    const raw = Array.isArray(chain?.blocks) ? chain.blocks : null;
+    if (!key || key.length > 500 || !raw || !raw.length) throw badRequest('a comment chain needs a page and blocks');
+    if (raw.length > 1000) throw badRequest('a comment chain is at most 1000 blocks');
+    if (this.comments.data.sections[key]?.blocks.length) throw badRequest('this page already has comments here');
+    const cleaned: CommentBlock[] = [];
+    for (const piece of raw) {
+      const block = (piece ?? {}) as Partial<CommentBlock>;
+      const prev = String(block.prev ?? '');
+      const dataHash = String(block.dataHash ?? '');
+      const hash = String(block.hash ?? '');
+      const id = String(block.id ?? '');
+      if ((prev && !isHashHex(prev)) || !isHashHex(dataHash) || !isHashHex(hash) || !isHashHex(id)) {
+        throw badRequest('the chain carries malformed block headers');
+      }
+      const data = block.data;
+      const kept =
+        data && data.key && data.sig
+          ? {
+              id: String(data.id ?? ''),
+              text: String(data.text ?? ''),
+              key: String(data.key),
+              sig: String(data.sig),
+              time: String(data.time ?? '').slice(0, 40),
+              replyFrom: String(data.replyFrom ?? ''),
+            }
+          : undefined;
+      if (kept) {
+        if (!isKeyId(kept.key)) throw badRequest('a comment carries a malformed key');
+        if (!kept.text.trim()) throw badRequest('a comment needs text');
+        if (kept.text.length > 10_000) throw badRequest('a comment is too long');
+      }
+      cleaned.push(kept ? { prev, dataHash, hash, id, data: kept } : { prev, dataHash, hash, id });
+    }
+    // The whole chain verifies or nothing is imported: all or nothing, as clients see it.
+    const { errors } = checkCommentChain(cleaned);
+    if (errors.length) throw badRequest(`the comment chain does not verify: ${errors[0]}`);
+    const madeIds = new Set<string>();
+    const chainIds = new Set<string>();
+    for (const block of cleaned) {
+      const data = block.data;
+      if (data) {
+        if (data.replyFrom !== key && !chainIds.has(data.replyFrom)) throw badRequest('a comment replies to one that is not there');
+        // An edit reuses the id of the comment it edits (pinned to the same key by the
+        // chain check); a first-time id must be the one the node's own rule makes up.
+        if (!madeIds.has(data.id)) {
+          madeIds.add(data.id);
+          if (commentIdAt(data.replyFrom, block.prev, data.text, data.key) !== data.id) {
+            throw badRequest('a comment id is not the one this node makes up for it');
+          }
+        }
+      }
+      chainIds.add(block.id);
+    }
+    if (!madeIds.size) throw badRequest('the chain carries no comment data this node can verify');
+    // Votes are per account and stay local: the section starts without any.
+    this.comments.data.sections[key] = { blocks: cleaned, votes: {}, hidden: [], shown: true };
+    await this.saveComments(this.comments.data.sections[key]);
+  }
+
+  // -------------------------------------------------------------------------
   // A continuous peer-search job (keep asking peers for discoveries on a timer),
   // and the cadence at which this node answers peers.
 
@@ -2544,6 +3095,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       peer(ctx);
       const body = await readJson<{ criteria?: PeerDiscoverCriteria }>(ctx.req);
       return { items: this.discover(body.criteria ?? {}) };
+    });
+
+    // A full-catalog push (manual content sync) lands here in bounded batches: content
+    // entries with their metadata, topics, creators and groups, and comment chains.
+    // The answering cadence is not charged for these (a sync is many batches, not an
+    // answer to a question), but the caller must be a peer this node serves, and every
+    // batch is strictly validated before anything is stored.
+    router.post('/v1/peers/import', async (ctx) => {
+      this.requirePeer(ctx);
+      const body = await readJson<PeerImportBatch>(ctx.req, 4 * 1024 * 1024);
+      return this.importPeerBatch(body);
     });
   }
 
@@ -3146,6 +3708,17 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         }
       }
       return { results };
+    });
+
+    // Manual content sync: one call pushes one bounded batch of this node's full catalog
+    // to one node — topics, then creators and groups, then content entries, then the
+    // comment chains — and reports per-category progress. The console drives the loop
+    // and resumes it: every call names the category and the cursor of the last item it
+    // sent, so a retry sends exactly what is still missing.
+    router.post('/v1/admin/peers/push', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ ref?: string; category?: string; cursor?: string }>(ctx.req);
+      return this.pushCatalog(String(body.ref ?? ''), body.category, body.cursor);
     });
   }
 

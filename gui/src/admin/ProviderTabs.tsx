@@ -8,6 +8,8 @@ import { parseVvshNode, type VvshFile, type VvshNode } from '../../../src/shared
 import { base64url } from '../../../src/shared/encoding.js';
 import { assembleVvshWebm, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
 import { useToast } from './AdminApp';
+import { ManualContentSync } from './ManualContentSync';
+import { StorageJobs } from './StorageJobs';
 
 interface ContentRow {
   cid: string;
@@ -304,7 +306,7 @@ function Content() {
   );
 }
 
-interface ContentDetailsData {
+export interface ContentDetailsData {
   record: ContentRow & { chunks: number; creatorEdit?: { id: string; name?: string } };
   manifest?: {
     name: string;
@@ -479,7 +481,7 @@ function EndpointRow({ cid, link, index }: { cid: string; link: NonNullable<Cont
  * that user's endpoint rows repeated underneath. Slots the plan still needs are shown
  * as skeleton rows that say the job needs to be filled (no buttons on them).
  */
-function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
+export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
   const [jobTests, setJobTests] = useState<Record<string, string>>({});
   const [toast, show] = useToast();
 
@@ -1689,12 +1691,14 @@ export function ProviderTabs({ tab }: { tab: string }) {
   if (tab === 'content') return <Content />;
   if (tab === 'add-local') return <AddLocal />;
   if (tab === 'suggestions') return <Suggestions />;
+  if (tab === 'storage-jobs') return <StorageJobs />;
   if (tab === 'storage')
     return (
       <div className="form-stack">
         <Storage />
         <Peering />
         <SyncJob />
+        <ManualContentSync />
       </div>
     );
   if (tab === 'tiers') return <Tiers />;

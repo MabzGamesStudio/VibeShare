@@ -17,6 +17,8 @@ export interface ProbeAnswer {
   bytes: number;
   type: string;
   error?: string;
+  /** Set when the local client refused or could not make the probe: the site was never asked. */
+  local?: true;
   ms?: number;
 }
 
@@ -25,8 +27,16 @@ export async function probe(url: string): Promise<ProbeAnswer> {
   try {
     return await api<ProbeAnswer>(`/api/probe?url=${encodeURIComponent(url)}`);
   } catch (error) {
-    return { ok: false, status: 0, bytes: 0, type: '', error: error instanceof Error ? error.message : String(error) };
+    // Not the site's answer: the local client refused the call (its own access token) or
+    // is unreachable. Keep that apart — a working site must never look down because the
+    // app's own connection failed.
+    return { ok: false, status: 0, bytes: 0, type: '', error: error instanceof Error ? error.message : String(error), local: true };
   }
+}
+
+/** When the local client itself failed, the honest message names it — not the site. */
+function localRefused(url: string, error: string): string {
+  return `The site was not asked at all — the local VibeShare client refused or could not run this check (${error}). This is about the app's own connection to its local client (its local access token), not about ${url}. Open the GUI from the VibeShare client — or restart it — and try again.`;
 }
 
 /** The site answers 200: the base URL a provider queries is publicly reachable. */
@@ -34,7 +44,7 @@ export async function checkSite(baseUrl: string): Promise<CheckResult> {
   const url = baseUrl.trim().replace(/\/+$/, '/');
   if (!/^https?:\/\//.test(url)) return { ok: false, message: 'There is no base URL yet — fill in the fields first.' };
   const answer = await probe(url);
-  if (answer.error) return { ok: false, message: `Could not reach ${url} — ${answer.error}` };
+  if (answer.error) return { ok: false, message: answer.local ? localRefused(url, answer.error) : `Could not reach ${url} — ${answer.error}` };
   if (answer.status === 200) {
     return { ok: true, message: `✓ ${url} answered 200${answer.bytes ? ` (${answer.bytes} bytes)` : ''} in ${answer.ms ?? 0} ms — publicly reachable.` };
   }
@@ -49,8 +59,10 @@ export async function checkCids(baseUrl: string, cids: string[]): Promise<CheckR
   const lines: string[] = [];
   let all = true;
   for (const cid of list.slice(0, 5)) {
-    const answer = await probe(contentUrl(baseUrl, cid));
+    const url = contentUrl(baseUrl, cid);
+    const answer = await probe(url);
     const short = `${cid.slice(0, 14)}…`;
+    if (answer.local) return { ok: false, message: localRefused(url, answer.error ?? 'no answer') };
     if (answer.error) {
       all = false;
       lines.push(`${short} could not be reached (${answer.error})`);
@@ -65,22 +77,59 @@ export async function checkCids(baseUrl: string, cids: string[]): Promise<CheckR
   return { ok: all, message: `${all ? '✓' : '✗'} ${list.length} content id${list.length === 1 ? '' : 's'}: ${lines.join(' · ')}` };
 }
 
-/** The site answers with an index.html: the page the setup uploads is being served. */
-export async function checkIndex(baseUrl: string): Promise<CheckResult> {
-  const root = baseUrl.trim().replace(/\/+$/, '/');
-  if (!/^https?:\/\//.test(root)) return { ok: false, message: 'There is no site address yet — fill in the fields first.' };
-  const url = new URL('index.html', root).href;
-  const answer = await probe(url);
-  if (answer.error) return { ok: false, message: `Could not reach ${url} — ${answer.error}` };
-  if (answer.status === 200) {
-    return { ok: true, message: `✓ index.html is at the hosted URL — ${url} answered 200${answer.bytes ? ` (${answer.bytes} bytes)` : ''} in ${answer.ms ?? 0} ms.` };
+/**
+ * The site answers with an index.html: the page the setup uploads is being served. Only
+ * the address is used — no account, no access token: step 1 is about the site existing.
+ * `alternates` holds the platform's other valid addresses for the same site (GitLab
+ * serves one project under its classic and its unique domain); any one of them counts.
+ */
+export async function checkIndex(baseUrl: string, alternates: string[] = []): Promise<CheckResult> {
+  const roots = [...new Set([baseUrl, ...alternates].map((url) => url.trim().replace(/\/+$/, '/')).filter((url) => /^https?:\/\//.test(url)))];
+  if (!roots.length) return { ok: false, message: 'There is no site address yet — fill in the fields first.' };
+  const lines: string[] = [];
+  for (const root of roots) {
+    const url = new URL('index.html', root).href;
+    const answer = await probe(url);
+    if (answer.local) return { ok: false, message: localRefused(url, answer.error ?? 'no answer') };
+    if (answer.error) {
+      lines.push(`${url} could not be reached (${answer.error})`);
+    } else if (answer.status === 200) {
+      return { ok: true, message: `✓ index.html is at the hosted URL — ${url} answered 200${answer.bytes ? ` (${answer.bytes} bytes)` : ''} in ${answer.ms ?? 0} ms.` };
+    } else {
+      lines.push(`${url} answered ${answer.status || 'nothing'}`);
+    }
   }
-  return { ok: false, message: `No index.html at the hosted URL — ${url} answered ${answer.status || 'nothing'}. Upload the starter page first.` };
+  return { ok: false, message: `No index.html at the hosted URL — ${lines.join(' · ')}. Upload the starter page first.` };
+}
+
+/**
+ * The reason a failed platform response carries in its body — GitLab answers
+ * {"message":"401 Unauthorized"} (or {"error":…}); others spell it out similarly. Used so
+ * a 4xx/5xx always shows the platform's own words beside the status code.
+ */
+async function responseMessage(response: Response): Promise<string> {
+  const text = await response.text().catch(() => '');
+  if (!text) return '';
+  try {
+    const body = JSON.parse(text) as { message?: unknown; error?: unknown };
+    const message = body.message ?? body.error;
+    if (typeof message === 'string') return message;
+    if (message && typeof message === 'object') {
+      return Object.values(message as Record<string, unknown>)
+        .flat()
+        .filter((part): part is string => typeof part === 'string')
+        .join('; ');
+    }
+  } catch {
+    // Not JSON: show the plain-text body instead.
+  }
+  return text.trim().slice(0, 200);
 }
 
 /**
  * The access token can really write: a probe file is committed and removed again. Wired
- * for GitHub, GitLab, Netlify and Vercel; the rest say so plainly.
+ * for GitHub, GitLab, Netlify and Vercel; the rest say so plainly. Every failure names
+ * the HTTP status and the platform's own error message when it sent one.
  */
 export async function checkAccess(platformId: string, values: Record<string, string>): Promise<CheckResult> {
   const name = '.vibeshare-write-test.txt';
@@ -91,6 +140,11 @@ export async function checkAccess(platformId: string, values: Record<string, str
     if (!namespace || !project || !token) return { ok: false, message: 'Fill in the user or group, project and access token first.' };
     const file = `https://gitlab.com/api/v4/projects/${encodeURIComponent(`${namespace}/${project}`)}/repository/files/${encodeURIComponent(name)}`;
     const ref = (branch || 'main').trim();
+    /** GitLab's refusal, in full: what it answered and the reason it put in the body. */
+    const refused = async (response: Response, doing: string) => {
+      const detail = await responseMessage(response);
+      return { ok: false, message: `GitLab would not ${doing} (HTTP ${response.status}${detail ? ` — ${detail}` : ''}) — check the token's api scope and the project path.` };
+    };
     try {
       const seen = await fetch(`${file}?ref=${encodeURIComponent(ref)}`, { headers: headers(token) });
       const write = await fetch(file, {
@@ -98,7 +152,7 @@ export async function checkAccess(platformId: string, values: Record<string, str
         headers: headers(token),
         body: JSON.stringify({ branch: ref, content: text, commit_message: 'VibeShare: write test' }),
       });
-      if (!write.ok) return { ok: false, message: `GitLab would not write the probe file (${write.status}) — check the token's api scope on this project.` };
+      if (!write.ok) return refused(write, 'write the probe file');
       const remove = await fetch(file, { method: 'DELETE', headers: headers(token), body: JSON.stringify({ branch: ref, commit_message: 'VibeShare: write test done' }) });
       return remove.ok
         ? { ok: true, message: `✓ The token wrote ${name} and removed it again — write access works.` }
@@ -204,16 +258,18 @@ export async function checkAccess(platformId: string, values: Record<string, str
 
 /**
  * The panel-3 check: everything the base URL and the content path are built from is
- * filled in — project name, path, base URL, content id, access token. When the content
- * id is the only thing missing, the answer points at the default article's id below.
+ * filled in — project name, path, base URL, content id. Secret fields (the platform
+ * access token) are never asked for here: the token is step 2's business and the URL
+ * checks need none. When the content id is the only thing missing, the answer points at
+ * the default article's id below.
  */
 export function checkFilled(fields: HostingField[], values: Record<string, string>, baseUrl: string, cid: string): CheckResult {
-  const missing = fields.filter((field) => !(values[field.id] ?? '').trim()).map((field) => field.label);
+  const missing = fields.filter((field) => !field.secret && !(values[field.id] ?? '').trim()).map((field) => field.label);
   if (!baseUrl.trim()) missing.push('Base URL');
   const noCid = !cid.trim();
   if (noCid) missing.push('Content id');
   if (!missing.length) {
-    return { ok: true, message: '✓ Project name, path, base URL, content id and access token are all filled in.' };
+    return { ok: true, message: '✓ Project name, path, base URL and content id are all filled in.' };
   }
   const hint = noCid
     ? ` No content id yet? Use the one below (${DUMMY_CID.slice(0, 14)}…) — it is the default article describing VibeShare, stored in this app so you never have to find one.`

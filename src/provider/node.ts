@@ -190,6 +190,24 @@ interface PendingUpload {
   createdAt: number;
 }
 
+/** What one manual push of one content to one target moved, for the admin's progress. */
+interface PushItemResult {
+  ref: string;
+  cid: string;
+  /** Chunks uploaded now. */
+  sent: number;
+  /** Chunks the target already had (or that the manifest names twice). */
+  skipped: number;
+  /** Chunks this node could not read: the target is still missing these. */
+  missing: number;
+  /** Bytes uploaded now. */
+  bytes: number;
+  /** The manifest is in place on the target; without it the content cannot be served. */
+  manifest: boolean;
+  /** What the target (or the transfer) said when something went wrong. */
+  error?: string;
+}
+
 /** A suggestion with the same content and the same value as an earlier one is not new. */
 function suggestionSignature(suggestion: { kind: string; sources?: SourceSuggestion[]; duplicateOf?: string; note?: string }): string {
   const sources = (suggestion.sources ?? [])
@@ -220,6 +238,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private tierTimer: NodeJS.Timeout;
   private endpointTimer: NodeJS.Timeout;
   private syncTimer: NodeJS.Timeout | null = null;
+  /** Clients for the targets of manual syncs, kept per ref so a long sync reuses sessions. */
+  private adHocClients = new Map<string, NodeClient>();
 
   constructor(options: NodeOptions<ProviderConfig>) {
     super('provider', providerDefaults(), options);
@@ -877,6 +897,85 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   /**
+   * A client for a provider the admin named on a manual sync — not necessarily a peer
+   * configured on this node. Kept per ref: a full-catalog sync asks the same target once
+   * per content, and a fresh client would sign in again every time.
+   */
+  private adHocClient(ref: string): NodeClient {
+    const existing = this.adHocClients.get(ref);
+    if (existing) return existing;
+    const parsed = parseNodeRef(ref)!;
+    const client = new NodeClient({
+      url: parsed.url,
+      expectedId: parsed.id,
+      expectedType: 'provider',
+      auth: 'identity',
+      identity: this.identity,
+      transport: () => this.transport(parsed.url),
+    });
+    this.adHocClients.set(ref, client);
+    return client;
+  }
+
+  /**
+   * Sends one content to one provider: every chunk the target lacks (asked for first, so
+   * nothing already there moves twice), then the manifest without which the target cannot
+   * serve the content. Cheap and idempotent to re-run — the manual sync in the admin GUI
+   * continues interrupted transfers this way. Trouble on the target comes back as `error`
+   * alongside whatever did move, so the caller can show progress and retry.
+   */
+  async pushItem(ref: string, cid: string): Promise<PushItemResult> {
+    const manifest = this.store.getManifest(cid);
+    if (!manifest) throw notFound('No such content on this node');
+    const client = this.adHocClient(ref);
+    const result: PushItemResult = { ref, cid, sent: 0, skipped: 0, missing: 0, bytes: 0, manifest: false };
+    const moved = new Set<string>();
+    try {
+      // The target answers per chunk id and caps a question at 500 ids: ask in batches.
+      const has: Record<string, boolean> = {};
+      const ids = [...new Set(manifest.chunks.map((chunk) => chunk.id))];
+      for (let index = 0; index < ids.length; index += 500) {
+        const answer = await client.json<{ has: Record<string, boolean> }>('/v1/peers/has', {
+          body: { ids: ids.slice(index, index + 500) },
+          timeoutMs: 30_000,
+        });
+        Object.assign(has, answer.has);
+      }
+      for (const chunk of manifest.chunks) {
+        // A manifest can name the same bytes twice; they move once.
+        if (moved.has(chunk.id)) {
+          result.skipped++;
+          continue;
+        }
+        moved.add(chunk.id);
+        if (has[chunk.id]) {
+          result.skipped++;
+          continue;
+        }
+        const data = await this.store.getChunk(chunk.id, { peers: false });
+        if (!data) {
+          // This node cannot read its own copy (a backend is down): the target stays
+          // missing the chunk, and a later run sends it when the backend is back.
+          result.missing++;
+          continue;
+        }
+        await client.fetch(`/v1/peers/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120_000 });
+        result.sent++;
+        result.bytes += data.length;
+      }
+    } catch (error) {
+      return { ...result, error: (error as Error).message };
+    }
+    try {
+      await client.json(`/v1/peers/manifests/${encodeURIComponent(cid)}`, { method: 'PUT', body: manifest, timeoutMs: 60_000 });
+      result.manifest = true;
+    } catch (error) {
+      return { ...result, error: (error as Error).message };
+    }
+    return result;
+  }
+
+  /**
    * Records a client's suggestion of missing data about content. What the node already
    * had pays nothing; a new suggestion earns `rewards.suggestion` (daily capped).
    */
@@ -1192,6 +1291,34 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (chunkIdOf(data) !== id) throw badRequest('The bytes do not match the chunk id');
       await this.store.putChunk(id, data);
       return { ok: true };
+    });
+
+    // A peer pushing content here sends the manifest as well: chunks without it cannot be
+    // served. It is registered like a finished upload once every chunk has landed — or
+    // earlier, with the rest still on its way, so the pushes that follow complete it.
+    router.put('/v1/peers/manifests/:cid', async (ctx) => {
+      const peer = this.requirePeer(ctx, 'receive');
+      if (!this.config.peering.acceptPush) throw forbidden('This node does not accept pushed content');
+      const cid = ctx.params.cid;
+      const body = await readJson<unknown>(ctx.req, 64 * MiB);
+      let manifest: Manifest;
+      try {
+        manifest = validateManifest(body);
+      } catch (error) {
+        throw badRequest((error as Error).message);
+      }
+      if (contentIdOf(manifest) !== cid) throw badRequest('The manifest does not match the content id');
+      const complete = manifest.chunks.every((chunk) => this.store.hasChunk(chunk.id));
+      const isNew = !this.store.getContent(cid);
+      if (complete) {
+        await this.store.addContent(manifest, peer.id);
+        // New content earns its storage job once, like an upload or an import (a repeat
+        // push of the same manifest must not open a second job).
+        if (isNew) this.autoJob(cid, manifest);
+      } else {
+        this.store.adopt(manifest, peer.id);
+      }
+      return { ok: true, cid };
     });
 
     router.get('/v1/quote/:cid', (ctx) => {
@@ -1835,35 +1962,29 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     router.post('/v1/admin/peers/push', async (ctx) => {
       this.requireAdmin(ctx);
       const body = await readJson<{ peer?: string; cid?: string }>(ctx.req);
-      const manifest = this.store.getManifest(String(body.cid ?? ''));
-      if (!manifest) throw notFound('No such content on this node');
+      const cid = String(body.cid ?? '');
+      if (!this.store.getManifest(cid)) throw notFound('No such content on this node');
       const targets = this.config.peering.peers.filter((peer) => peer.send && (!body.peer || peer.ref === body.peer));
       if (!targets.length) throw badRequest('No peer set to send to');
       const results: { peer: string; sent: number; skipped: number; error?: string }[] = [];
       for (const peer of targets) {
-        let sent = 0;
-        let skipped = 0;
-        try {
-          const client = this.peerClient(peer);
-          const answer = await client.json<{ has: Record<string, boolean> }>('/v1/peers/has', {
-            body: { ids: manifest.chunks.map((chunk) => chunk.id) },
-            timeoutMs: 30000,
-          });
-          for (const chunk of manifest.chunks) {
-            const data = answer.has[chunk.id] ? null : await this.store.getChunk(chunk.id, { peers: false });
-            if (!data) {
-              skipped++;
-              continue;
-            }
-            await client.fetch(`/v1/peers/chunks/${chunk.id}`, { method: 'PUT', raw: data, timeoutMs: 120000 });
-            sent++;
-          }
-          results.push({ peer: peer.ref, sent, skipped });
-        } catch (error) {
-          results.push({ peer: peer.ref, sent, skipped, error: (error as Error).message });
-        }
+        // Pushing sends the manifest too, so the peer can serve what it receives.
+        const pushed = await this.pushItem(peer.ref, cid);
+        results.push({ peer: peer.ref, sent: pushed.sent, skipped: pushed.skipped + pushed.missing, error: pushed.error });
       }
       return { results };
+    });
+    // Manual content sync (admin GUI): one content to one provider the admin named — a
+    // peer configured here or not. The GUI walks the catalog pair by pair with this call,
+    // shows what moves to each target and re-runs what is still missing: every call only
+    // sends what the target lacks, so re-running is cheap and idempotent.
+    router.post('/v1/admin/peers/push-item', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ ref?: string; cid?: string }>(ctx.req);
+      const ref = String(body.ref ?? '').trim();
+      const parsed = parseNodeRef(ref);
+      if (!parsed || parsed.type === 'algorithm') throw badRequest('ref must be a content provider node reference (vs:provider:…@url or a plain URL)');
+      return this.pushItem(ref, String(body.cid ?? ''));
     });
     router.post('/v1/admin/peers/fetch', async (ctx) => {
       this.requireAdmin(ctx);

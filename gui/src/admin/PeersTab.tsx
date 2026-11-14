@@ -5,6 +5,7 @@ import { FORMAT_LABELS, FORMATS, RATING_LABELS, RATINGS, type Format, type Ratin
 import { Loading, Switch } from '../components/ui';
 import { admin, message } from './api';
 import { useToast } from './AdminApp';
+import { PeerContentSync } from './PeerContentSync';
 
 interface PeerRow {
   ref: string;
@@ -125,6 +126,7 @@ export function Peers() {
       </div>
       <PeersAsk peers={peers ?? []} />
       <PeerSyncJob />
+      <PeerContentSync />
     </div>
   );
 }

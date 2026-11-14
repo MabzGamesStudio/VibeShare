@@ -139,7 +139,9 @@ export class ClientNode {
 
   private tokenOf(ctx: Ctx): string {
     const header = ctx.req.headers['x-vs-token'];
-    if (typeof header === 'string') return header;
+    // An empty header is not a token: fall through to ?t= and the cookie, so a page that
+    // holds no token of its own is still authorized by the cookie this daemon set.
+    if (typeof header === 'string' && header) return header;
     const query = ctx.query.get('t');
     if (query) return query;
     const cookie = (ctx.req.headers.cookie ?? '').match(/(?:^|;\s*)vs_token=([^;]+)/);
