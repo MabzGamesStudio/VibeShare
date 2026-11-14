@@ -572,17 +572,21 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     void (async () => {
       // One event per preview fetch: what was asked for and what came of it.
       let outcome = 'stored';
+      let status: number | undefined;
+      let bytes = 0;
       try {
         const send = this.transport(url)?.fetch ?? fetch;
         const response = await send(url, { signal: AbortSignal.timeout(15_000) });
+        status = response.status;
         const type = (response.headers.get('content-type') ?? '').split(';')[0];
         if (!response.ok) outcome = `http ${response.status}`;
         else if (!/^image\/(jpeg|png|webp)$/.test(type)) outcome = `not an image (${type.slice(0, 30) || 'no type'})`;
         else {
-          const bytes = Buffer.from(await response.arrayBuffer());
-          if (!bytes.length) outcome = 'empty image';
-          else if (bytes.length > 200 * 1024) outcome = 'too large';
-          else this.registry.setThumbnail(entry.id, `data:${type};base64,${bytes.toString('base64')}`);
+          const data = Buffer.from(await response.arrayBuffer());
+          bytes = data.length;
+          if (!data.length) outcome = 'empty image';
+          else if (data.length > 200 * 1024) outcome = 'too large';
+          else this.registry.setThumbnail(entry.id, `data:${type};base64,${data.toString('base64')}`);
         }
       } catch (error) {
         outcome = 'failed';
@@ -595,7 +599,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         this.thumbFetching--;
         this.traces.trace('dependency', 'algorithm.thumbnails', 'fetch preview', {
           message: `${entry.id.slice(0, 24)} · ${outcome}`,
-          data: { id: entry.id.slice(0, 32), url: url.slice(0, 120), outcome, ms: Date.now() - started },
+          data: this.traces.summarize({ id: entry.id.slice(0, 32), url, method: 'GET', ms: Date.now() - started, status, bytes, outcome }),
         });
       }
     })();
@@ -1114,6 +1118,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         }
       );
       const cid = contentIdOf(manifest);
+      const offloadStarted = Date.now();
       const started = await client.json<{ missing: string[] }>('/v1/uploads', { method: 'POST', body: { manifest } });
       for (const chunkId of started.missing) {
         const chunk = chunks.get(chunkId);
@@ -1124,7 +1129,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       for (const block of section.blocks) delete block.data;
       this.traces.trace('dependency', 'algorithm.comments', 'function:offloadComments', {
         message: `provider kept ${cid.slice(0, 24)}`,
-        data: { cid: cid.slice(0, 32), blocks: section.blocks.length },
+        data: this.traces.summarize({ cid: cid.slice(0, 32), url: `${client.url}/v1/uploads/${cid}/commit`, method: 'POST', ms: Date.now() - offloadStarted, blocks: section.blocks.length }),
       });
     } catch (error) {
       // The data stays here while the provider cannot take it.
@@ -1140,6 +1145,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const provider = this.config.comments.provider;
     if (!provider?.url) return [];
     const client = this.commentProviderClient(provider.url);
+    const fetchStarted = Date.now();
     const manifest = await client.json<{ chunks: { id: string }[] }>(`/v1/content/${remote}`);
     const parts: Buffer[] = [];
     for (const chunk of manifest.chunks) {
@@ -1149,7 +1155,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const data = JSON.parse(Buffer.concat(parts).toString()) as (CommentData | null)[];
     this.traces.trace('dependency', 'algorithm.comments', 'function:fetchCommentData', {
       message: `${remote.slice(0, 24)} · ${manifest.chunks.length} chunks`,
-      data: { cid: remote.slice(0, 32), chunks: manifest.chunks.length, comments: data.length },
+      data: this.traces.summarize({ cid: remote.slice(0, 32), url: `${client.url}/v1/content/${remote}`, method: 'GET', ms: Date.now() - fetchStarted, chunks: manifest.chunks.length, comments: data.length }),
     });
     return data;
   }
@@ -2891,21 +2897,26 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     }
 
     try {
-      const report = await this.peerClient({ ref: base.ref }).json<PeerImportReport>('/v1/peers/import', {
+      const peerClient = this.peerClient({ ref: base.ref });
+      const pushStarted = Date.now();
+      const report = await peerClient.json<PeerImportReport>('/v1/peers/import', {
         body: batch,
         timeoutMs: 120_000,
       });
       this.traces.trace('dependency', 'algorithm.peers', 'push batch', {
         message: `${cat} → ${refText.slice(0, 36)} · ${sent} sent`,
-        data: {
+        data: this.traces.summarize({
           ref: refText.slice(0, 80),
+          url: `${peerClient.url}/v1/peers/import`,
+          method: 'POST',
+          ms: Date.now() - pushStarted,
           category: cat,
           sent,
           done,
           oversized,
           accepted: report.entries.accepted + report.topics.accepted + report.creators.accepted + report.groups.accepted + report.comments.accepted,
           skipped: report.entries.skipped + report.topics.skipped + report.creators.skipped + report.groups.skipped + report.comments.skipped,
-        },
+        }),
       });
       return { ...base, category: cat, sent, cursor: done ? null : next, done, report, oversized };
     } catch (error) {
@@ -3201,8 +3212,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const job = this.config.peering.job;
     const results: { peer: string; items: number; adopted: number; error?: string }[] = [];
     for (const entry of this.peersToFetch()) {
+      const client = this.peerClient(entry);
+      const discoverStarted = Date.now();
       try {
-        const answer = await this.peerClient(entry).json<{ items: PeerEntry[] }>('/v1/peers/discover', {
+        const answer = await client.json<{ items: PeerEntry[] }>('/v1/peers/discover', {
           body: { criteria: { algorithm: 'new', limit: job.limit } },
           timeoutMs: 60_000,
         });
@@ -3213,14 +3226,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         // One outcome per peer asked (each is its own outgoing call).
         this.traces.trace('dependency', 'algorithm.peers', 'peer discover', {
           message: `${entry.ref.slice(0, 48)} · ${items.length} items · ${adopted} adopted`,
-          data: { peer: entry.ref.slice(0, 80), items: items.length, adopted },
+          data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/discover`, method: 'POST', ms: Date.now() - discoverStarted, items: items.length, adopted }),
         });
       } catch (error) {
         results.push({ peer: entry.ref, items: 0, adopted: 0, error: (error as Error).message });
         this.traces.trace('error', 'algorithm.peers', 'peer discover', {
           message: entry.ref.slice(0, 48),
           error: (error as Error).message,
-          data: { peer: entry.ref.slice(0, 80) },
+          data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/discover`, method: 'POST', ms: Date.now() - discoverStarted }),
         });
       }
     }
@@ -3327,8 +3340,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     for (const ref of sources) {
       if (learned.length > max * 3) break;
       const before = learned.length;
+      const client = this.peerClient({ ref });
+      const exchangeStarted = Date.now();
       try {
-        const answer = await this.peerClient({ ref }).json<{ self?: string; peers?: string[] }>('/v1/peers/peers', { timeoutMs: 15_000 });
+        const answer = await client.json<{ self?: string; peers?: string[] }>('/v1/peers/peers', { timeoutMs: 15_000 });
         for (const candidate of [answer.self, ...(answer.peers ?? [])]) {
           const ref2 = String(candidate ?? '').trim();
           if (!ref2 || known.has(ref2) || learned.includes(ref2)) continue;
@@ -3336,14 +3351,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         }
         this.traces.trace('dependency', 'algorithm.peers', 'peer exchange', {
           message: `${ref.slice(0, 48)} · ${learned.length - before} learned`,
-          data: { peer: ref.slice(0, 80), learned: learned.length - before },
+          data: this.traces.summarize({ peer: ref.slice(0, 80), url: `${client.url}/v1/peers/peers`, method: 'GET', ms: Date.now() - exchangeStarted, learned: learned.length - before }),
         });
       } catch (error) {
         // The seed or peer is offline; try the next one.
         this.traces.trace('error', 'algorithm.peers', 'peer exchange', {
           message: ref.slice(0, 48),
           error: (error as Error).message,
-          data: { peer: ref.slice(0, 80) },
+          data: this.traces.summarize({ peer: ref.slice(0, 80), url: `${client.url}/v1/peers/peers`, method: 'GET', ms: Date.now() - exchangeStarted }),
         });
       }
     }
@@ -4042,8 +4057,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (!ref) throw badRequest('id or link is required');
       const results: { peer: string; entry?: PeerEntry; error?: string }[] = [];
       for (const entry of peers) {
+        const client = this.peerClient(entry);
+        const metadataStarted = Date.now();
         try {
-          const answer = await this.peerClient(entry).json<{ entry: PeerEntry | null }>('/v1/peers/metadata', {
+          const answer = await client.json<{ entry: PeerEntry | null }>('/v1/peers/metadata', {
             body: { id: body.id, link: body.link },
             timeoutMs: 30000,
           });
@@ -4051,14 +4068,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           results.push({ peer: entry.ref, entry: answer.entry ?? undefined });
           this.traces.trace('dependency', 'algorithm.peers', 'peer metadata', {
             message: `${entry.ref.slice(0, 48)} · ${answer.entry ? 'found' : 'unknown'}`,
-            data: { peer: entry.ref.slice(0, 80), ref: ref.slice(0, 80), found: Boolean(answer.entry), adopted: Boolean(answer.entry && body.adopt) },
+            data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/metadata`, method: 'POST', ms: Date.now() - metadataStarted, ref: ref.slice(0, 80), found: Boolean(answer.entry), adopted: Boolean(answer.entry && body.adopt) }),
           });
         } catch (error) {
           results.push({ peer: entry.ref, error: (error as Error).message });
           this.traces.trace('error', 'algorithm.peers', 'peer metadata', {
             message: entry.ref.slice(0, 48),
             error: (error as Error).message,
-            data: { peer: entry.ref.slice(0, 80) },
+            data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/metadata`, method: 'POST', ms: Date.now() - metadataStarted }),
           });
         }
       }
@@ -4071,8 +4088,10 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       if (!peers.length) throw badRequest('No peer set to fetch from');
       const results: { peer: string; items: PeerEntry[]; error?: string }[] = [];
       for (const entry of peers) {
+        const client = this.peerClient(entry);
+        const discoverStarted = Date.now();
         try {
-          const answer = await this.peerClient(entry).json<{ items: PeerEntry[] }>('/v1/peers/discover', {
+          const answer = await client.json<{ items: PeerEntry[] }>('/v1/peers/discover', {
             body: { criteria: body.criteria ?? {} },
             timeoutMs: 60000,
           });
@@ -4080,14 +4099,14 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
           results.push({ peer: entry.ref, items: answer.items });
           this.traces.trace('dependency', 'algorithm.peers', 'peer discover', {
             message: `${entry.ref.slice(0, 48)} · ${answer.items.length} items`,
-            data: { peer: entry.ref.slice(0, 80), items: answer.items.length, adopted: body.adopt ? answer.items.length : 0 },
+            data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/discover`, method: 'POST', ms: Date.now() - discoverStarted, items: answer.items.length, adopted: body.adopt ? answer.items.length : 0 }),
           });
         } catch (error) {
           results.push({ peer: entry.ref, items: [], error: (error as Error).message });
           this.traces.trace('error', 'algorithm.peers', 'peer discover', {
             message: entry.ref.slice(0, 48),
             error: (error as Error).message,
-            data: { peer: entry.ref.slice(0, 80) },
+            data: this.traces.summarize({ peer: entry.ref.slice(0, 80), url: `${client.url}/v1/peers/discover`, method: 'POST', ms: Date.now() - discoverStarted }),
           });
         }
       }
@@ -4117,13 +4136,15 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     let skipped = 0;
     let offset = 0;
     while (queued + skipped < limit) {
+      const catalogUrl = `${ref.url}/v1/catalog?offset=${offset}&limit=100`;
+      const catalogStarted = Date.now();
       const page = await requestJson<{
         items: { cid: string; name: string; createdAt: string; meta?: SubmissionRequest; sources?: string[]; creator?: { id: string; name?: string; kind?: CreatorKind } }[];
         next?: number;
-      }>(`${ref.url}/v1/catalog?offset=${offset}&limit=100`, { transport: this.transport(ref.url) });
+      }>(catalogUrl, { transport: this.transport(ref.url) });
       this.traces.trace('dependency', 'algorithm.import', 'provider catalog', {
         message: `${ref.url.slice(0, 40)} · ${page.items.length} items`,
-        data: { provider: ref.url.slice(0, 80), offset, items: page.items.length },
+        data: this.traces.summarize({ provider: ref.url.slice(0, 80), url: catalogUrl, method: 'GET', ms: Date.now() - catalogStarted, offset, items: page.items.length }),
       });
       for (const item of page.items) {
         const id = [item.cid, ...(item.sources ?? [])].join('~');

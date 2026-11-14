@@ -1259,6 +1259,7 @@ export function AdminApp() {
           ['content', 'Content'],
           ['storage', 'Storage'],
           ['tiers', 'Tiers'],
+          ['peers', 'Peers'],
         ] as [string, string][])
       : ([
           // Review opens the submissions queue; its menu below jumps to the other
@@ -1292,10 +1293,10 @@ export function AdminApp() {
         ] as [string, ReactNode][])),
     ['accounts', 'Accounts'],
     ['payments', 'Payments'],
-    ['settings', 'Settings'],
     // Both node kinds serve the same /v1/admin/tracing endpoints, so one tab works
     // on a provider and on a search node.
     ['tracing', 'Tracing'],
+    ['settings', 'Settings'],
   ];
 
   return (
@@ -1464,6 +1465,12 @@ const LOGGING_GROUP: FieldGroup = {
   fields: [
     { path: 'tracing.enabled', label: 'Trace logs', type: 'bool', hint: 'Off by default: nothing at all is recorded until this is turned on' },
     { path: 'tracing.expirationHours', label: 'Expire logs after (hours)', type: 'number', hint: 'Trace events older than this are pruned (default 24)' },
+    {
+      path: 'tracing.payloadChars',
+      label: 'Record first N characters of request/response payloads',
+      type: 'number',
+      hint: 'How much of a request or response body is kept in each trace line (default 256)',
+    },
     {
       path: 'tracing.levels.basic',
       label: 'Trace level: basic',

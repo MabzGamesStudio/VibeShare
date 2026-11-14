@@ -19,6 +19,8 @@ export interface TraceSettings {
   enabled: boolean;
   /** Hours a trace event is kept before it is pruned (default 24). */
   expirationHours: number;
+  /** How many characters of a request/response payload are recorded (default 256). */
+  payloadChars: number;
   /** The levels that are recorded at all (toggle-able one by one). */
   levels: Record<TraceLevel, boolean>;
 }
@@ -28,6 +30,7 @@ export function defaultTraceSettings(): TraceSettings {
   return {
     enabled: false,
     expirationHours: 24,
+    payloadChars: 256,
     levels: { basic: true, detail: false, dependency: true, error: true },
   };
 }
@@ -40,6 +43,7 @@ export function normalizeTraceSettings(saved: unknown): TraceSettings {
   return {
     enabled: value.enabled === true,
     expirationHours: Number.isFinite(Number(value.expirationHours)) && Number(value.expirationHours) > 0 ? Math.round(Number(value.expirationHours)) : defaults.expirationHours,
+    payloadChars: Number.isFinite(Number(value.payloadChars)) && Number(value.payloadChars) >= 0 ? Math.round(Number(value.payloadChars)) : defaults.payloadChars,
     levels: {
       basic: levels.basic === true,
       detail: levels.detail === true,
@@ -47,6 +51,27 @@ export function normalizeTraceSettings(saved: unknown): TraceSettings {
       error: levels.error === true,
     },
   };
+}
+
+/** The default payload capture limit (matches defaultTraceSettings; handy at call sites). */
+export const DEFAULT_PAYLOAD_CHARS = 256;
+
+/**
+ * Keeps a detail payload small enough to store (function data, request/response
+ * bodies, …): strings are cut at `maxChars` characters and structures are shrunk to
+ * their JSON text, so one trace line never carries a whole upload or download.
+ */
+export function summarize(value: unknown, maxChars: number = DEFAULT_PAYLOAD_CHARS): unknown {
+  const cap = (text: string) => (text.length > maxChars ? `${text.slice(0, maxChars)}…` : text);
+  if (typeof value === 'string') return cap(value);
+  if (value === undefined || value === null) return undefined;
+  try {
+    const text = JSON.stringify(value);
+    if (text === undefined) return undefined;
+    return text.length > maxChars ? `${text.slice(0, maxChars)}…` : JSON.parse(text);
+  } catch {
+    return cap(String(value).slice(0, 500));
+  }
 }
 
 /** Who started a timeline: a user action in a GUI, or an incoming API call. */

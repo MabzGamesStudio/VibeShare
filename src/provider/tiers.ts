@@ -300,6 +300,21 @@ export class TierManager {
     return assignment;
   }
 
+  /**
+   * Assigns one tier to every content that has none yet. The cids come from the caller
+   * (the node knows the catalog); manual, so the automatic lifecycles never undo this
+   * batch by themselves. Returns how many were assigned.
+   */
+  assignUnassigned(cids: string[], tierId: string): number {
+    let assigned = 0;
+    for (const cid of cids) {
+      if (this.store.data.assignments[cid]) continue;
+      this.setTier(cid, tierId, { manual: true });
+      assigned++;
+    }
+    return assigned;
+  }
+
   /** Pushes a content's lifecycle further out (or starts the clock again). */
   extend(cid: string, days: number): TierAssignment | undefined {
     const assignment = this.store.data.assignments[cid];

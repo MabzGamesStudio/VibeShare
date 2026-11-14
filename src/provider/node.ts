@@ -214,6 +214,8 @@ interface EndpointCheck {
   url: string;
   bytes: number;
   chunks?: { matched: number; total: number };
+  /** The HTTP status the endpoint answered with, when there was one. */
+  status?: number;
   error?: string;
 }
 
@@ -630,12 +632,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    */
   private async pullContentUrl(record: ContentUrlRecord, cid: string, url: string): Promise<boolean> {
     let data: Buffer;
+    const started = Date.now();
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok) {
         this.traces.trace('dependency', 'provider.node', 'content url pull failed', {
           message: `the endpoint answered ${response.status}`,
-          data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+          data: this.traces.summarize({ cid: cid.slice(0, 16), url, method: 'GET', ms: Date.now() - started, status: response.status }),
         });
         return false;
       }
@@ -644,14 +647,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       // Tolerated: one dead link just means the next one is tried.
       this.traces.trace('error', 'provider.node', 'content url pull failed', {
         error: (error as Error).message,
-        data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+        data: this.traces.summarize({ cid: cid.slice(0, 16), url, method: 'GET', ms: Date.now() - started }),
       });
       return false;
     }
     if (!bytesMatchCid(data, cid)) {
       this.traces.trace('dependency', 'provider.node', 'content url pull failed', {
         message: 'the bytes do not match the content id',
-        data: { cid: cid.slice(0, 16), url: url.slice(0, 120) },
+        data: this.traces.summarize({ cid: cid.slice(0, 16), url, method: 'GET', ms: Date.now() - started, status: 200, bytes: data.length }),
       });
       return false; // the content does not match the cid
     }
@@ -663,7 +666,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       record.earned += reward;
     }
     this.traces.trace('dependency', 'provider.node', 'content url pulled', {
-      data: { cid: cid.slice(0, 16), url: url.slice(0, 120), bytes: data.length, account: record.account.slice(0, 16), reward },
+      data: this.traces.summarize({ cid: cid.slice(0, 16), url, method: 'GET', ms: Date.now() - started, status: 200, bytes: data.length, account: record.account.slice(0, 16), reward }),
     });
     this.contentUrls.changed();
     this.downloads.changed();
@@ -726,28 +729,33 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const target = url.startsWith('http') && !url.includes(' ') && url.endsWith(cid) ? url : `${url.replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
     // Every check is one call to the outside world: one dependency line for its outcome,
     // whichever way it went.
+    let started = Date.now();
     const report = (result: EndpointCheck): EndpointCheck => {
       this.traces.trace('dependency', 'provider.node', 'endpoint check', {
-        data: {
+        data: this.traces.summarize({
           cid: cid.slice(0, 16),
-          url: target.slice(0, 120),
+          url: target,
+          method: 'GET',
+          ms: Date.now() - started,
+          status: result.ok ? 200 : result.status,
           ok: result.ok,
           bytes: result.bytes,
           matched: result.chunks?.matched,
           total: result.chunks?.total,
-        },
+        }),
         error: result.error,
       });
       return result;
     };
     let data: Buffer;
     try {
+      started = Date.now();
       const response = await fetch(target, { signal: AbortSignal.timeout(Math.max(50, timeoutMs)) });
-      if (!response.ok) return report({ ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}` });
+      if (!response.ok) return report({ ok: false, url: target, bytes: 0, error: `The endpoint answered ${response.status}`, status: response.status });
       data = Buffer.from(await response.arrayBuffer());
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.traces.trace('error', 'provider.node', 'endpoint check failed', { error: message, data: { cid: cid.slice(0, 16), url: target.slice(0, 120) } });
+      this.traces.trace('error', 'provider.node', 'endpoint check failed', { error: message, data: this.traces.summarize({ cid: cid.slice(0, 16), url: target, method: 'GET', ms: Date.now() - started }) });
       return report({ ok: false, url: target, bytes: 0, error: message });
     }
     const manifest = this.store.getManifest(cid);
@@ -970,24 +978,27 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private async fetchFromPeers(id: string, only?: string): Promise<Buffer | null> {
     for (const peer of this.config.peering.peers) {
       if (!peer.receive || (only && peer.ref !== only)) continue;
+      const client = this.peerClient(peer);
+      const path = `/v1/peers/chunks/${encodeURIComponent(id)}`;
+      const started = Date.now();
       try {
-        const response = await this.peerClient(peer).fetch(`/v1/peers/chunks/${encodeURIComponent(id)}`, { timeoutMs: 30_000 });
+        const response = await client.fetch(path, { timeoutMs: 30_000 });
         const data = Buffer.from(await response.arrayBuffer());
         if (chunkIdOf(data) === id) {
           this.traces.trace('dependency', 'provider.node', 'peer chunk fetched', {
-            data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12), bytes: data.length },
+            data: this.traces.summarize({ peer: peer.ref.slice(0, 48), url: `${client.url}${path}`, method: 'GET', ms: Date.now() - started, status: response.status, chunk: id.slice(0, 12), bytes: data.length }),
           });
           return data;
         }
         this.traces.trace('error', 'provider.node', 'peer chunk fetch failed', {
           message: 'the bytes did not match the chunk id',
-          data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12) },
+          data: this.traces.summarize({ peer: peer.ref.slice(0, 48), url: `${client.url}${path}`, method: 'GET', ms: Date.now() - started, chunk: id.slice(0, 12) }),
         });
       } catch (error) {
         log.debug(`Peer has no chunk ${id.slice(0, 12)}: ${(error as Error).message}`);
         this.traces.trace('error', 'provider.node', 'peer chunk fetch failed', {
           error: (error as Error).message,
-          data: { peer: peer.ref.slice(0, 48), chunk: id.slice(0, 12) },
+          data: this.traces.summarize({ peer: peer.ref.slice(0, 48), url: `${client.url}${path}`, method: 'GET', ms: Date.now() - started, chunk: id.slice(0, 12) }),
         });
       }
     }
@@ -2325,6 +2336,19 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         assignments: this.tiers.assignments(),
         backends: this.config.storage.backends.map((backend) => backend.id),
       };
+    });
+    // Assigns every content that has no tier yet to one tier, in one batch (the admin
+    // GUI's "assign unassigned" card). Registered before the /tiers/:cid routes so the
+    // static path wins the match. The assignments are manual: automatic lifecycles never
+    // undo this batch by themselves.
+    router.post('/v1/admin/tiers/assign-unassigned', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ tier?: string }>(ctx.req);
+      const tier = String(body.tier ?? '');
+      if (!this.tiers.tier(tier)) throw badRequest('No such tier on this node');
+      const assigned = this.tiers.assignUnassigned(this.store.list(0, 50_000).map((record) => record.cid), tier);
+      this.traces.trace('basic', 'provider.node', 'tiers assign unassigned', { data: { tier, assigned } });
+      return { assigned };
     });
     router.post('/v1/admin/tiers/:cid', async (ctx) => {
       this.requireAdmin(ctx);

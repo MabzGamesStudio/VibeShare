@@ -117,12 +117,11 @@ function viewOf(
 }
 
 /**
- * "Credits awarded": what the job pays out. The jobs payload carries no paid-out totals,
- * so the headline number is the honest fixed payout of the job's reward terms — upfront +
- * completion per holder — and the per-retrieval / per-challenge rates go into the tooltip
- * and the details below. The credits holders have actually received so far are summed
- * from /v1/admin/storage/assignments and shown underneath, labelled as paid (that endpoint
- * keeps the 500 most recent assignments, so on a big node it can undercount).
+ * The payout description of a job's credits. What holders have actually been paid is the
+ * number the column leads with (summed from /v1/admin/storage/assignments, which keeps
+ * the 500 most recent assignments, so on a big node it can undercount); the reward terms
+ * stay in this tooltip and the job details, and the description under the number carries
+ * no number itself so the paid figure is the only one the column shows.
  */
 function rewardsTitle(job: StorageJobRow): string {
   return `Per holder: ${job.rewards.upfront} credits when hired + ${job.rewards.completion} at the end of the term, plus ${job.rewards.perRetrieval} per retrieval and ${job.rewards.perChallenge} per passed challenge`;
@@ -138,17 +137,46 @@ function expirationOf(job: StorageJobRow): string | null {
 
 const date = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : '—');
 
-/** One label/value line of the job details. */
+/** "in 3 days" / "2 hours ago" — how far an absolute date is from now, "—" without one. */
+function relative(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const seconds = (Date.parse(iso) - Date.now()) / 1000;
+  if (!Number.isFinite(seconds)) return '—';
+  const future = seconds >= 0;
+  const away = Math.abs(seconds);
+  if (away < 60) return future ? 'in a moment' : 'just now';
+  const steps: [number, string][] = [
+    [60, 'minute'],
+    [3600, 'hour'],
+    [86400, 'day'],
+    [604800, 'week'],
+    [2629800, 'month'],
+    [31557600, 'year'],
+  ];
+  let label = 'minute';
+  let size = 60;
+  for (const [step, name] of steps) {
+    if (away >= step) {
+      size = step;
+      label = name;
+    }
+  }
+  const count = Math.floor(away / size);
+  return future ? `in ${count} ${label}${count === 1 ? '' : 's'}` : `${count} ${label}${count === 1 ? '' : 's'} ago`;
+}
+
+/**
+ * One label/value line of the job details. The two are cells of one grid below, so every
+ * label sits in the same fixed-width column and every value starts at the same place.
+ */
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="row between" style={{ gap: 12, alignItems: 'baseline' }}>
-      <span className="small muted" style={{ whiteSpace: 'nowrap' }}>
-        {label}
-      </span>
-      <span className="small" style={{ textAlign: 'right', overflowWrap: 'anywhere' }}>
+    <>
+      <span className="small muted">{label}</span>
+      <span className="small" style={{ overflowWrap: 'anywhere' }}>
         {children}
       </span>
-    </div>
+    </>
   );
 }
 
@@ -199,87 +227,99 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
         </div>
         {tab === 'details' && (
           <div className="form-stack" style={{ gap: 8 }}>
-            <Fact label="Content id">
-              <span className="mono">{cid || '—'}</span>
-            </Fact>
-            <Fact label="Title">{job.title ?? '—'}</Fact>
-            <Fact label="Job id">
-              <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
-                <span className="mono">{job.id}</span>
-                <CopyButton text={job.id} label="Id" />
-              </span>
-            </Fact>
-            <Fact label="Status">
-              <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>{job.status}</span>
-              <div className="tiny faint">{job.managed ? 'opened by the tier by itself' : 'opened by hand'}</div>
-            </Fact>
-            <Fact label="Tier">
-              {tier ? (
-                <>
-                  <strong>{tier.label}</strong> <span className="tiny faint">({tier.id})</span>
-                </>
-              ) : (
-                <span className="muted">no tier assigned — the job's own copies wanted</span>
-              )}
-            </Fact>
-            <Fact label="Jobs fulfilled">
-              <strong>
-                {x}/{wanted}
-              </strong>{' '}
-              jobs fulfilled
-              <div className="tiny faint">
-                {tier ? 'copies the tier plan wants (its media copies + URL backups)' : 'copies the job wants (its replicas)'}
-              </div>
-            </Fact>
-            <Fact label="Credits awarded">
-              <span title={rewardsTitle(job)}>
-                {job.rewards.upfront + job.rewards.completion} credits per holder — {job.rewards.upfront} upfront +{' '}
-                {job.rewards.completion} at the end of the term
-              </span>
-              <div className="tiny faint">
-                plus {job.rewards.perRetrieval} per retrieval and {job.rewards.perChallenge} per passed challenge
-              </div>
-              <div className="tiny faint">paid to holders so far: {paid} credits</div>
-            </Fact>
-            <Fact label="Job start">
-              {date(job.createdAt)}
-              <div className="tiny faint">{timeAgo(job.createdAt)}</div>
-            </Fact>
-            <Fact label="Expiration">
-              {expiration ? date(expiration) : '—'}
-              <div className="tiny faint">{job.openUntil ? 'no new holders after this' : 'end of the paid term'}</div>
-            </Fact>
-            <Fact label="Open for holders until">{job.openUntil ? date(job.openUntil) : 'until closed by hand'}</Fact>
-            <Fact label="Term">
-              {job.durationSeconds ? `${Math.round(job.durationSeconds / 86400)} days` : '—'}
-              {job.durationSeconds && Number.isFinite(Date.parse(job.createdAt)) ? (
+            {/* One grid for all facts: the labels share a fixed-width column and the
+                values all start right after it. */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '240px minmax(0, 1fr)',
+                columnGap: 12,
+                rowGap: 8,
+                alignItems: 'baseline',
+              }}
+            >
+              <Fact label="Content id">
+                <span className="mono">{cid || '—'}</span>
+              </Fact>
+              <Fact label="Title">{job.title ?? '—'}</Fact>
+              <Fact label="Job id">
+                <span className="row" style={{ gap: 6 }}>
+                  <span className="mono">{job.id}</span>
+                  <CopyButton text={job.id} label="Id" />
+                </span>
+              </Fact>
+              <Fact label="Status">
+                <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>{job.status}</span>
+                <div className="tiny faint">{job.managed ? 'opened by the tier by itself' : 'opened by hand'}</div>
+              </Fact>
+              <Fact label="Tier">
+                {tier ? (
+                  <>
+                    <strong>{tier.label}</strong> <span className="tiny faint">({tier.id})</span>
+                  </>
+                ) : (
+                  <span className="muted">no tier assigned — the job's own copies wanted</span>
+                )}
+              </Fact>
+              <Fact label="Jobs fulfilled">
+                <strong>
+                  {x}/{wanted}
+                </strong>{' '}
+                jobs fulfilled
                 <div className="tiny faint">
-                  ends {date(new Date(Date.parse(job.createdAt) + job.durationSeconds * 1000).toISOString())}
+                  {tier ? 'copies the tier plan wants (its media copies + URL backups)' : 'copies the job wants (its replicas)'}
                 </div>
-              ) : null}
-            </Fact>
-            <Fact label="Replicas">{job.replicas}</Fact>
-            <Fact label="Bytes">{formatBytes(job.bytes)}</Fact>
-            <Fact label="Chunks">{job.chunkIds.length}</Fact>
-            <Fact label="Requires identity">
-              {job.requireIdentity ? 'yes — only key accounts may hold data' : 'no — any account may hold data'}
-            </Fact>
-            <Fact label="Challenges">
-              {job.challengeIntervalSeconds ? `every ${Math.round(job.challengeIntervalSeconds / 60)} minutes` : 'the service default'}
-            </Fact>
-            <Fact label="Retrieval tests">
-              {job.retrievalIntervalSeconds ? `every ${Math.round(job.retrievalIntervalSeconds / 60)} minutes` : 'only on demand'}
-            </Fact>
-            <Fact label="Slow endpoint">{job.maxLatencyMs !== undefined ? `${job.maxLatencyMs} ms` : 'the service default'}</Fact>
-            <Fact label="Fails before an endpoint counts failed">
-              {job.failedRequestsBeforeFailure !== undefined ? job.failedRequestsBeforeFailure : 'the service default'}
-            </Fact>
-            <Fact label="Last endpoint test">
-              {job.lastEndpointTestAt ? date(new Date(job.lastEndpointTestAt).toISOString()) : 'never'}
-            </Fact>
-            <Fact label="Assignments">
-              {job.assignments} total · {job.holders} active
-            </Fact>
+              </Fact>
+              <Fact label="Credits awarded">
+                <span title={rewardsTitle(job)}>
+                  {job.rewards.upfront + job.rewards.completion} credits per holder — {job.rewards.upfront} upfront +{' '}
+                  {job.rewards.completion} at the end of the term
+                </span>
+                <div className="tiny faint">
+                  plus {job.rewards.perRetrieval} per retrieval and {job.rewards.perChallenge} per passed challenge
+                </div>
+                <div className="tiny faint">paid to holders so far: {paid} credits</div>
+              </Fact>
+              <Fact label="Job start">
+                {date(job.createdAt)}
+                <div className="tiny faint">{timeAgo(job.createdAt)}</div>
+              </Fact>
+              <Fact label="Expiration">
+                {expiration ? date(expiration) : '—'}
+                <div className="tiny faint">{job.openUntil ? 'no new holders after this' : 'end of the paid term'}</div>
+              </Fact>
+              <Fact label="Open for holders until">{job.openUntil ? date(job.openUntil) : 'until closed by hand'}</Fact>
+              <Fact label="Term">
+                {job.durationSeconds ? `${Math.round(job.durationSeconds / 86400)} days` : '—'}
+                {job.durationSeconds && Number.isFinite(Date.parse(job.createdAt)) ? (
+                  <div className="tiny faint">
+                    ends {date(new Date(Date.parse(job.createdAt) + job.durationSeconds * 1000).toISOString())}
+                  </div>
+                ) : null}
+              </Fact>
+              <Fact label="Replicas">{job.replicas}</Fact>
+              <Fact label="Bytes">{formatBytes(job.bytes)}</Fact>
+              <Fact label="Chunks">{job.chunkIds.length}</Fact>
+              <Fact label="Requires identity">
+                {job.requireIdentity ? 'yes — only key accounts may hold data' : 'no — any account may hold data'}
+              </Fact>
+              <Fact label="Challenges">
+                {job.challengeIntervalSeconds ? `every ${Math.round(job.challengeIntervalSeconds / 60)} minutes` : 'the service default'}
+              </Fact>
+              <Fact label="Retrieval tests">
+                {job.retrievalIntervalSeconds ? `every ${Math.round(job.retrievalIntervalSeconds / 60)} minutes` : 'only on demand'}
+              </Fact>
+              <Fact label="Slow endpoint">{job.maxLatencyMs !== undefined ? `${job.maxLatencyMs} ms` : 'the service default'}</Fact>
+              <Fact label="Fails before an endpoint counts failed">
+                {job.failedRequestsBeforeFailure !== undefined ? job.failedRequestsBeforeFailure : 'the service default'}
+              </Fact>
+              <Fact label="Last endpoint test">
+                {job.lastEndpointTestAt ? date(new Date(job.lastEndpointTestAt).toISOString()) : 'never'}
+              </Fact>
+              <Fact label="Assignments">
+                {job.assignments} total · {job.holders} active
+              </Fact>
+            </div>
 
             <h3 style={{ marginTop: 12 }}>
               {x}/{wanted} jobs fulfilled
@@ -395,6 +435,23 @@ export function StorageJobs() {
   const pages = Math.max(1, Math.ceil(filtered.length / size));
   const current = Math.min(page, pages - 1);
   const visible = paged ? filtered.slice(current * size, current * size + size) : filtered.slice(0, shown);
+  // The same pager above and below the rows — one page of jobs can be long.
+  const summary = (
+    <span className="muted">
+      {filtered.length} job{filtered.length === 1 ? '' : 's'}
+      {paged ? ` · page ${current + 1} of ${pages}` : ` · showing ${visible.length}`}
+    </span>
+  );
+  const pagerButtons = (
+    <>
+      <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
+        Previous
+      </button>
+      <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+        Next
+      </button>
+    </>
+  );
 
   return (
     <div className="form-stack">
@@ -422,26 +479,26 @@ export function StorageJobs() {
       ) : (
         <>
           <div className="row between small">
-            <span className="muted">
-              {filtered.length} job{filtered.length === 1 ? '' : 's'}
-              {paged ? ` · page ${current + 1} of ${pages}` : ` · showing ${visible.length}`}
-            </span>
+            {summary}
             <div className="row" style={{ gap: 6 }}>
               <span className="hint">Items per page</span>
-              <select
-                value={size}
-                onChange={(e) => {
-                  setSize(Number(e.target.value));
+              <input
+                key={size}
+                type="number"
+                min={1}
+                max={500}
+                style={{ maxWidth: 92 }}
+                title="Jobs per page (1–500)"
+                defaultValue={size}
+                onBlur={(e) => {
+                  const wanted = Math.round(Number(e.target.value));
+                  if (!e.target.value.trim() || !Number.isFinite(wanted) || wanted === size) return;
+                  const perPage = Math.min(500, Math.max(1, wanted));
+                  setSize(perPage);
                   setPage(0);
-                  setShown(Number(e.target.value));
+                  setShown(perPage);
                 }}
-              >
-                {[10, 25, 50, 100].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
+              />
               <span className="hint">Show as</span>
               <select
                 value={paged ? 'paged' : 'lazy'}
@@ -454,16 +511,7 @@ export function StorageJobs() {
                 <option value="paged">Pagination</option>
                 <option value="lazy">Lazy load</option>
               </select>
-              {paged && (
-                <>
-                  <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
-                    Previous
-                  </button>
-                  <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
-                    Next
-                  </button>
-                </>
-              )}
+              {paged && pagerButtons}
             </div>
           </div>
           <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -491,30 +539,14 @@ export function StorageJobs() {
                   const expiration = expirationOf(job);
                   return (
                     <tr key={job.id} style={{ cursor: 'pointer' }} title="Open the job" onClick={() => setOpened(view)}>
-                      <td>
-                        <strong>{job.title ?? (job.cid ? `${job.cid.slice(0, 20)}…` : '(no content)')}</strong>
-                        <div className="mono tiny faint" title={job.cid}>
-                          {job.cid ? job.cid.slice(-12) : '—'}
-                        </div>
-                        <div className="tiny faint">
-                          {job.status}
-                          {job.managed ? ' · automatic' : ''}
-                        </div>
+                      <td className="mono tiny" title={job.cid} style={{ overflowWrap: 'anywhere' }}>
+                        {job.cid ?? '—'}
                       </td>
+                      <td className="small">{tier ? tier.id : <span className="muted">—</span>}</td>
                       <td className="small">
-                        {tier ? (
-                          <>
-                            <strong>{tier.label}</strong>
-                            <div className="tiny faint">{tier.id}</div>
-                          </>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td className="small">
-                        <span title={rewardsTitle(job)}>{job.rewards.upfront + job.rewards.completion} credits</span>
-                        <div className="tiny faint" title="Credits this job's holders have actually received so far">
-                          {paid} paid to holders so far
+                        <span title="Credits this job's holders have actually received so far">{paid} credits</span>
+                        <div className="tiny faint" title={rewardsTitle(job)}>
+                          Per holder: credits when hired + at the end of the term, plus per retrieval and per passed challenge
                         </div>
                       </td>
                       <td className="small">
@@ -525,7 +557,7 @@ export function StorageJobs() {
                         {expiration ? (
                           <>
                             {date(expiration)}
-                            <div className="tiny faint">{job.openUntil ? 'open until' : 'term ends'}</div>
+                            <div className="tiny faint">{relative(expiration)}</div>
                           </>
                         ) : (
                           <span className="muted">—</span>
@@ -533,9 +565,6 @@ export function StorageJobs() {
                       </td>
                       <td className="small">
                         {x}/{wanted} jobs fulfilled
-                        <div className="tiny faint">
-                          {x >= wanted ? 'all copies held' : `${wanted - x} cop${wanted - x === 1 ? 'y' : 'ies'} still wanted`}
-                        </div>
                       </td>
                     </tr>
                   );
@@ -543,11 +572,19 @@ export function StorageJobs() {
               </tbody>
             </table>
           </div>
-          {!paged && visible.length < filtered.length && (
-            <button className="small" onClick={() => setShown(shown + size)}>
-              Load more ({filtered.length - visible.length} left)
-            </button>
-          )}
+          {/* The same pager again under the rows, where a long page leaves off. */}
+          <div className="row between small">
+            {summary}
+            <div className="row" style={{ gap: 6 }}>
+              {paged ? (
+                pagerButtons
+              ) : visible.length < filtered.length ? (
+                <button className="small" onClick={() => setShown(shown + size)}>
+                  Load more ({filtered.length - visible.length} left)
+                </button>
+              ) : null}
+            </div>
+          </div>
         </>
       )}
       {opened && <JobDetails view={opened} onClose={() => setOpened(null)} />}

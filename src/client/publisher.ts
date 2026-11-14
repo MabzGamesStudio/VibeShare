@@ -167,6 +167,7 @@ export class Publisher {
           step(index, 'running');
           try {
             const client = this.nodes.client(provider);
+            const uploadStarted = Date.now();
             const started = await client.json<{ cid: string; missing: string[]; cost: number }>('/v1/uploads', {
               body: { manifest },
               timeoutMs: 60000,
@@ -184,7 +185,7 @@ export class Publisher {
             stored.push(provider);
             this.traces.trace('dependency', 'publisher', `POST /v1/uploads/${cid.slice(0, 12)}/commit`, {
               message: provider.name,
-              data: { node: provider.id, cost: started.cost },
+              data: this.traces.summarize({ node: provider.id, url: `${client.url}/v1/uploads/${cid}/commit`, method: 'POST', ms: Date.now() - uploadStarted, cost: started.cost }),
             });
             step(index, 'done', started.cost ? `${started.cost} credits` : undefined);
             void this.nodes.refreshBalance(provider);
@@ -267,11 +268,12 @@ export class Publisher {
               creatorProof: { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, base, ts)) },
             }
           : submission;
+        const submitted = Date.now();
         const result = await client.json<{ id: string; status: string }>('/v1/submissions', { body, timeoutMs: 30000 });
         library.algorithms.push({ nodeId: node.id, submissionId: result.id });
         this.traces.trace('dependency', 'publisher', 'POST /v1/submissions', {
           message: node.name,
-          data: { node: node.id, submission: result.id, status: result.status },
+          data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/submissions`, method: 'POST', ms: Date.now() - submitted, submission: result.id, status: result.status }),
         });
         job.steps[index].status = 'done';
         job.steps[index].detail = result.status === 'accepted' ? 'Listed' : 'Waiting for review';

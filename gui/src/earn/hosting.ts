@@ -489,36 +489,25 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         check: 'The project page is open with a README.md in the file list.',
       },
       {
-        title: 'Add the page the site serves',
+        title: 'Add the page and the pipeline that publishes it',
         lines: [
-          'Download the starter page below.',
-          'Click “+” → “Upload file”, pick the downloaded file and set its folder to public — the page must land at the path below, and Pages publishes the public folder as the site.',
-          'Click “Commit changes”.',
-        ],
-        copies: [{ label: 'File name (a path, folder included)', value: 'public/index.html' }],
-        download: { label: 'Download the starter page', zip: 'index.html', entries: [{ path: 'index.html', text: STARTER_HTML }] },
-        check: 'public/index.html is listed in the project files.',
-      },
-      {
-        title: 'Add the pipeline file that publishes the site',
-        lines: [
-          'Download the pipeline file below.',
-          'Click “+” → “Upload file” again, pick the downloaded file (its name is exactly as below), then “Commit changes”.',
-          'There is nothing to build: the job publishes the public folder exactly as it is in the repository.',
+          'Download the starter folder below (one zip) and unzip it — it holds both files the project needs, already at their repository paths: public/index.html and .gitlab-ci.yml.',
+          'Upload both into the project at exactly those paths: “+” → “Upload file” for each one — set the folder to public for index.html and leave .gitlab-ci.yml at the repository root (the Web IDE can commit the whole folder in one go).',
+          'Click “Commit changes”. There is nothing to build: the pages job publishes the public folder exactly as it is in the repository.',
         ],
         copies: [
-          { label: 'File name', value: '.gitlab-ci.yml' },
-          {
-            label: 'Contents (paste as one block)',
-            value: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public',
-          },
+          { label: 'File path (folder included)', value: 'public/index.html' },
+          { label: 'File path (repository root)', value: '.gitlab-ci.yml' },
         ],
         download: {
-          label: 'Download the pipeline file',
-          zip: '.gitlab-ci.yml',
-          entries: [{ path: '.gitlab-ci.yml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' }],
+          label: 'Download the starter folder (zip)',
+          zip: 'VibeShare.zip',
+          entries: [
+            { path: 'public/index.html', text: STARTER_HTML },
+            { path: '.gitlab-ci.yml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' },
+          ],
         },
-        check: 'Build → Pipelines shows a green pipeline with a “pages” job in it.',
+        check: 'public/index.html and .gitlab-ci.yml are both listed in the project files.',
       },
       {
         title: 'See your site',

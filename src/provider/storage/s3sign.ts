@@ -57,9 +57,12 @@ export function signS3Request(input: S3SignInput, traces?: TraceStore): Record<s
   const signingKey = hmac(hmac(hmac(hmac(`AWS4${input.secretAccessKey}`, day), input.region), service), 'aws4_request');
   const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
   const { host: _host, ...rest } = headers;
-  // Signing is the prelude to an S3 request — one dependency line per signed call.
+  // Signing is the prelude to an S3 request — one dependency line per signed call,
+  // with the URL it will be sent to and how many bytes it carries.
   if (traces?.recorder.shouldLog('dependency')) {
-    traces.trace('dependency', 'provider.s3sign', 'sign request', { data: { method: input.method, host: input.url.host, service } });
+    traces.trace('dependency', 'provider.s3sign', 'sign request', {
+      data: traces.summarize({ method: input.method, url: input.url.toString(), host: input.url.host, service, bytes: input.body?.length ?? 0 }),
+    });
   }
   return {
     ...rest,

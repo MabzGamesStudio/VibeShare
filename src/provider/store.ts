@@ -198,22 +198,28 @@ export class ContentStore {
       }
     }
     if (this.options.peerFallback && options.peers !== false) {
+      const started = Date.now();
       const data = await this.options.peerFallback(id);
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
         if (record) await this.remember(id, data);
         // Client holders of the storage service handed the bytes over (a paid retrieval).
-        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from holders', { data: { chunk: id.slice(0, 12), bytes: data.length } });
+        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from holders', {
+          data: this.options.traces.summarize({ chunk: id.slice(0, 12), url: `holder:${id.slice(0, 12)}`, method: 'GET', ms: Date.now() - started, status: 200, bytes: data.length }),
+        });
         return data;
       }
     }
     // Peer content providers: chunks addressed by their hash, fetched from a peer.
     if (this.options.chunkPeers && options.peers !== false) {
+      const started = Date.now();
       const data = await this.options.chunkPeers(id);
       if (data && chunkIdOf(data) === id) {
         this.cache.set(id, data);
         if (record) await this.remember(id, data);
-        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from peers', { data: { chunk: id.slice(0, 12), bytes: data.length } });
+        this.options.traces?.trace('dependency', 'provider.store', 'chunk fetched from peers', {
+          data: this.options.traces.summarize({ chunk: id.slice(0, 12), url: `peer:/v1/peers/chunks/${id.slice(0, 12)}`, method: 'GET', ms: Date.now() - started, status: 200, bytes: data.length }),
+        });
         return data;
       }
     }

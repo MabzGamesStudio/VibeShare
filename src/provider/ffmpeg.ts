@@ -28,7 +28,7 @@ async function processOutput(args: string[], input?: Uint8Array, traces?: TraceS
         const out = Buffer.concat(stdout);
         // The executable is a dependency like any other API: one line per invocation.
         traces?.trace('dependency', 'provider.ffmpeg', 'ffmpeg run', {
-          data: { args: args.length, inBytes: input?.length ?? 0, outBytes: out.length, ms: Date.now() - started },
+          data: traces.summarize({ url: executable(), method: 'spawn', args: args.length, inBytes: input?.length ?? 0, outBytes: out.length, ms: Date.now() - started, status: 0 }),
         });
         resolve(out);
       } else {

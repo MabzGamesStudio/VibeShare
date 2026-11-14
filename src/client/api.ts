@@ -174,12 +174,15 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('POST', '/api/nodes/:id/invoices', async (request) => {
     const body = await request.json<{ method?: string; credits?: number }>();
     const entry = node(request);
-    const invoice = await nodes.client(entry).json<Invoice>(`/v1/payments/${encodeURIComponent(String(body.method))}/invoices`, {
+    const path = `/v1/payments/${encodeURIComponent(String(body.method))}/invoices`;
+    const client = nodes.client(entry);
+    const started = Date.now();
+    const invoice = await client.json<Invoice>(path, {
       body: { credits: body.credits },
     });
     core.traces.trace('dependency', 'payments', `POST /v1/payments/${String(body.method)}/invoices`, {
       message: entry.name,
-      data: { node: entry.id, credits: body.credits },
+      data: core.traces.summarize({ node: entry.id, url: `${client.url}${path}`, method: 'POST', ms: Date.now() - started, credits: body.credits }),
     });
     // The operator's payment request is a receipt of its own — kept on this device.
     await saveReceipt(entry, invoice.id);
@@ -191,14 +194,17 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('POST', '/api/nodes/:id/claim', async (request) => {
     const entry = node(request);
     const { method, ...rest } = await request.json<Record<string, unknown> & { method?: string }>();
-    const result = await nodes.client(entry).json<{ balance: number }>(`/v1/payments/${encodeURIComponent(String(method))}/claim`, {
+    const path = `/v1/payments/${encodeURIComponent(String(method))}/claim`;
+    const client = nodes.client(entry);
+    const started = Date.now();
+    const result = await client.json<{ balance: number }>(path, {
       body: rest,
       timeoutMs: 30000,
     });
     nodes.setBalance(entry.id, result.balance);
     core.traces.trace('dependency', 'payments', `POST /v1/payments/${String(method)}/claim`, {
       message: entry.name,
-      data: { node: entry.id, balance: result.balance },
+      data: core.traces.summarize({ node: entry.id, url: `${client.url}${path}`, method: 'POST', ms: Date.now() - started, balance: result.balance }),
     });
     // Save what the node granted (and the transfer proof) as the receipt for this payment.
     await saveReceipt(entry, typeof rest.invoiceId === 'string' ? rest.invoiceId : undefined);

@@ -81,8 +81,11 @@ export class Fetcher {
     const skipped = this.nodes.active('provider').filter((node) => !this.nodes.affordable(node, this.nodes.providerPrice(node)));
     for (const node of skipped) attempts.push({ node: node.id, name: node.name, error: 'Above your price limit' });
     for (const provider of this.candidates()) {
+      const client = this.nodes.client(provider);
+      const url = `${client.url}/v1/content/${cid}`;
+      const started = Date.now();
       try {
-        const answer: unknown = await this.nodes.client(provider).json(`/v1/content/${cid}`, { timeoutMs: 10000 });
+        const answer: unknown = await client.json(`/v1/content/${cid}`, { timeoutMs: 10000 });
         // A node that holds only a downloadable copy sends links instead of a manifest:
         // remember them and keep looking — a real manifest anywhere beats links.
         const links = offeredLinks(answer, cid);
@@ -103,14 +106,14 @@ export class Fetcher {
         this.manifests.set(cid, hit);
         this.traces.trace('dependency', 'fetcher', `GET /v1/content/${cid}`, {
           message: provider.name,
-          data: { node: provider.id, chunks: manifest.chunks.length },
+          data: this.traces.summarize({ node: provider.id, url, method: 'GET', ms: Date.now() - started, status: 200, chunks: manifest.chunks.length }),
         });
         return hit;
       } catch (error) {
         const notHere = error instanceof RemoteError && error.status === 404;
         this.traces.trace('dependency', 'fetcher', `GET /v1/content/${cid}`, {
           message: provider.name,
-          data: { node: provider.id },
+          data: this.traces.summarize({ node: provider.id, url, method: 'GET', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
           error: notHere ? 'Does not have it' : errorText(error),
         });
         attempts.push({ node: provider.id, name: provider.name, error: notHere ? 'Does not have it' : errorText(error) });
@@ -139,8 +142,11 @@ export class Fetcher {
     const attempts: { node: string; name: string; error: string }[] = [];
     let mismatched = false;
     for (const provider of this.candidates(preferred)) {
+      const client = this.nodes.client(provider);
+      const path = `/v1/chunks/${chunkId}?cid=${cid}`;
+      const started = Date.now();
       try {
-        const response = await this.nodes.client(provider).fetch(`/v1/chunks/${chunkId}?cid=${cid}`, { timeoutMs: 60000 });
+        const response = await client.fetch(path, { timeoutMs: 60000 });
         const data = Buffer.from(await response.arrayBuffer());
         // The downloaded content must match the expected id exactly (each chunk id is the
         // hash of its bytes); anything else is not kept or sent on.
@@ -151,13 +157,13 @@ export class Fetcher {
         await this.cache.put(chunkId, data);
         this.traces.trace('dependency', 'fetcher', `GET /v1/chunks/${chunkId.slice(0, 12)}`, {
           message: provider.name,
-          data: { node: provider.id, bytes: data.length },
+          data: this.traces.summarize({ node: provider.id, url: `${client.url}${path}`, method: 'GET', ms: Date.now() - started, status: response.status, bytes: data.length }),
         });
         return data;
       } catch (error) {
         this.traces.trace('dependency', 'fetcher', `GET /v1/chunks/${chunkId.slice(0, 12)}`, {
           message: provider.name,
-          data: { node: provider.id },
+          data: this.traces.summarize({ node: provider.id, url: `${client.url}${path}`, method: 'GET', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
           error: errorText(error),
         });
         attempts.push({ node: provider.id, name: provider.name, error: errorText(error) });

@@ -11,6 +11,7 @@ import {
   parseLevels,
   parseTime,
   normalizeTraceSettings,
+  summarize,
   type TraceEvent,
   type TraceFilter,
   type TraceSettings,
@@ -75,10 +76,18 @@ export class TraceStore {
     this.recorder.event(level, component, action, { ...options, traceId: options.traceId ?? currentTraceId() });
   }
 
+  /**
+   * Shrinks a request/response payload to what the settings let be recorded —
+   * the capture limit the operator picks in the tracing settings.
+   */
+  summarize(value: unknown): unknown {
+    return summarize(value, this.settingsView().payloadChars);
+  }
+
   /** Wraps an API handler: one timeline per call, dependency-logged, errors caught. */
   async api<T>(label: string, body: unknown, fn: (traceId: string) => Promise<T>): Promise<T> {
     const traceId = this.recorder.start({ kind: 'api', label });
-    this.trace('dependency', 'api', label, { traceId, data: summarize(body) });
+    this.trace('dependency', 'api', label, { traceId, data: this.summarize(body) });
     try {
       const result = await runWithTrace(traceId, () => fn(traceId));
       this.trace('dependency', 'api', `${label} → ok`, { traceId });
@@ -138,17 +147,6 @@ function filterOf(input: TraceQuery): TraceFilter {
 function clamp(value: unknown, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.min(Math.round(n), 1000) : fallback;
-}
-
-/** Keeps a detail payload small enough to store (function data, request bodies, …). */
-function summarize(value: unknown): unknown {
-  if (value === undefined || value === null) return undefined;
-  try {
-    const text = JSON.stringify(value);
-    return text.length > 2000 ? `${text.slice(0, 2000)}…` : JSON.parse(text);
-  } catch {
-    return String(value).slice(0, 500);
-  }
 }
 
 /** Registers the same tracing API on any router, behind the caller's own auth. */

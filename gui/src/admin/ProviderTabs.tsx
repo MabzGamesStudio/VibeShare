@@ -1378,17 +1378,35 @@ interface TiersConfigRow {
   tiers: TierRow[];
 }
 
+/** One content's tier assignment, as the admin tiers endpoint reports it. */
+interface TierAssignmentRow {
+  cid: string;
+  tier: string;
+  bytes: number;
+}
+
 /** Content storage tiers: the copy plans, their lifecycles, and every content's assignment. */
 function Tiers() {
   const [config, setConfig] = useState<TiersConfigRow | null>(null);
   const [backends, setBackends] = useState<string[]>([]);
+  const [assignments, setAssignments] = useState<TierAssignmentRow[]>([]);
+  const [contentTotal, setContentTotal] = useState<number | null>(null);
+  const [unassignedTier, setUnassignedTier] = useState('');
+  const [busy, setBusy] = useState(false);
   const [toast, show] = useToast();
 
   const load = useCallback(() => {
-    admin<{ config: TiersConfigRow; backends: string[] }>('/v1/admin/tiers')
-      .then((r) => {
-        setConfig(r.config);
-        setBackends(r.backends);
+    // The counts card needs the assignments and the catalog size on top of the config;
+    // the catalog is only counted (one tiny page) — the counts come from the assignments.
+    Promise.all([
+      admin<{ config: TiersConfigRow; backends: string[]; assignments: TierAssignmentRow[] }>('/v1/admin/tiers'),
+      admin<{ total: number }>('/v1/admin/content?limit=1'),
+    ])
+      .then(([tiers, content]) => {
+        setConfig(tiers.config);
+        setBackends(tiers.backends);
+        setAssignments(tiers.assignments);
+        setContentTotal(content.total ?? 0);
       })
       .catch((e) => show(message(e)));
   }, [show]);
@@ -1400,6 +1418,34 @@ function Tiers() {
       await admin('/v1/admin/config', { method: 'PUT', body: { tiers: next } });
     } catch (e) {
       show(message(e));
+    }
+  };
+
+  // Per-tier counts straight from the assignments: how many contents sit on the tier and
+  // how many bytes they carry. The catalog minus the assigned cids is what is left over.
+  const counts = new Map<string, { items: number; bytes: number }>();
+  for (const assignment of assignments) {
+    const entry = counts.get(assignment.tier) ?? { items: 0, bytes: 0 };
+    entry.items++;
+    entry.bytes += assignment.bytes ?? 0;
+    counts.set(assignment.tier, entry);
+  }
+  const unassigned = contentTotal === null ? null : Math.max(0, contentTotal - assignments.length);
+
+  const assignUnassigned = async () => {
+    if (!unassignedTier) return;
+    setBusy(true);
+    try {
+      const result = await admin<{ assigned: number }>('/v1/admin/tiers/assign-unassigned', {
+        method: 'POST',
+        body: { tier: unassignedTier },
+      });
+      show(`Assigned ${result.assigned} content ${result.assigned === 1 ? 'item' : 'items'}`);
+      load();
+    } catch (e) {
+      show(message(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1682,6 +1728,58 @@ function Tiers() {
         </button>
       </div>
 
+      <div className="card form-stack">
+        <h3>Assigned content</h3>
+        <p className="small muted">
+          How much content sits on each tier right now, and a one-click way to put everything
+          that has no tier yet onto one.
+        </p>
+        <div>
+          {config.tiers.map((tier) => {
+            const entry = counts.get(tier.id) ?? { items: 0, bytes: 0 };
+            return (
+              <div key={tier.id} className="row" style={{ gap: 8, justifyContent: 'space-between', borderBottom: '1px solid var(--border)', padding: '4px 0' }}>
+                <span className="small">{tier.label} <span className="tiny faint">({tier.id})</span></span>
+                <span className="small">
+                  {entry.items} item{entry.items === 1 ? '' : 's'} · {formatBytes(entry.bytes)}
+                </span>
+              </div>
+            );
+          })}
+          {/* Assignments whose tier is not (or no longer) in the config still count here. */}
+          {[...counts.entries()]
+            .filter(([tierId]) => !config.tiers.some((tier) => tier.id === tierId))
+            .map(([tierId, entry]) => (
+              <div key={tierId} className="row" style={{ gap: 8, justifyContent: 'space-between', borderBottom: '1px solid var(--border)', padding: '4px 0' }}>
+                <span className="small">{tierId} <span className="tiny faint">(unknown tier)</span></span>
+                <span className="small">
+                  {entry.items} item{entry.items === 1 ? '' : 's'} · {formatBytes(entry.bytes)}
+                </span>
+              </div>
+            ))}
+          <div className="row" style={{ gap: 8, justifyContent: 'space-between', padding: '4px 0' }}>
+            <span className="small muted">No tier yet</span>
+            <span className="small muted">{unassigned === null ? '–' : `${unassigned} item${unassigned === 1 ? '' : 's'}`}</span>
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <label className="field" style={{ marginBottom: 0, maxWidth: 220 }}>
+            Assign unassigned to
+            <select value={unassignedTier} onChange={(e) => setUnassignedTier(e.target.value)}>
+              <option value="">(choose a tier)</option>
+              {config.tiers.map((tier) => (
+                <option key={tier.id} value={tier.id}>
+                  {tier.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="small" disabled={busy || !unassignedTier || unassigned === 0} onClick={() => void assignUnassigned()}>
+            {busy ? 'Assigning…' : `Assign ${unassigned === null ? 'unassigned' : unassigned} to this tier`}
+          </button>
+        </div>
+      </div>
+
     </div>
   );
 }
@@ -1692,10 +1790,12 @@ export function ProviderTabs({ tab }: { tab: string }) {
   if (tab === 'add-local') return <AddLocal />;
   if (tab === 'suggestions') return <Suggestions />;
   if (tab === 'storage-jobs') return <StorageJobs />;
-  if (tab === 'storage')
+  if (tab === 'storage') return <Storage />;
+  // Everything about exchanging content with other providers lives together: the peer
+  // list, the automatic sync job and the manual full-catalog sync.
+  if (tab === 'peers')
     return (
       <div className="form-stack">
-        <Storage />
         <Peering />
         <SyncJob />
         <ManualContentSync />

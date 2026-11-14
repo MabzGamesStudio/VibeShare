@@ -503,7 +503,7 @@ export class Crawler {
       this.traces?.trace('dependency', 'algorithm.crawler', 'fetch outcome', {
         traceId,
         message: `${lane} · ${(unit ?? '').slice(0, 60)} · ${found} found`,
-        data: { adapter: lane, target: (unit ?? '').slice(0, 120), found, added },
+        data: this.traces.summarize({ adapter: lane, url: unit, method: 'GET', ms: Date.now() - started, found, added }),
       });
     } catch (error) {
       // A spent budget is not a failure: that adapter rests until tomorrow.
@@ -515,7 +515,7 @@ export class Crawler {
         traceId,
         message: `${lane} · ${(unit ?? '').slice(0, 60)}`,
         error: this.explain(error),
-        data: { adapter: lane, target: (unit ?? '').slice(0, 120), blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked },
+        data: this.traces.summarize({ adapter: lane, url: unit, method: 'GET', ms: Date.now() - started, blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked }),
       });
       throw error;
     } finally {
@@ -559,13 +559,14 @@ export class Crawler {
             .filter((adapter) => adapter.search && (!adapter.api || adapter.api.optional || this.budgetLeft(adapter.id, 'search')))
             .map(async (adapter) => {
               const stats = this.stats(adapter.id);
+              const searchStarted = Date.now();
               try {
                 const items = await adapter.search!(this.contextFor(adapter, 'search'), this.adapterConfig(adapter.id), text);
                 const added = this.take(items, adapter.id);
                 // One outcome per platform the query fanned out to.
                 this.traces?.trace('dependency', 'algorithm.crawler', 'search outcome', {
                   message: `${adapter.id} · "${text.slice(0, 40)}" · ${added} added`,
-                  data: { adapter: adapter.id, query: text.slice(0, 60), found: items.length, added },
+                  data: this.traces.summarize({ adapter: adapter.id, url: `search:${adapter.id}`, method: 'SEARCH', ms: Date.now() - searchStarted, query: text.slice(0, 60), found: items.length, added }),
                 });
                 return added;
               } catch (error) {
@@ -576,7 +577,7 @@ export class Crawler {
                 this.traces?.trace('error', 'algorithm.crawler', 'search outcome', {
                   message: `${adapter.id} · "${text.slice(0, 40)}"`,
                   error: this.explain(error),
-                  data: { adapter: adapter.id, query: text.slice(0, 60), blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked },
+                  data: this.traces.summarize({ adapter: adapter.id, url: `search:${adapter.id}`, method: 'SEARCH', ms: Date.now() - searchStarted, query: text.slice(0, 60), blocked: error instanceof RobotsDisallowed || error instanceof SiteBlocked }),
                 });
                 return 0;
               }

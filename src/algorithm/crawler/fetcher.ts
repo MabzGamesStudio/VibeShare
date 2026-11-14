@@ -220,14 +220,31 @@ export class PoliteFetcher {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new FetchFailed(`Unsupported URL ${url}`);
     await this.checkAddress(url);
     const tor = this.options.transport?.(url);
-    const response = await (tor ?? fetch)(url, {
-      headers: { 'user-agent': this.options.userAgent, accept },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(this.options.timeoutMs() * (tor ? 3 : 1)),
-    });
+    const started = Date.now();
+    // Every crawl is one call to the outside world — one dependency line per request,
+    // with where it went and how long it took (robots.txt itself included).
+    const traced = (status: number | undefined, bytes: number) => {
+      const traces = this.options.trace;
+      if (!traces?.recorder.shouldLog('dependency')) return;
+      traces.trace('dependency', 'algorithm.fetcher', 'fetch', {
+        data: traces.summarize({ url: url.toString(), method: 'GET', ms: Date.now() - started, status, bytes }),
+      });
+    };
+    let response: Response;
+    try {
+      response = await (tor ?? fetch)(url, {
+        headers: { 'user-agent': this.options.userAgent, accept },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(this.options.timeoutMs() * (tor ? 3 : 1)),
+      });
+    } catch (error) {
+      traced(undefined, 0);
+      throw error;
+    }
     const location = response.headers.get('location');
     if (response.status >= 300 && response.status < 400 && location) {
       await response.body?.cancel();
+      traced(response.status, 0);
       return { location: new URL(location, url) };
     }
     const chunks: Buffer[] = [];
@@ -240,6 +257,7 @@ export class PoliteFetcher {
       }
     }
     const body = Buffer.concat(chunks);
+    traced(response.status, body.length);
     return {
       fetched: {
         url: url.toString(),

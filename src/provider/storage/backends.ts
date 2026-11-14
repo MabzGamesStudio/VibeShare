@@ -111,7 +111,10 @@ function backendTrace(
   error?: string
 ): void {
   if (!traces?.recorder.shouldLog(level)) return;
-  traces.trace(level, 'provider.backends', action, { data: { backend: id, key: key.slice(0, 16), ...detail }, error });
+  traces.trace(level, 'provider.backends', action, {
+    data: traces.summarize({ backend: id, key: key.slice(0, 16), ...detail }),
+    error,
+  });
 }
 
 export class MemoryBackend implements BlobBackend {
@@ -240,39 +243,50 @@ export class S3Backend implements BlobBackend {
     return fetch(url, { method, headers, body, signal: AbortSignal.timeout(60000) });
   }
 
+  /** One dependency line per request, with where it went and how long it took. */
+  private traceCall(action: string, key: string, method: string, url: URL, started: number, status: number, detail: Record<string, unknown> = {}): void {
+    backendTrace(this.traces, this.id, 'dependency', action, key, { url: url.toString(), method, ms: Date.now() - started, status, ...detail });
+  }
+
   async put(key: string, data: Buffer) {
-    const response = await this.send('PUT', this.url(key), data);
+    const url = this.url(key);
+    const started = Date.now();
+    const response = await this.send('PUT', url, data);
     if (!response.ok) {
       const message = `S3 PUT ${key}: ${response.status} ${await response.text()}`;
-      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'put', key, { url: url.toString(), method: 'PUT', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
-    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
+    this.traceCall('put', key, 'PUT', url, started, response.status, { bytes: data.length });
     return undefined;
   }
   async get(key: string) {
-    const response = await this.send('GET', this.url(key));
+    const url = this.url(key);
+    const started = Date.now();
+    const response = await this.send('GET', url);
     if (response.status === 404) {
-      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+      this.traceCall('get', key, 'GET', url, started, 404, { found: false });
       return null;
     }
     if (!response.ok) {
       const message = `S3 GET ${key}: ${response.status}`;
-      backendTrace(this.traces, this.id, 'error', 'get', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'get', key, { url: url.toString(), method: 'GET', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
     const data = Buffer.from(await response.arrayBuffer());
-    backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+    this.traceCall('get', key, 'GET', url, started, response.status, { found: true, bytes: data.length });
     return data;
   }
   async delete(key: string) {
-    const response = await this.send('DELETE', this.url(key));
+    const url = this.url(key);
+    const started = Date.now();
+    const response = await this.send('DELETE', url);
     if (!response.ok && response.status !== 404) {
       const message = `S3 DELETE ${key}: ${response.status}`;
-      backendTrace(this.traces, this.id, 'error', 'delete', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'delete', key, { url: url.toString(), method: 'DELETE', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
-    backendTrace(this.traces, this.id, 'dependency', 'delete', key);
+    this.traceCall('delete', key, 'DELETE', url, started, response.status);
   }
   async check() {
     try {
@@ -309,45 +323,51 @@ export class WebDavBackend implements BlobBackend {
   }
   async put(key: string, data: Buffer) {
     const dir = shard(key);
+    const target = `${this.base()}/${dir}/${key}`;
+    const started = Date.now();
     if (!this.madeDirs.has(dir)) {
       const made = await fetch(`${this.base()}/${dir}/`, { method: 'MKCOL', headers: this.headers() });
       if (!made.ok && made.status !== 405 && made.status !== 301) {
         const message = `WebDAV MKCOL: ${made.status}`;
-        backendTrace(this.traces, this.id, 'error', 'put', key, { status: made.status }, message);
+        backendTrace(this.traces, this.id, 'error', 'put', key, { url: `${this.base()}/${dir}/`, method: 'MKCOL', ms: Date.now() - started, status: made.status }, message);
         throw new Error(message);
       }
       this.madeDirs.add(dir);
     }
-    const response = await fetch(`${this.base()}/${dir}/${key}`, { method: 'PUT', headers: this.headers(), body: data });
+    const response = await fetch(target, { method: 'PUT', headers: this.headers(), body: data });
     if (!response.ok) {
       const message = `WebDAV PUT ${key}: ${response.status}`;
-      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'put', key, { url: target, method: 'PUT', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
-    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { url: target, method: 'PUT', ms: Date.now() - started, status: response.status, bytes: data.length });
     return undefined;
   }
   async get(key: string) {
-    const response = await fetch(`${this.base()}/${shard(key)}/${key}`, { headers: this.headers() });
+    const target = `${this.base()}/${shard(key)}/${key}`;
+    const started = Date.now();
+    const response = await fetch(target, { headers: this.headers() });
     if (response.status === 404) {
-      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, found: false, status: 404 });
       return null;
     }
     if (!response.ok) {
       const message = `WebDAV GET ${key}: ${response.status}`;
-      backendTrace(this.traces, this.id, 'error', 'get', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
     const data = Buffer.from(await response.arrayBuffer());
-    backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+    backendTrace(this.traces, this.id, 'dependency', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, found: true, status: response.status, bytes: data.length });
     return data;
   }
   async delete(key: string) {
-    const response = await fetch(`${this.base()}/${shard(key)}/${key}`, { method: 'DELETE', headers: this.headers() });
+    const target = `${this.base()}/${shard(key)}/${key}`;
+    const started = Date.now();
+    const response = await fetch(target, { method: 'DELETE', headers: this.headers() });
     // The status is ignored on purpose (delete is idempotent) — a failing one is still
     // worth an error line so it is not invisible.
-    if (!response.ok && response.status !== 404) backendTrace(this.traces, this.id, 'error', 'delete', key, { status: response.status }, `WebDAV DELETE ${key}: ${response.status}`);
-    else backendTrace(this.traces, this.id, 'dependency', 'delete', key);
+    if (!response.ok && response.status !== 404) backendTrace(this.traces, this.id, 'error', 'delete', key, { url: target, method: 'DELETE', ms: Date.now() - started, status: response.status }, `WebDAV DELETE ${key}: ${response.status}`);
+    else backendTrace(this.traces, this.id, 'dependency', 'delete', key, { url: target, method: 'DELETE', ms: Date.now() - started, status: response.status });
   }
   async check() {
     try {
@@ -378,14 +398,16 @@ export class IpfsBackend implements BlobBackend {
   async put(key: string, data: Buffer) {
     const form = new FormData();
     form.append('file', new Blob([data]), key);
-    const response = await fetch(this.api('add?cid-version=1&pin=true&quieter=true'), {
+    const target = this.api('add?cid-version=1&pin=true&quieter=true');
+    const started = Date.now();
+    const response = await fetch(target, {
       method: 'POST',
       body: form,
       headers: this.headers(),
     });
     if (!response.ok) {
       const message = `IPFS add: ${response.status}`;
-      backendTrace(this.traces, this.id, 'error', 'put', key, { status: response.status }, message);
+      backendTrace(this.traces, this.id, 'error', 'put', key, { url: target, method: 'POST', ms: Date.now() - started, status: response.status }, message);
       throw new Error(message);
     }
     const text = await response.text();
@@ -394,7 +416,7 @@ export class IpfsBackend implements BlobBackend {
       backendTrace(this.traces, this.id, 'error', 'put', key, {}, 'IPFS add returned no hash');
       throw new Error('IPFS add returned no hash');
     }
-    backendTrace(this.traces, this.id, 'dependency', 'put', key, { bytes: data.length });
+    backendTrace(this.traces, this.id, 'dependency', 'put', key, { url: target, method: 'POST', ms: Date.now() - started, status: response.status, bytes: data.length });
     return result.Hash;
   }
   async get(_key: string, locator?: string) {
@@ -402,25 +424,29 @@ export class IpfsBackend implements BlobBackend {
       backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: false });
       return null;
     }
+    const target = this.config.gatewayUrl ? `${this.config.gatewayUrl.replace(/\/$/, '')}/ipfs/${locator}` : this.api(`cat?arg=${locator}`);
+    const started = Date.now();
     const response = this.config.gatewayUrl
-      ? await fetch(`${this.config.gatewayUrl.replace(/\/$/, '')}/ipfs/${locator}`)
-      : await fetch(this.api(`cat?arg=${locator}`), { method: 'POST', headers: this.headers() });
+      ? await fetch(target)
+      : await fetch(target, { method: 'POST', headers: this.headers() });
     if (!response.ok) {
       // No locator content at404; anything else is a swallowed failure.
-      if (response.status !== 404) backendTrace(this.traces, this.id, 'error', 'get', _key, { status: response.status }, `IPFS get: ${response.status}`);
-      else backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: false, status: 404 });
+      if (response.status !== 404) backendTrace(this.traces, this.id, 'error', 'get', _key, { url: target, method: 'POST', ms: Date.now() - started, status: response.status }, `IPFS get: ${response.status}`);
+      else backendTrace(this.traces, this.id, 'dependency', 'get', _key, { url: target, method: 'POST', ms: Date.now() - started, found: false, status: 404 });
       return null;
     }
     const data = Buffer.from(await response.arrayBuffer());
-    backendTrace(this.traces, this.id, 'dependency', 'get', _key, { found: true, bytes: data.length });
+    backendTrace(this.traces, this.id, 'dependency', 'get', _key, { url: target, method: 'POST', ms: Date.now() - started, found: true, status: response.status, bytes: data.length });
     return data;
   }
   async delete(_key: string, locator?: string) {
     if (locator) {
-      const response = await fetch(this.api(`pin/rm?arg=${locator}`), { method: 'POST', headers: this.headers() });
+      const target = this.api(`pin/rm?arg=${locator}`);
+      const started = Date.now();
+      const response = await fetch(target, { method: 'POST', headers: this.headers() });
       // Unpin failures are ignored on purpose — the trace line keeps them visible.
-      if (!response.ok) backendTrace(this.traces, this.id, 'error', 'delete', _key, { status: response.status }, `IPFS pin/rm: ${response.status}`);
-      else backendTrace(this.traces, this.id, 'dependency', 'delete', _key);
+      if (!response.ok) backendTrace(this.traces, this.id, 'error', 'delete', _key, { url: target, method: 'POST', ms: Date.now() - started, status: response.status }, `IPFS pin/rm: ${response.status}`);
+      else backendTrace(this.traces, this.id, 'dependency', 'delete', _key, { url: target, method: 'POST', ms: Date.now() - started, status: response.status });
     }
   }
   async check() {
@@ -446,22 +472,24 @@ export class HttpBackend implements BlobBackend {
     throw new Error('HTTP mirrors are read-only');
   }
   async get(key: string) {
+    const target = `${this.config.baseUrl.replace(/\/$/, '')}/${key}`;
+    const started = Date.now();
     try {
-      const response = await request(`${this.config.baseUrl.replace(/\/$/, '')}/${key}`, {
+      const response = await request(target, {
         headers: this.config.headers,
         timeoutMs: 30000,
       });
       const data = Buffer.from(await response.arrayBuffer());
-      backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: true, bytes: data.length });
+      backendTrace(this.traces, this.id, 'dependency', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, status: response.status, found: true, bytes: data.length });
       return data;
     } catch (error) {
       if (error instanceof RemoteError && error.status === 404) {
-        backendTrace(this.traces, this.id, 'dependency', 'get', key, { found: false, status: 404 });
+        backendTrace(this.traces, this.id, 'dependency', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, found: false, status: 404 });
         return null;
       }
       // Rethrown to the caller; the failure is traced here because this catch knows
       // which mirror it came from.
-      backendTrace(this.traces, this.id, 'error', 'get', key, {}, (error as Error).message);
+      backendTrace(this.traces, this.id, 'error', 'get', key, { url: target, method: 'GET', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }, (error as Error).message);
       throw error;
     }
   }

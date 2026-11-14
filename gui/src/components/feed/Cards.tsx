@@ -24,9 +24,9 @@ function previewOf(item: FeedItem): string | undefined {
 const VIDEO_FORMATS = new Set(['video', 'short-video', 'live']);
 
 /**
- * The picture of an item. In inline mode (the dual view) clicking a video starts playing
- * it in place instead of opening its content page. When the preview comes on screen, the
- * client records the content as seen by the bloom filters that keep track of that.
+ * The picture of an item. In inline mode clicking a video starts playing it in place
+ * instead of opening its content page. When the preview comes on screen, the client
+ * records the content as seen by the bloom filters that keep track of that.
  */
 export function ItemThumb({ item, share = true, inline = false }: { item: FeedItem; share?: boolean; inline?: boolean }) {
   const video = inline && VIDEO_FORMATS.has(item.format);
@@ -160,7 +160,7 @@ export function ListLayout({ items, page, inline = false }: { items: FeedItem[];
 const MASONRY_WIDTH = { small: 220, medium: 300, large: 440 };
 const GAP = 14;
 
-/** The media of a masonry tile: in inline mode (dual view) a video plays in place. */
+/** The media of a masonry tile: in inline mode a video plays in place. */
 function TileMedia({ item, inline, src }: { item: FeedItem; inline: boolean; src?: string }) {
   const video = inline && VIDEO_FORMATS.has(item.format);
   const [playing, setPlaying] = useState(false);

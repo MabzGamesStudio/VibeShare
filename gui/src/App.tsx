@@ -1,4 +1,4 @@
-import { BookMarked, ChevronLeft, ChevronRight, Coins, Columns2, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
+import { BookMarked, ChevronLeft, ChevronRight, Coins, Compass, History, Lock, Menu, Network, Plus, Search as SearchIcon, Server, Settings as SettingsIcon, Sparkles, Upload, Users } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { NodeEntry, SearchHistoryItem } from '../../src/shared/clientapi';
@@ -14,7 +14,6 @@ import { Empty, StatusDot } from './components/ui';
 import { CreatorPage } from './pages/Creator';
 import { GroupPage } from './pages/Group';
 import { TopicPage } from './pages/Topic';
-import { DualPage } from './pages/Dual';
 import { DevDataPage } from './pages/DevData';
 import { EarnPage } from './pages/Earn';
 import { HistoryPage } from './pages/History';
@@ -325,7 +324,6 @@ export function App() {
           {pages.map((page) => (
             <NavItem key={page.id} to={pagePath(page)} icon={<PageIconView icon={page.icon} />} label={page.title} />
           ))}
-          <NavItem to="/dual" icon={<Columns2 size={19} />} label="Dual" />
           <button className="nav-link nav-add" onClick={() => setCreating(true)}>
             <Plus size={19} /> New page
           </button>
@@ -397,7 +395,6 @@ export function App() {
               <Routes>
               <Route path="/" element={<PageRoute id="videos" />} />
               <Route path="/p/:id" element={<PageRoute />} />
-              <Route path="/dual" element={<DualPage />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/subscriptions" element={<SubscriptionsPage />} />
               <Route path="/subscriptions/all" element={<AllSubscriptionsPage />} />

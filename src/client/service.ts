@@ -182,11 +182,18 @@ export class StorageWorker {
       });
       return false;
     }
+    const readyStarted = Date.now();
     const ready = await client.json<StorageAssignment>(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
     Object.assign(assignment, ready);
     this.traces.trace('dependency', 'service', `POST /v1/services/storage/assignments/${assignment.id.slice(0, 12)}/ready`, {
       message: provider.name,
-      data: { node: provider.id, chunks: assignment.chunkIds.length },
+      data: this.traces.summarize({
+        node: provider.id,
+        url: `${client.url}/v1/services/storage/assignments/${assignment.id}/ready`,
+        method: 'POST',
+        ms: Date.now() - readyStarted,
+        chunks: assignment.chunkIds.length,
+      }),
     });
     return true;
   }
@@ -238,15 +245,25 @@ export class StorageWorker {
       data = Buffer.alloc(0); // fail the task at once instead of leaving it unanswered
     }
     const body = task.type === 'challenge' && task.nonce ? Buffer.from(sha256hex(Buffer.concat([Buffer.from(task.nonce), data]))) : data;
+    const taskUrl = `/v1/services/storage/tasks/${task.id}`;
+    const taskStarted = Date.now();
     try {
       const result = await this.nodes
         .client(provider)
-        .json<{ credited: number; balance?: number }>(`/v1/services/storage/tasks/${task.id}`, { method: 'POST', raw: body });
+        .json<{ credited: number; balance?: number }>(taskUrl, { method: 'POST', raw: body });
       if (result.balance !== undefined) this.nodes.setBalance(provider.id, result.balance);
       if (result.credited) this.note(`Earned ${result.credited} credits from ${provider.name} (${task.type})`);
       this.traces.trace('dependency', 'service', `POST /v1/services/storage/tasks/${task.id.slice(0, 12)}`, {
         message: provider.name,
-        data: { node: provider.id, type: task.type, credited: result.credited },
+        data: this.traces.summarize({
+          node: provider.id,
+          url: `${this.nodes.client(provider).url}${taskUrl}`,
+          method: 'POST',
+          ms: Date.now() - taskStarted,
+          bytes: body.length,
+          type: task.type,
+          credited: result.credited,
+        }),
       });
     } catch (error) {
       this.note(`Task from ${provider.name} failed: ${errorText(error)}`);

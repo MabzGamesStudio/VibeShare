@@ -1190,22 +1190,34 @@ export class ClientCore {
    */
   private async askJson<T>(node: NodeEntry, path: string, body: unknown, auth: boolean, timeoutMs?: number): Promise<T> {
     const client = this.nodes.client(node);
+    // One dependency line per request, with where it went and how long it took: the
+    // pieces are collected here and only built into an event when tracing would record.
+    const call = (extra: Record<string, unknown>, error?: string) => {
+      if (!this.traces.recorder.shouldLog(error ? 'error' : 'dependency')) return;
+      this.traces.trace('dependency', 'core', `ask ${path}`, {
+        message: node.name,
+        data: this.traces.summarize({ node: node.id, url: `${client.url}${path}`, method: 'POST', auth, ...extra }),
+        error,
+      });
+    };
     try {
+      const started = Date.now();
       const result = await client.json<T>(path, { body, auth, timeoutMs });
-      this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth } });
+      call({ ms: Date.now() - started });
       return result;
     } catch (error) {
       if (auth || !(error instanceof RemoteError) || error.status !== 401) {
-        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth }, error: errorText(error) });
+        call({ status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
         throw error;
       }
       void this.nodes.refresh(node);
       try {
+        const started = Date.now();
         const result = await client.json<T>(path, { body, auth: true, timeoutMs });
-        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth: true } });
+        call({ ms: Date.now() - started, auth: true });
         return result;
       } catch (error) {
-        this.traces.trace('dependency', 'core', `ask ${path}`, { message: node.name, data: { node: node.id, auth: true }, error: errorText(error) });
+        call({ auth: true, status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
         throw error;
       }
     }
@@ -1219,12 +1231,21 @@ export class ClientCore {
   async report(id: string): Promise<{ nodes: { node: string; name: string; known?: boolean; credited?: number; error?: string }[] }> {
     const results = await Promise.all(
       [...this.nodes.active('algorithm'), ...this.nodes.active('provider')].map(async (entry) => {
+        const client = this.nodes.client(entry);
+        const started = Date.now();
         try {
-          const result = await this.nodes.client(entry).json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
-          this.traces.trace('dependency', 'core', 'POST /v1/reports', { message: entry.name, data: { node: entry.id, credited: result.credited } });
+          const result = await client.json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
+          this.traces.trace('dependency', 'core', 'POST /v1/reports', {
+            message: entry.name,
+            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/reports`, method: 'POST', ms: Date.now() - started, credited: result.credited }),
+          });
           return { node: entry.id, name: entry.name, ...result };
         } catch (error) {
-          this.traces.trace('dependency', 'core', 'POST /v1/reports', { message: entry.name, data: { node: entry.id }, error: errorText(error) });
+          this.traces.trace('dependency', 'core', 'POST /v1/reports', {
+            message: entry.name,
+            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/reports`, method: 'POST', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
+            error: errorText(error),
+          });
           return { node: entry.id, name: entry.name, error: errorText(error) };
         }
       })
@@ -1245,15 +1266,21 @@ export class ClientCore {
   ): Promise<{ nodes: { node: string; name: string; newInfo?: boolean; credited?: number; multiplier?: number; updated?: string[]; error?: string }[] }> {
     const results = await Promise.all(
       this.nodes.active('algorithm').map(async (entry) => {
+        const client = this.nodes.client(entry);
+        const started = Date.now();
         try {
-          const result = await this.nodes.client(entry).json<ClaimResponse>('/v1/claims', { body: { id, metrics, source, publishedAt } });
+          const result = await client.json<ClaimResponse>('/v1/claims', { body: { id, metrics, source, publishedAt } });
           this.traces.trace('dependency', 'core', 'POST /v1/claims', {
             message: entry.name,
-            data: { node: entry.id, credited: result.credited, multiplier: result.multiplier },
+            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/claims`, method: 'POST', ms: Date.now() - started, credited: result.credited, multiplier: result.multiplier }),
           });
           return { node: entry.id, name: entry.name, ...result };
         } catch (error) {
-          this.traces.trace('dependency', 'core', 'POST /v1/claims', { message: entry.name, data: { node: entry.id }, error: errorText(error) });
+          this.traces.trace('dependency', 'core', 'POST /v1/claims', {
+            message: entry.name,
+            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/claims`, method: 'POST', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
+            error: errorText(error),
+          });
           return { node: entry.id, name: entry.name, error: errorText(error) };
         }
       })
@@ -1847,8 +1874,12 @@ export class ClientCore {
     const sources = this.normalizeVvshSources(options.sources);
     if (sources?.length) base.sources = sources;
     const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
+    const manifestStarted = Date.now();
     const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    this.traces.trace('dependency', 'core', 'PUT /v1/vvsh/manifest', { message: node.name, data: { node: node.id, cid: committed.cid } });
+    this.traces.trace('dependency', 'core', 'PUT /v1/vvsh/manifest', {
+      message: node.name,
+      data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/vvsh/manifest`, method: 'PUT', ms: Date.now() - manifestStarted, cid: committed.cid }),
+    });
     const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
     rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
     this.traces.trace('basic', 'core.publish', 'convert vvsh → done', { data: { cid: committed.cid, listed, warnings: warnings.length } });
@@ -2040,10 +2071,11 @@ export class ClientCore {
       : this.nodes.active('algorithm');
     let listed = 0;
     for (const node of chosen) {
+      const client = this.nodes.client(node);
       try {
-        const client = this.nodes.client(node);
         const info = node.info ?? (await client.fetchInfo());
         const ts = Date.now();
+        const submitted = Date.now();
         await client.json('/v1/submissions', {
           method: 'POST',
           timeoutMs: 30000,
@@ -2064,10 +2096,17 @@ export class ClientCore {
             creatorProof: sign ? { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) } : undefined,
           },
         });
-        this.traces.trace('dependency', 'core', 'POST /v1/submissions', { message: node.name, data: { node: node.id, cid } });
+        this.traces.trace('dependency', 'core', 'POST /v1/submissions', {
+          message: node.name,
+          data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/submissions`, method: 'POST', ms: Date.now() - submitted, cid }),
+        });
         listed++;
       } catch (error) {
-        this.traces.trace('dependency', 'core', 'POST /v1/submissions', { message: node.name, data: { node: node.id, cid }, error: errorText(error) });
+        this.traces.trace('dependency', 'core', 'POST /v1/submissions', {
+          message: node.name,
+          data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/submissions`, method: 'POST', cid }),
+          error: errorText(error),
+        });
         // The stream is published either way; listing is the algorithm node's call.
       }
     }

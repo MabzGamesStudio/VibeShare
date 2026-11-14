@@ -159,8 +159,12 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
   };
   // The old default home page (a 2D canvas) is gone: the video page is the home page now.
   const goneHome = (page: { id: string; preset?: string }) => page.id === 'home' || page.preset === 'home';
+  // The dual screen is gone too. It was a built-in view, never a page, but an old or
+  // hand-edited page list that names it is cleaned out the same way (on every load, so
+  // no revision bump is needed — a page the user made themselves keeps its own id).
+  const goneDual = (page: { id: string; preset?: string }) => page.id === 'dual' || page.preset === 'dual';
   const pages = (Array.isArray(saved?.pages) && saved.pages.length ? saved.pages : base.pages)
-    .filter((page) => !goneHome(page))
+    .filter((page) => !goneHome(page) && !goneDual(page))
     .map((page) => normalizePage(page));
   for (const preset of PRESETS) {
     if (!pages.some((page) => page.id === preset)) pages.push(presetPage(preset));
