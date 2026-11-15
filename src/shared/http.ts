@@ -139,14 +139,26 @@ export interface ServeOptions {
   /** Runs before routing; throw an HttpError to reject the request. */
   guard?: (ctx: Ctx) => void;
   /**
-   * Local tracing of every API request (off by default downstream): called with the
-   * request label and the error, if any — one timeline per call.
+   * Local tracing of every API request (off by default downstream): one timeline per
+   * call, told how it ended so the trace line carries the URL and response time.
    */
   trace?: {
     request: (label: string, body: unknown) => string;
-    done: (traceId: string) => void;
-    failed: (traceId: string, error: unknown) => void;
+    done: (traceId: string, info: TraceRequestInfo) => void;
+    failed: (traceId: string, info: TraceRequestInfo, error: unknown) => void;
   };
+}
+
+/** How one traced request ended — what the trace event about it should say. */
+export interface TraceRequestInfo {
+  /** "METHOD /path", the same label the request hook was given. */
+  label: string;
+  method: string;
+  path: string;
+  /** How long the whole request took, in milliseconds. */
+  ms: number;
+  /** The status the response carried (the error's status when the request failed). */
+  status: number;
 }
 
 export function createHttpServer(options: ServeOptions): Server {
@@ -176,13 +188,23 @@ export function createHttpServer(options: ServeOptions): Server {
       ctx.params = found.params;
       const label = `${req.method} ${url.pathname}`;
       const traceId = options.trace?.request(label, undefined);
+      const started = Date.now();
+      // What the trace event about this request says once it ends: the label (the URL),
+      // how long it took and which status the response carries.
+      const info = (status: number): TraceRequestInfo => ({
+        label,
+        method: req.method ?? 'GET',
+        path: url.pathname,
+        ms: Date.now() - started,
+        status,
+      });
       try {
         const result = await (traceId ? runWithTrace(traceId, () => found.handler(ctx)) : found.handler(ctx));
-        if (traceId) options.trace?.done(traceId);
+        if (traceId) options.trace?.done(traceId, info(res.headersSent ? res.statusCode : result !== undefined ? 200 : 204));
         if (result !== undefined && !res.headersSent) sendJson(res, 200, result);
         else if (!res.writableEnded && !res.headersSent) res.writeHead(204).end();
       } catch (error) {
-        if (traceId) options.trace?.failed(traceId, error);
+        if (traceId) options.trace?.failed(traceId, info(error instanceof HttpError ? error.status : 500), error);
         throw error;
       }
     } catch (error) {

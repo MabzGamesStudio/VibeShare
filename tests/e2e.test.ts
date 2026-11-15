@@ -11,7 +11,6 @@ describe('a client using a provider and an algorithm node', async () => {
     name: 'Main CDN',
     signup: { grant: 50 },
     pricing: { perMiB: 1, freeMiBPerDay: 0 },
-    storageService: { challengeIntervalSeconds: 3600 },
   });
   const empty = await startProvider({ name: 'Empty provider', signup: { grant: 50 } });
   const algorithm = await startAlgorithm({ name: 'Curator' });
@@ -160,21 +159,21 @@ describe('a client using a provider and an algorithm node', async () => {
   it('earns credits by storing data for the provider', async () => {
     const cid = id.split('~')[0];
     await admin(provider.url(), '/v1/admin/storage/jobs', {
-      body: { cid, replicas: 1, durationDays: 30, rewards: { upfront: 5, perRetrieval: 2, perChallenge: 1, completion: 10 } },
+      body: { cid, replicas: 1, durationDays: 30, rewards: { upfront: 5, perRetrieval: 2, completion: 10 } },
     });
     await api('/api/settings', { method: 'PATCH', body: { storageService: { enabled: true, quotaGiB: 1 } } });
     await api('/api/nodes/refresh', { method: 'POST' });
     await api('/api/services/sync', { method: 'POST' });
     const before = provider.ledger.get((await api<{ nodes: NodeEntry[] }>('/api/state')).nodes.find((n) => n.id === provider.identity.id)!.accountId!)!.balance;
-    // the first challenge is sent as soon as the data is stored; passing it pays upfront + challenge
     await waitFor(async () => {
       const status = await api<ServiceStatus>('/api/services');
       const mine = status.providers.find((p) => p.id === provider.identity.id);
       return mine?.assignments[0]?.status === 'active' && status.usedBytes === video.length;
     });
-    await waitFor(() => provider.service.assignmentsForAdmin()[0]?.challenges.passed >= 1);
+    // The upfront reward is earned by a live endpoint only — this holder submitted none,
+    // so nothing is paid until a check passes (or ever).
     const accountId = provider.service.assignmentsForAdmin()[0].accountId;
-    assert.equal(provider.ledger.get(accountId)!.balance, before + 6);
+    assert.equal(provider.ledger.get(accountId)!.balance, before);
 
     // The provider loses its own copy: it asks the client for the chunk and pays for the retrieval.
     const manifest = provider.store.getManifest(cid)!;
@@ -183,7 +182,7 @@ describe('a client using a provider and an algorithm node', async () => {
     (provider.store as unknown as { cache: { delete(id: string): void } }).cache.delete(chunkId);
     const data = await provider.store.getChunk(chunkId);
     assert.ok(data);
-    assert.equal(provider.ledger.get(accountId)!.balance, before + 8);
+    assert.equal(provider.ledger.get(accountId)!.balance, before + 2);
   });
 
   it('votes on content through the algorithm node, and the GUI hears of the new balance at once', async () => {

@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sha256hex } from '../shared/crypto.js';
 import { chunkIdOf } from '../shared/content.js';
 import type { NodeEntry, ServiceStatus, ServiceVerifyReport } from '../shared/clientapi.js';
 import { log } from '../shared/log.js';
@@ -24,7 +23,7 @@ interface ProviderState {
 /**
  * The client's side of the storage service: it accepts storage jobs from providers
  * (within the user's quota), keeps the chunks on disk and answers the providers'
- * retrievals and proof-of-storage challenges — which is how it earns credits.
+ * retrievals — which is how it earns credits.
  */
 export class StorageWorker {
   private readonly dir: string;
@@ -114,7 +113,7 @@ export class StorageWorker {
           }
           const { offers } = await client.json<{ offers: StorageOffer[] }>('/v1/services/storage/offers');
           const value = (offer: StorageOffer) =>
-            (offer.rewards.upfront + offer.rewards.completion + offer.rewards.perChallenge * 10 + offer.rewards.perRetrieval * 10) /
+            (offer.rewards.upfront + offer.rewards.completion + offer.rewards.perRetrieval * 10) /
             Math.max(offer.bytes / GiB, 0.001);
           const quota = this.quotaFor(provider.id);
           let offered = this.usedFor(state.assignments);
@@ -244,7 +243,7 @@ export class StorageWorker {
       this.note(`Missing chunk ${task.chunkId.slice(0, 12)}… asked by ${provider.name}`);
       data = Buffer.alloc(0); // fail the task at once instead of leaving it unanswered
     }
-    const body = task.type === 'challenge' && task.nonce ? Buffer.from(sha256hex(Buffer.concat([Buffer.from(task.nonce), data]))) : data;
+    const body = data;
     const taskUrl = `/v1/services/storage/tasks/${task.id}`;
     const taskStarted = Date.now();
     try {

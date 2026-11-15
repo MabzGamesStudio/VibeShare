@@ -466,8 +466,17 @@ export class ClientNode {
           if (/\/api\/tracing\//.test(label)) return '';
           return this.traces.recorder.start({ kind: 'api', label }, parent);
         },
-        done: (traceId) => this.traces.trace('dependency', 'api', 'request ok', { traceId }),
-        failed: (traceId, error) => this.traces.trace('error', 'api', 'request failed', { traceId, error: (error as Error).message }),
+        done: (traceId, info) =>
+          this.traces.trace('dependency', 'api', 'request ok', {
+            traceId,
+            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+          }),
+        failed: (traceId, info, error) =>
+          this.traces.trace('error', 'api', 'request failed', {
+            traceId,
+            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            error: (error as Error).message,
+          }),
       },
       fallback: (ctx) => (ctx.req.method === 'GET' || ctx.req.method === 'HEAD' ? this.servePage(ctx) : false),
     });

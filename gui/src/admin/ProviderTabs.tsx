@@ -341,9 +341,8 @@ export interface ContentDetailsData {
     status: string;
     createdAt: string;
     managed?: boolean;
-    challengeIntervalSeconds?: number;
     retrievalIntervalSeconds?: number;
-    rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
+    rewards: { upfront: number; perRetrieval: number; completion: number };
     holders: {
       id: string;
       accountId: string;
@@ -1353,10 +1352,8 @@ function Peering() {
 interface TierJobRow {
   upfrontCredits: number;
   perMbRetrieval: number;
-  perMbChallenge: number;
   endOfTerm: number;
   maxLatencyMs: number;
-  challengeEveryMinutes: number;
   retrievalTestEveryMinutes: number;
   failedRequestsBeforeFailure: number;
 }
@@ -1557,16 +1554,14 @@ function Tiers() {
         <h3>Tiers</h3>
         <p className="tiny faint">
           One row per tier: how many copies sit on each medium and how many URL backups it wants, what it costs, how long it lasts, and what
-          the storage job pays. Retrieval is the URL: the full data is fetched from each holder's URL and there are no challenge options.
+          the storage job pays. Retrieval is the URL: the full data is fetched from each holder's URL.
         </p>
         {config.tiers.map((tier, index) => {
           const job: TierJobRow = {
             upfrontCredits: 20,
             perMbRetrieval: 5,
-            perMbChallenge: 1,
             endOfTerm: 20,
             maxLatencyMs: 2000,
-            challengeEveryMinutes: 10,
             retrievalTestEveryMinutes: 60,
             failedRequestsBeforeFailure: 3,
             ...(tier.job ?? {}),
@@ -1712,10 +1707,8 @@ function Tiers() {
                   job: {
                     upfrontCredits: 20,
                     perMbRetrieval: 5,
-                    perMbChallenge: 1,
                     endOfTerm: 20,
                     maxLatencyMs: 2000,
-                    challengeEveryMinutes: 10,
                     retrievalTestEveryMinutes: 60,
                     failedRequestsBeforeFailure: 3,
                   },

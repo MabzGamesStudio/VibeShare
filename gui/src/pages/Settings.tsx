@@ -19,6 +19,7 @@ import { api, errorMessage, IS_STATIC } from '../api';
 import { PageIconView } from '../components/feed/icons';
 import { PageEditor } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
+import { pageShareBase } from '../components/Share';
 import { TraceSettingsForm } from '../components/Tracing';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { HOSTING_PLATFORMS } from '../earn/hosting';
@@ -160,7 +161,9 @@ function SharingCard() {
             </button>
           )}
         </div>
-        <span className="hint">A link looks like {decodeURIComponent(shareLink(current, 'vs1…'))}</span>
+        <span className="hint">
+          Leave empty to share from the page you are on. A link looks like {decodeURIComponent(shareLink(pageShareBase(current), 'vs1…'))}
+        </span>
       </label>
     </div>
   );

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { after, describe, it } from 'node:test';
 import type { ServiceStatus, ServiceVerifyReport } from '../src/shared/clientapi.js';
 import { MiB } from '../src/shared/content.js';
@@ -8,7 +10,7 @@ import { admin, clientFor, randomBytesOf, startClient, startProvider, tempDir, w
 
 describe('storage service', async () => {
   const { dir, cleanup } = tempDir();
-  const provider = await startProvider({ storage: { cacheMiB: 0 }, storageService: { challengeIntervalSeconds: 3600, minPassRatio: 0.5 } });
+  const provider = await startProvider({ storage: { cacheMiB: 0 } });
   const { client, api } = await startClient(dir);
   after(async () => {
     await client.stop();
@@ -16,63 +18,153 @@ describe('storage service', async () => {
     cleanup();
   });
 
-  it('challenges a holder fairly when the provider lost its own copy', async () => {
+  it('fetches a lost chunk back from the holder and pays per retrieval', async () => {
     const { cid, manifest } = await provider.importBuffer(randomBytesOf(2 * MiB, 5), { name: 'two.bin' });
-    provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 1, durationSeconds: 3600, rewards: { upfront: 3, perRetrieval: 7, perChallenge: 2, completion: 0 } });
+    const job = provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 1, durationSeconds: 3600, rewards: { upfront: 3, perRetrieval: 7, completion: 0 } });
     await api('/api/nodes', { body: { text: provider.reference() } });
     await api('/api/settings', { method: 'PATCH', body: { storageService: { enabled: true, quotaGiB: 1 } } });
     await api('/api/services/sync', { method: 'POST' });
-    await waitFor(() => provider.service.assignmentsForAdmin()[0]?.challenges.passed === 1);
+    const assignment = () => provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
+    await waitFor(async () => {
+      const status = await api<ServiceStatus>('/api/services');
+      return status.providers[0]?.assignments[0]?.status === 'active';
+    });
+
+    // The upfront reward is owed but unpaid: this holder never submitted a live endpoint.
+    assert.equal(assignment().earned, 0, 'the upfront reward waits for a live endpoint');
 
     // The provider loses every copy it had; only the client still holds the data.
     for (const chunk of manifest.chunks) for (const backend of provider.backends()) await backend.delete(chunk.id);
-    const assignment = provider.service.assignmentsForAdmin()[0];
-    await (provider.service as unknown as { challenge(a: unknown): Promise<void> }).challenge(assignment);
-    await waitFor(() => provider.service.assignmentsForAdmin()[0].challenges.passed === 2);
-    const after = provider.service.assignmentsForAdmin()[0];
-    assert.equal(after.retrievals, 0, 'the challenge did not turn into a paid retrieval');
-    assert.equal(after.earned, 3 + 2 + 2);
-
-    // Clients later ask the provider for the content: it fetches it back from the holder.
     const data = await provider.store.getChunk(manifest.chunks[0].id);
     assert.ok(data);
-    assert.equal(provider.service.assignmentsForAdmin()[0].retrievals, 1);
+    const after = assignment();
+    assert.equal(after.retrievals, 1, 'the chunk came back through a paid retrieval');
+    assert.equal(after.earned, 7, 'only the retrieval paid — the upfront reward is still owed');
+    assert.equal(after.status, 'active');
+
+    // Clients later ask the provider for the content: it is served from the fetched-back copy.
     const status = await api<ServiceStatus>('/api/services');
     assert.equal(status.providers[0].assignments[0].status, 'active');
   });
 
-  it('takes a holder out of the job when it answers with the wrong data', async () => {
+  it('pays the upfront reward only when the submitted endpoint is live', async () => {
+    // A little host that serves the content — or 404s for the /gone/ URLs, like a dead
+    // endpoint a user submitted.
+    const blobs = new Map<string, Buffer>();
+    const server = createServer((req, res) => {
+      const cid = decodeURIComponent(req.url ?? '').split('/').pop() ?? '';
+      const blob = req.url?.includes('/gone/') ? undefined : blobs.get(cid);
+      if (!blob) {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(blob);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const user = clientFor(provider.url(), 'identity');
+
+      // Live at acceptance: the upfront reward is paid at once.
+      const live = randomBytesOf(MiB, 21);
+      const { cid: liveCid, manifest: liveManifest } = await provider.importBuffer(live, { name: 'live.bin' });
+      blobs.set(liveCid, live);
+      const liveJob = provider.service.createJob({ cid: liveCid, chunks: liveManifest.chunks, replicas: 2, durationSeconds: 3600, rewards: { upfront: 3, perRetrieval: 7, completion: 0 } });
+      await user.json('/v1/content-urls', { body: { cid: liveCid, url: `http://127.0.0.1:${port}/files/${liveCid}` } });
+      const acceptedLive = await user.json<{ id: string; earned: number }>(`/v1/services/storage/offers/${liveJob.id}/accept`, { method: 'POST' });
+      assert.equal(acceptedLive.earned, 3, 'a live endpoint at acceptance earns the upfront reward right away');
+
+      // Dead at acceptance: nothing is paid, and the first check that passes pays it.
+      const later = randomBytesOf(MiB, 23);
+      const { cid: laterCid, manifest: laterManifest } = await provider.importBuffer(later, { name: 'later.bin' });
+      blobs.set(laterCid, later);
+      const laterJob = provider.service.createJob({ cid: laterCid, chunks: laterManifest.chunks, replicas: 2, durationSeconds: 3600, rewards: { upfront: 5, perRetrieval: 7, completion: 0 } });
+      await user.json('/v1/content-urls', { body: { cid: laterCid, url: `http://127.0.0.1:${port}/gone/${laterCid}` } });
+      const acceptedLater = await user.json<{ id: string; earned: number }>(`/v1/services/storage/offers/${laterJob.id}/accept`, { method: 'POST' });
+      assert.equal(acceptedLater.earned, 0, 'a dead endpoint at acceptance earns nothing yet');
+
+      // The endpoint comes alive and passes its first check: the owed reward is paid.
+      await user.json('/v1/content-urls', { body: { cid: laterCid, url: `http://127.0.0.1:${port}/files/${laterCid}` } });
+      await provider.testStorageJob(laterJob.id);
+      assert.equal(
+        provider.service.assignmentsForAdmin().find((entry) => entry.id === acceptedLater.id)?.earned,
+        5,
+        'the first check that passes pays the upfront reward'
+      );
+
+      // The upfront reward is paid only once, ever.
+      await provider.testStorageJob(liveJob.id);
+      await provider.testStorageJob(laterJob.id);
+      assert.equal(provider.service.assignmentsForAdmin().find((entry) => entry.id === acceptedLive.id)?.earned, 3);
+      assert.equal(provider.service.assignmentsForAdmin().find((entry) => entry.id === acceptedLater.id)?.earned, 5);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('removes a holder that answers with the wrong data and reopens the job', async () => {
     const { cid, manifest } = await provider.importBuffer(randomBytesOf(2 * MiB, 9), { name: 'bad.bin' });
     const job = provider.service.createJob({
       cid,
       chunks: manifest.chunks,
       replicas: 2,
       durationSeconds: 3600,
-      rewards: { upfront: 1, perRetrieval: 1, perChallenge: 1, completion: 0 },
+      rewards: { upfront: 1, perRetrieval: 1, completion: 0 },
     });
-    const user = clientFor(provider.url(), 'identity');
-    await user.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    const first = clientFor(provider.url(), 'identity');
+    await first.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
     const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
-    await user.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
-    const account = (await user.json<{ account: { id: string } }>('/v1/account')).account;
+    await first.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
+    const account = (await first.json<{ account: { id: string } }>('/v1/account')).account;
     const fake = { id: account.id } as never;
-    let taskId = '';
+    await provider.service.poll(fake, 0); // the holder comes online
+
+    // A second holder fills the job completely.
+    const second = clientFor(provider.url(), 'identity');
+    await second.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    const secondAssignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id && entry.id !== assignment.id)!;
+    await second.json(`/v1/services/storage/assignments/${secondAssignment.id}/ready`, { method: 'POST' });
+    const secondAccount = (await second.json<{ account: { id: string } }>('/v1/account')).account;
+    const secondFake = { id: secondAccount.id } as never;
+    await provider.service.poll(secondFake, 0);
+    assert.equal(provider.service.jobs().find((entry) => entry.id === job.id)!.holders, 2, 'the job is full');
+    const other = clientFor(provider.url(), 'identity');
+    await assert.rejects(other.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' }), /no free slots/);
+
+    // One holder answers a retrieval with the wrong bytes.
+    const chunk = await provider.store.getChunk(manifest.chunks[0].id);
+    assert.ok(chunk);
+    const waiting = provider.service.retrieve(manifest.chunks[0].id);
+    let wrongTask = '';
+    let rightTask = '';
     await waitFor(async () => {
-      const task = (await provider.service.poll(fake, 0)).find((entry) => entry.type === 'challenge');
-      if (task) {
-        taskId = task.id;
-        return true;
-      }
-      return false;
+      wrongTask = ((await provider.service.poll(fake, 0)).find((entry) => entry.type === 'retrieve')?.id ?? '');
+      rightTask = ((await provider.service.poll(secondFake, 0)).find((entry) => entry.type === 'retrieve')?.id ?? '');
+      return Boolean(wrongTask && rightTask);
     });
     const balanceBefore = provider.ledger.get(account.id)?.balance ?? 0;
-    await assert.rejects(provider.service.answer(fake, taskId, Buffer.from('not the proof')), /Wrong proof/);
+    await assert.rejects(provider.service.answer(fake, wrongTask, Buffer.from('not the bytes')), /do not match/);
     assert.equal(
       provider.service.assignmentsForAdmin().find((entry) => entry.id === assignment.id)?.status,
-      'failed',
-      'a wrong answer takes the holder out of the job right away'
+      'removed',
+      'a wrong answer deletes the holder from the job — the row stays for display'
     );
     assert.equal(provider.ledger.get(account.id)?.balance ?? 0, balanceBefore, 'a wrong answer earns nothing');
+
+    // The slot frees and the job reopens for another client.
+    const reopened = provider.service.jobs().find((entry) => entry.id === job.id)!;
+    assert.equal(reopened.reopened, 1);
+    assert.equal(reopened.status, 'open');
+    assert.equal(reopened.holders, 1, 'only the good holder is left');
+    await other.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    assert.ok(
+      provider.service.assignmentsForAdmin().filter((entry) => entry.jobId === job.id).length >= 3,
+      'the freed slot is takeable again'
+    );
+
+    // The same retrieval still goes through the honest holder.
+    await provider.service.answer(secondFake, rightTask, chunk);
+    assert.ok(await waiting, 'the honest holder served the chunk');
   });
 
   it('frees the slot of an assignment that never finished downloading', async () => {
@@ -122,17 +214,17 @@ describe('storage service', async () => {
     assert.equal(after.missing[0], manifest.chunks[0].id);
   });
 
-  it('updates one job’s rewards and its challenge / retrieval schedule', async () => {
+  it('updates one job’s rewards and its retrieval schedule', async () => {
     const { cid, manifest } = await provider.importBuffer(randomBytesOf(MiB, 17), { name: 'sched.bin' });
     const job = provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 1, durationSeconds: 3600 });
     await admin(provider.url(), `/v1/admin/storage/jobs/${job.id}`, {
       method: 'POST',
-      body: { rewards: { upfront: 9, perRetrieval: 4 }, challengeIntervalSeconds: 120, retrievalIntervalSeconds: 300 },
+      body: { rewards: { upfront: 9, perRetrieval: 4 }, retrievalIntervalSeconds: 300 },
     });
     const updated = provider.service.jobs().find((entry) => entry.id === job.id)!;
     assert.equal(updated.rewards.upfront, 9);
     assert.equal(updated.rewards.perRetrieval, 4);
-    assert.equal(updated.challengeIntervalSeconds, 120);
+    assert.equal(updated.rewards.completion, 10, 'untouched reward fields keep their value');
     assert.equal(updated.retrievalIntervalSeconds, 300);
   });
 });

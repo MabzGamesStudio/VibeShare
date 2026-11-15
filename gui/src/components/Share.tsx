@@ -93,6 +93,22 @@ function QrPanel({ url, title }: { url: string; title?: string }) {
   );
 }
 
+/**
+ * The sharing base of the page the user is on right now: the domain and the path this
+ * copy of the client is served from — what an empty sharing address in Settings means
+ * ("share from where I am now"). A configured address overrides it whenever it is set;
+ * only the page itself can say where it lives, which is why this lives here.
+ */
+export function pageShareBase(configured: string): string {
+  let here = '';
+  try {
+    here = `${window.location.origin}${APP_BASE.pathname}`.replace(/\/+$/, '');
+  } catch {
+    here = '';
+  }
+  return shareBase(configured, here);
+}
+
 function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => void }) {
   const { state, providers } = useApp();
   const [mode, setMode] = useState<Mode>('link');
@@ -101,18 +117,7 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
   // client — with the content id appended; when that address is empty it is the copy of
   // the client this page is open in. The
   // field stays editable: the url (content id included) can be changed before sharing.
-  const defaultBase = (() => {
-    // The sharing address in Settings (a hosted copy of the web client) overrides the
-    // domain this page is served from whenever it is set to an address; where this page
-    // is served from only stands in when that address is empty.
-    let here = '';
-    try {
-      here = `${window.location.origin}${APP_BASE.pathname}`.replace(/\/+$/, '');
-    } catch {
-      here = '';
-    }
-    return shareBase(state?.settings.shareBaseUrl ?? '', here);
-  })();
+  const defaultBase = pageShareBase(state?.settings.shareBaseUrl ?? '');
   const [edited, setEdited] = useState<string | null>(null);
   const native = Boolean(parseContentId(target.id)?.native);
   const provider = providers.find((node) => node.enabled);

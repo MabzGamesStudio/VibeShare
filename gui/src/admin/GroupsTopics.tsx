@@ -3,6 +3,7 @@ import type { CreatorInfo, GroupSuggestion, TopicInfo, TopicSuggestion } from '.
 import { CopyButton, Loading, Modal } from '../components/ui';
 import { timeAgo } from '../util';
 import { admin, message } from './api';
+import { PageSize, Pager, useConsoleList } from './paging';
 import { useToast } from './AdminApp';
 
 /** A group as the console sees it: the creator record, its members and what they bring. */
@@ -174,6 +175,8 @@ export function Groups() {
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState<{ id: string; name: string; description: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState(0);
+  const { prefs, save: savePaging } = useConsoleList('groups');
 
   const load = useCallback(() => {
     admin<{ groups: GroupRow[] }>(`/v1/admin/groups?q=${encodeURIComponent(query)}`)
@@ -184,6 +187,12 @@ export function Groups() {
       });
   }, [query, show]);
   useEffect(load, [load]);
+
+  // The whole filtered list comes in at once; it is shown one page at a time.
+  const perPage = prefs.perPage;
+  const pages = Math.max(1, Math.ceil((groups?.length ?? 0) / perPage));
+  const current = Math.min(page, pages - 1);
+  const pager = groups && groups.length > 0 && <Pager page={current} perPage={perPage} total={groups.length} loading={false} go={setPage} />;
 
   const save = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -202,21 +211,34 @@ export function Groups() {
   return (
     <>
       <div className="row between" style={{ marginBottom: 12 }}>
-        <input type="text" placeholder="Search groups by name or id" value={query} onChange={(e) => setQuery(e.target.value)} style={{ maxWidth: 320 }} />
+        <input
+          type="text"
+          placeholder="Search groups by name or id"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setPage(0);
+          }}
+          style={{ maxWidth: 320 }}
+        />
         <button className="primary small" onClick={() => setCreating({ id: '', name: '', description: '' })}>
           + New group
         </button>
       </div>
       <h2 style={{ marginBottom: 8 }}>Waiting for review</h2>
       <GroupReview onReviewed={load} />
-      <h2 style={{ margin: '20px 0 8px' }}>Groups</h2>
+      <div className="row between" style={{ margin: '20px 0 8px' }}>
+        <h2 style={{ margin: 0 }}>Groups</h2>
+        <PageSize prefs={prefs} save={savePaging} />
+      </div>
+      {pager}
       {!groups ? (
         <Loading />
       ) : !groups.length ? (
         <p className="hint">No group yet. A group is a list of content creators; its page shows them in a carousel and their content together.</p>
       ) : (
         <div className="page-list">
-          {groups.map((group) => (
+          {groups.slice(current * perPage, (current + 1) * perPage).map((group) => (
             <details key={group.id} className="card" style={{ padding: 12 }}>
               <summary className="row between" style={{ cursor: 'pointer' }}>
                 <div className="row" style={{ gap: 10, minWidth: 0 }}>
@@ -278,6 +300,7 @@ export function Groups() {
           ))}
         </div>
       )}
+      {pager}
       {creating && (
         <Modal title="New group" onClose={() => setCreating(null)}>
           <div className="form-stack">
@@ -319,6 +342,8 @@ export function Topics() {
   const [suggestions, setSuggestions] = useState<TopicSuggestion[] | null>(null);
   const [editing, setEditing] = useState<{ id?: string; name: string; description: string; status: 'listed' | 'blocked' } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState(0);
+  const { prefs, save: savePaging } = useConsoleList('topics');
 
   const load = useCallback(() => {
     admin<{ topics: TopicInfo[] }>(`/v1/admin/topics?q=${encodeURIComponent(query)}`)
@@ -335,6 +360,12 @@ export function Topics() {
   }, []);
   useEffect(load, [load]);
   useEffect(loadSuggestions, [loadSuggestions]);
+
+  // The whole filtered list comes in at once; it is shown one page at a time.
+  const perPage = prefs.perPage;
+  const pages = Math.max(1, Math.ceil((topics?.length ?? 0) / perPage));
+  const current = Math.min(page, pages - 1);
+  const pager = topics && topics.length > 0 && <Pager page={current} perPage={perPage} total={topics.length} loading={false} go={setPage} />;
 
   const save = async () => {
     if (!editing) return;
@@ -371,7 +402,16 @@ export function Topics() {
   return (
     <>
       <div className="row between" style={{ marginBottom: 12 }}>
-        <input type="text" placeholder="Search topics by name or id" value={query} onChange={(e) => setQuery(e.target.value)} style={{ maxWidth: 320 }} />
+        <input
+          type="text"
+          placeholder="Search topics by name or id"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setPage(0);
+          }}
+          style={{ maxWidth: 320 }}
+        />
         <button className="primary small" onClick={() => setEditing({ name: '', description: '', status: 'listed' })}>
           + New topic
         </button>
@@ -408,10 +448,16 @@ export function Topics() {
           ))}
         </div>
       )}
+      <div className="row between" style={{ margin: '12px 0 8px' }}>
+        <h2 style={{ margin: 0 }}>Topics</h2>
+        <PageSize prefs={prefs} save={savePaging} />
+      </div>
+      {pager}
       <TopicsTable
-        topics={topics}
+        topics={topics ? topics.slice(current * perPage, (current + 1) * perPage) : null}
         onEdit={(topic) => setEditing({ id: topic.id, name: topic.name, description: topic.description ?? '', status: 'listed' })}
       />
+      {pager}
       {editing && (
         <Modal title={editing.id ? `Topic ${editing.name}` : 'New topic'} onClose={() => setEditing(null)}>
           <div className="form-stack">

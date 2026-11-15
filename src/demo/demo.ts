@@ -243,7 +243,7 @@ export async function startDemo(options: DemoOptions) {
       description: 'Sample content provider of the VibeShare demo network.',
       signup: { grant: 1000 },
       pricing: { perMiB: 1, freeMiBPerDay: 10 },
-      storageService: { challengeIntervalSeconds: 120, auto: { enabled: false } },
+      storageService: { auto: { enabled: false } },
     },
   });
   const algorithm = new AlgorithmNode({
@@ -297,7 +297,7 @@ export async function startDemo(options: DemoOptions) {
           chunks: manifest.chunks,
           replicas: 3,
           durationSeconds: 7 * 86400,
-          rewards: { upfront: 5, perRetrieval: 1, perChallenge: 1, completion: 25 },
+          rewards: { upfront: 5, perRetrieval: 1, completion: 25 },
         });
       }
     }

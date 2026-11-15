@@ -170,7 +170,13 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     if (!pages.some((page) => page.id === preset)) pages.push(presetPage(preset));
   }
   merged.pages = pages;
-  if (!merged.shareBaseUrl || OLD_SHARE_BASE_URLS.includes(merged.shareBaseUrl.replace(/\/+$/, '').toLowerCase())) merged.shareBaseUrl = base.shareBaseUrl;
+  // The sharing address is kept as it is — including an empty one, which means "share
+  // from the page the user is on". Only a value that is missing entirely falls back to
+  // the built-in default, and a copy of the old default migrates to the current one.
+  const savedShare = (merged as { shareBaseUrl?: unknown }).shareBaseUrl;
+  if (savedShare === undefined || savedShare === null || OLD_SHARE_BASE_URLS.includes(String(savedShare).replace(/\/+$/, '').toLowerCase())) {
+    merged.shareBaseUrl = base.shareBaseUrl;
+  }
   if (saved && (saved.revision ?? 1) < 2) {
     // Revision 2: titles are filtered by language, English only unless the user picked languages.
     if (!saved.preferences?.languages?.length) merged.preferences.languages = [...(base.preferences.languages ?? [])];
@@ -326,16 +332,22 @@ export function pagePreferences(preferences: Preferences, filters: Partial<PageF
 
 /**
  * Where shared links point: the sharing address set in Settings (a hosted copy of the
- * web client) overrides the address this client runs on whenever it is set to one; an
- * empty or unusable value keeps the client's own address.
+ * web client) overrides the address this page is served from whenever it is set to one.
+ * An empty or unusable value means "share from where I am now": the domain and path the
+ * page is served from — the caller passes it (only the page knows the path the app is
+ * mounted under), or the browser's own origin stands in when no caller can say.
  */
-export function shareBase(configured: string, clientBase: string): string {
+export function shareBase(configured: string, clientBase?: string): string {
   const wanted = configured.trim();
-  return /^https?:\/\/\S+$/i.test(wanted) ? wanted : clientBase;
+  if (/^https?:\/\/\S+$/i.test(wanted)) return wanted;
+  const here = (clientBase ?? '').trim();
+  if (here) return here;
+  return (globalThis as { window?: { location?: { origin?: string } } }).window?.location?.origin ?? '';
 }
 
 /** The link that opens a content id in a hosted web client (normal routes). */
 export function shareLink(baseUrl: string, contentId: string, providerHint?: string): string {
+  // Only a completely empty base (nothing to build on) falls back to the default host.
   const base = (baseUrl || DEFAULT_SHARE_BASE_URL).replace(/#.*$/, '').replace(/\/index\.html$/, '').replace(/\/+$/, '');
   const hint = providerHint ? `?p=${encodeURIComponent(providerHint)}` : '';
   return `${base}/watch/${encodeURIComponent(contentId)}${hint}`;
@@ -442,12 +454,16 @@ export function applySettingsPatch(current: Settings, patch: Partial<Settings>):
     if (id && Number.isFinite(value)) perProvider[id] = Math.max(0, value);
   }
   next.storageService.perProvider = perProvider;
-  try {
-    const url = new URL(next.shareBaseUrl);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error();
-    next.shareBaseUrl = next.shareBaseUrl.replace(/\/+$/, '');
-  } catch {
-    throw new Error('The share link address must be an http(s) URL');
+  // An empty sharing address is valid and kept: it means "share from the page the user
+  // is on now". Anything else must be an http(s) URL.
+  next.shareBaseUrl = String(next.shareBaseUrl ?? '').trim().replace(/\/+$/, '');
+  if (next.shareBaseUrl) {
+    try {
+      const url = new URL(next.shareBaseUrl);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error();
+    } catch {
+      throw new Error('The share link address must be an http(s) URL');
+    }
   }
   if (next.pages.length > 50) throw new Error('At most 50 pages');
   const ids = new Set<string>();

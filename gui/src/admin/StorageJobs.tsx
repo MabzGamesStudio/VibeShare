@@ -18,12 +18,14 @@ interface StorageJobRow {
   bytes: number;
   replicas: number;
   durationSeconds: number;
-  rewards: { upfront: number; perRetrieval: number; perChallenge: number; completion: number };
+  rewards: { upfront: number; perRetrieval: number; completion: number };
   requireIdentity: boolean;
   createdAt: string;
   openUntil?: string;
   status: 'open' | 'closed' | 'failed';
   managed?: boolean;
+  /** Times the job was reopened after a failed holder. */
+  reopened?: number;
   challengeIntervalSeconds?: number;
   retrievalIntervalSeconds?: number;
   maxLatencyMs?: number;
@@ -117,14 +119,18 @@ function viewOf(
 }
 
 /**
- * The payout description of a job's credits. What holders have actually been paid is the
+ * The payout of a job's credits in words. What holders have actually been paid is the
  * number the column leads with (summed from /v1/admin/storage/assignments, which keeps
- * the 500 most recent assignments, so on a big node it can undercount); the reward terms
- * stay in this tooltip and the job details, and the description under the number carries
- * no number itself so the paid figure is the only one the column shows.
+ * the 500 most recent assignments, so on a big node it can undercount); this and the
+ * payout line under the number give the reward terms behind it.
  */
 function rewardsTitle(job: StorageJobRow): string {
-  return `Per holder: ${job.rewards.upfront} credits when hired + ${job.rewards.completion} at the end of the term, plus ${job.rewards.perRetrieval} per retrieval and ${job.rewards.perChallenge} per passed challenge`;
+  return `Per holder: ${job.rewards.upfront} credits when hired + ${job.rewards.completion} at the end of the term, plus ${job.rewards.perRetrieval} per retrieval`;
+}
+
+/** The four payout numbers of a job: upfront, per retrieval, time between retrievals, finish. */
+function payoutLine(job: StorageJobRow): string {
+  return `${job.rewards.upfront} upfront · ${job.rewards.perRetrieval} per retrieval · every ${Math.round((job.retrievalIntervalSeconds ?? 0) / 60)} min · ${job.rewards.completion} at the end`;
 }
 
 /** The moment the job stops looking for holders, or the end of its paid term. */
@@ -172,7 +178,9 @@ function relative(iso: string | null | undefined): string {
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <>
-      <span className="small muted">{label}</span>
+      <span className="small muted" style={{ textAlign: 'right' }}>
+        {label}
+      </span>
       <span className="small" style={{ overflowWrap: 'anywhere' }}>
         {children}
       </span>
@@ -227,12 +235,12 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
         </div>
         {tab === 'details' && (
           <div className="form-stack" style={{ gap: 8 }}>
-            {/* One grid for all facts: the labels share a fixed-width column and the
-                values all start right after it. */}
+            {/* One grid for all facts: the labels share a fixed-width, right-aligned
+                column and the values all start right after it. */}
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: '240px minmax(0, 1fr)',
+                gridTemplateColumns: '160px minmax(0, 1fr)',
                 columnGap: 12,
                 rowGap: 8,
                 alignItems: 'baseline',
@@ -249,7 +257,12 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                 </span>
               </Fact>
               <Fact label="Status">
-                <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>{job.status}</span>
+                <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>{job.status}</span>{' '}
+                {job.reopened ? (
+                  <span className="badge warn" title="A holder failed and was removed — the job opened again for the freed copy">
+                    Reopened {job.reopened} time{job.reopened === 1 ? '' : 's'} after failed holders
+                  </span>
+                ) : null}
                 <div className="tiny faint">{job.managed ? 'opened by the tier by itself' : 'opened by hand'}</div>
               </Fact>
               <Fact label="Tier">
@@ -275,9 +288,7 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                   {job.rewards.upfront + job.rewards.completion} credits per holder — {job.rewards.upfront} upfront +{' '}
                   {job.rewards.completion} at the end of the term
                 </span>
-                <div className="tiny faint">
-                  plus {job.rewards.perRetrieval} per retrieval and {job.rewards.perChallenge} per passed challenge
-                </div>
+                <div className="tiny faint">plus {job.rewards.perRetrieval} per retrieval</div>
                 <div className="tiny faint">paid to holders so far: {paid} credits</div>
               </Fact>
               <Fact label="Job start">
@@ -343,7 +354,11 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                     <tr key={holder.id}>
                       <td className="mono tiny">{holder.accountId}</td>
                       <td>
-                        <span className={`badge ${holder.status === 'failed' ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}>
+                        {/* A removed holder failed and was deleted from the job — kept visible, never counted as active. */}
+                        <span
+                          className={`badge ${holder.status === 'failed' || holder.status === 'removed' ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}
+                          title={holder.status === 'removed' ? 'This user failed and was deleted from the job (kept visible here)' : undefined}
+                        >
                           {holder.status}
                         </span>
                       </td>
@@ -399,6 +414,7 @@ export function StorageJobs() {
   const [size, setSize] = useState(25);
   const [page, setPage] = useState(0);
   const [shown, setShown] = useState(25);
+  const [jump, setJump] = useState('');
   const [opened, setOpened] = useState<JobView | null>(null);
   const [toast, show] = useToast();
 
@@ -435,6 +451,14 @@ export function StorageJobs() {
   const pages = Math.max(1, Math.ceil(filtered.length / size));
   const current = Math.min(page, pages - 1);
   const visible = paged ? filtered.slice(current * size, current * size + size) : filtered.slice(0, shown);
+  // Skipping to a page by number: whatever is typed is clamped to the pages that exist.
+  const skipTo = () => {
+    const wanted = Math.round(Number(jump));
+    if (!jump.trim() || !Number.isFinite(wanted)) return;
+    const target = Math.min(pages, Math.max(1, wanted));
+    setPage(target - 1);
+    setJump(String(target));
+  };
   // The same pager above and below the rows — one page of jobs can be long.
   const summary = (
     <span className="muted">
@@ -456,16 +480,47 @@ export function StorageJobs() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
-      <div className="row">
+      {/* Row 1 of the controls: what to look for, how to page and how much at once. */}
+      <div className="row small">
         <input
           type="search"
           value={search}
           placeholder="Search by tier, content id or job name"
-          style={{ flex: 1 }}
+          style={{ width: 320, maxWidth: '100%' }}
           onChange={(e) => {
             setSearch(e.target.value);
             setPage(0);
             setShown(size);
+          }}
+        />
+        <span className="hint">Show as</span>
+        <select
+          value={paged ? 'paged' : 'lazy'}
+          onChange={(e) => {
+            setPaged(e.target.value === 'paged');
+            setPage(0);
+            setShown(size);
+          }}
+        >
+          <option value="paged">Pagination</option>
+          <option value="lazy">Lazy load</option>
+        </select>
+        <span className="hint">Items per page</span>
+        <input
+          key={size}
+          type="number"
+          min={1}
+          max={500}
+          style={{ maxWidth: 92 }}
+          title="Jobs per page (1–500)"
+          defaultValue={size}
+          onBlur={(e) => {
+            const wanted = Math.round(Number(e.target.value));
+            if (!e.target.value.trim() || !Number.isFinite(wanted) || wanted === size) return;
+            const perPage = Math.min(500, Math.max(1, wanted));
+            setSize(perPage);
+            setPage(0);
+            setShown(perPage);
           }}
         />
       </div>
@@ -478,41 +533,46 @@ export function StorageJobs() {
         </p>
       ) : (
         <>
+          {/* Row 2 of the controls: the pager, with a skip-to-page at its right end. */}
           <div className="row between small">
-            {summary}
             <div className="row" style={{ gap: 6 }}>
-              <span className="hint">Items per page</span>
-              <input
-                key={size}
-                type="number"
-                min={1}
-                max={500}
-                style={{ maxWidth: 92 }}
-                title="Jobs per page (1–500)"
-                defaultValue={size}
-                onBlur={(e) => {
-                  const wanted = Math.round(Number(e.target.value));
-                  if (!e.target.value.trim() || !Number.isFinite(wanted) || wanted === size) return;
-                  const perPage = Math.min(500, Math.max(1, wanted));
-                  setSize(perPage);
-                  setPage(0);
-                  setShown(perPage);
-                }}
-              />
-              <span className="hint">Show as</span>
-              <select
-                value={paged ? 'paged' : 'lazy'}
-                onChange={(e) => {
-                  setPaged(e.target.value === 'paged');
-                  setPage(0);
-                  setShown(size);
-                }}
-              >
-                <option value="paged">Pagination</option>
-                <option value="lazy">Lazy load</option>
-              </select>
-              {paged && pagerButtons}
+              {paged ? (
+                <>
+                  <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
+                    Previous
+                  </button>
+                  <span className="muted">
+                    page {current + 1} of {pages}
+                  </span>
+                  <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+                    Next
+                  </button>
+                </>
+              ) : (
+                <span className="muted">
+                  showing {visible.length} of {filtered.length}
+                </span>
+              )}
             </div>
+            {paged && (
+              <div className="row" style={{ gap: 6 }}>
+                <span className="hint">Skip to page</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={pages}
+                  style={{ maxWidth: 80 }}
+                  value={jump}
+                  placeholder="1"
+                  title={`Page to jump to (1–${pages})`}
+                  onChange={(e) => setJump(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && skipTo()}
+                />
+                <button className="small" onClick={skipTo}>
+                  Go
+                </button>
+              </div>
+            )}
           </div>
           <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
             <table className="table">
@@ -546,7 +606,7 @@ export function StorageJobs() {
                       <td className="small">
                         <span title="Credits this job's holders have actually received so far">{paid} credits</span>
                         <div className="tiny faint" title={rewardsTitle(job)}>
-                          Per holder: credits when hired + at the end of the term, plus per retrieval and per passed challenge
+                          {payoutLine(job)}
                         </div>
                       </td>
                       <td className="small">

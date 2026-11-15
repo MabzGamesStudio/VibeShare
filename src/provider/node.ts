@@ -166,17 +166,14 @@ export function providerDefaults(): ProviderConfig {
     catalog: true,
     storageService: {
       enabled: true,
-      challengeIntervalSeconds: 900,
       retrievalIntervalSeconds: 0,
-      minPassRatio: 0.8,
       offlineGraceSeconds: 120,
       taskTimeoutSeconds: 30,
       auto: {
         enabled: false,
         replicas: 2,
         durationDays: 30,
-        rewards: { upfront: 5, perRetrieval: 1, perChallenge: 1, completion: 20 },
-        challengeIntervalSeconds: 900,
+        rewards: { upfront: 5, perRetrieval: 1, completion: 20 },
         retrievalIntervalSeconds: 0,
         requireIdentity: false,
       },
@@ -785,6 +782,26 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   /**
+   * Whether one account's submitted endpoints serve the job's content right now —
+   * the gate for the upfront reward at acceptance (paid later, or never, when not).
+   * A pure check: it never counts against the holder the way the job tests do.
+   */
+  private async endpointLiveFor(accountId: string, job: { cid?: string; maxLatencyMs?: number }): Promise<boolean> {
+    if (!job.cid) return false;
+    const records = Object.values(this.contentUrls.data.items)
+      .filter((record) => record.account === accountId && Boolean(record.url ?? record.baseUrl))
+      .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0) || (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0));
+    for (const record of records) {
+      // A single URL is only ever for its own content; a base URL serves any content.
+      const target = record.cid === job.cid && record.url ? record.url : record.baseUrl ? `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(job.cid)}` : undefined;
+      if (!target) continue;
+      const verify = await this.verifyEndpoint(job.cid, target, job.maxLatencyMs ?? 30_000);
+      if (verify.ok) return true;
+    }
+    return false;
+  }
+
+  /**
    * Tests one storage job at its users' endpoints — never through the client's poll.
    * For each user the endpoint list is tried in order (best record first): the first
    * endpoint whose chunks match the content id wins and moves to the top of that user's
@@ -850,6 +867,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       }
       if (served) {
         servedCount++;
+        // A passed check pays the upfront reward if it was still owed (the endpoint was
+        // not live at acceptance).
+        this.service.endpointLive(holder.id);
         if (onlyAccount) return report({ ok: true, account: holder.accountId, endpoint: served.url, chunks: served.chunks, checked, total });
         continue;
       }
@@ -1864,8 +1884,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const copies =
       Object.values(state.plan.media).reduce((sum, count) => sum + count, 0) + (state.plan.externalUrls ?? 0);
     if (copies <= 0) return;
-    // The tier's own storage job settings: per-MiB retrieval and challenge rewards are
-    // scaled to the content's size, the rest is taken as-is.
+    // The tier's own storage job settings: the per-MiB retrieval reward is scaled to
+    // the content's size, the rest is taken as-is.
     const settings = tierJob(state.plan);
     const mib = Math.max(1, Math.round((manifest.size ?? 0) / MiB));
     const job = this.service.createJob({
@@ -1877,10 +1897,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       rewards: {
         upfront: settings.upfrontCredits,
         perRetrieval: Math.round(settings.perMbRetrieval * mib),
-        perChallenge: Math.round(settings.perMbChallenge * mib),
         completion: settings.endOfTerm,
       },
-      challengeIntervalSeconds: Math.max(1, settings.challengeEveryMinutes) * 60,
       retrievalIntervalSeconds: Math.max(0, settings.retrievalTestEveryMinutes) * 60,
       maxLatencyMs: settings.maxLatencyMs,
       failedRequestsBeforeFailure: settings.failedRequestsBeforeFailure,
@@ -1920,7 +1938,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const router = this.router;
     const base = '/v1/services/storage';
     router.get(`${base}/offers`, (ctx) => ({ offers: this.service.offers(this.auth.require(ctx)) }));
-    router.post(`${base}/offers/:jobId/accept`, (ctx) => this.service.accept(this.auth.require(ctx), ctx.params.jobId));
+    router.post(`${base}/offers/:jobId/accept`, (ctx) =>
+      this.service.accept(this.auth.require(ctx), ctx.params.jobId, (accountId, job) => this.endpointLiveFor(accountId, job))
+    );
     router.get(`${base}/assignments`, (ctx) => {
       const account = this.auth.require(ctx);
       return {
@@ -2235,12 +2255,11 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         urls: { items: urls.length, bytes: urlBytes },
       };
     });
-    // Update one job's rewards and its challenge / retrieval schedule.
+    // Update one job's rewards and its retrieval / endpoint-test schedule.
     router.post('/v1/admin/storage/jobs/:id', async (ctx) => {
       this.requireAdmin(ctx);
       const body = await readJson<{
         rewards?: Partial<StorageRewards>;
-        challengeIntervalSeconds?: number;
         retrievalIntervalSeconds?: number;
       }>(ctx.req);
       this.service.updateJob(ctx.params.id, body);

@@ -31,6 +31,9 @@ import {
   type AlgorithmPricing,
   type AlgorithmRewards,
   type BloomStorageTier,
+  type CensoredSet,
+  type CensoredWordsChange,
+  type CensoredWordsPage,
   type ClaimRequest,
   type ClaimResponse,
   type ContentMedia,
@@ -486,6 +489,85 @@ function cleanNotes(value: unknown, max = 32): TagNote[] | undefined {
   return out.length ? out : undefined;
 }
 
+// -------------------------------------------------------------------------
+// Censored words: two small sets the operator keeps on the comments page — words whose
+// presence hides a comment, and "adjacent" words that only count next to a censored one
+// (kept deliberately simple; see AlgorithmNode.censoredIn). Text is compared after
+// folding the evasions people use: leet-speak and lookalikes (@→a, +→t, 0→o, 1→i, $→s,
+// 3→e, !→i), case, punctuation and padded letters — so "@R+" and "arrrt" both read as
+// "art". The ambiguous 1→i is mapped to one side on purpose: the close-variant rule
+// below still catches its l twin.
+
+/** The two word sets, kept sorted so the console's pages never skip an entry. */
+interface CensorshipData {
+  /** Words whose presence — or a close variant of one — hides a comment. */
+  words: string[];
+  /** Words that only count when they sit within one word of a censored one. */
+  adjacent: string[];
+}
+
+/** Leet-speak and lookalike characters folded to the letters they stand for. */
+const LEET: Record<string, string> = { '@': 'a', '+': 't', '0': 'o', '1': 'i', '!': 'i', '$': 's', '3': 'e', '4': 'a', '5': 's', '7': 't', '|': 'i' };
+
+function leetFold(text: string): string {
+  let out = '';
+  for (const raw of text.toLowerCase()) out += LEET[raw] ?? raw;
+  return out;
+}
+
+/** One word as the censor filter sees it: "@R+" reads as "art", and so does "arrrt". */
+export function normalizeCensorWord(word: string): string {
+  return leetFold(word)
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .replace(/(.)\1+/gu, '$1');
+}
+
+/** The words of a comment as the censor filter sees them, in order. */
+export function censorTokens(text: string): string[] {
+  return leetFold(text)
+    .split(/[^\p{L}\p{N}]+/u)
+    .map((token) => token.replace(/(.)\1+/gu, '$1'))
+    .filter(Boolean);
+}
+
+/** Levenshtein distance with an early exit past `max` (words here are short). */
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const value = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      current.push(value);
+      if (value < best) best = value;
+    }
+    if (best > max) return max + 1;
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+/**
+ * Whether a word counts as the censored one: exactly after normalization ("@R+" is
+ * "art"), plus one or two small edits around longer words. Short words match exactly
+ * only, so a three-letter censored word never pulls in its innocent neighbours.
+ */
+export function isCensoredVariant(word: string, censored: string): boolean {
+  const a = normalizeCensorWord(word);
+  const b = normalizeCensorWord(censored);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const limit = b.length <= 3 ? 0 : b.length <= 7 ? 1 : 2;
+  return editDistance(a, b, limit) <= limit;
+}
+
+/** The word set an admin route names; anything else is a bad request. */
+function censoredSetOf(value: string): CensoredSet {
+  if (value === 'words' || value === 'adjacent') return value;
+  throw badRequest('set is words or adjacent');
+}
+
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
   private contributions: JsonFile<ContributionData>;
@@ -497,6 +579,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   }>;
   /** Comments on content pages: one hash-chained log per content id. */
   private comments: JsonFile<CommentsData>;
+  /** The operator's censored words: two small sets kept on the comments page. */
+  private censorship: JsonFile<CensorshipData>;
 
   readonly crawler: Crawler;
   private lastPrune = 0;
@@ -519,6 +603,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     this.blooms = new JsonFile(this.path('blooms.json'), () => ({ stored: {}, accounts: {} }));
     this.blooms.data.accounts ??= {};
     this.comments = new JsonFile(this.path('comments.json'), () => ({ sections: {}, recent: {} }));
+    this.censorship = new JsonFile(this.path('censorship.json'), (): CensorshipData => ({ words: [], adjacent: [] }));
+    this.censorship.data.words ??= [];
+    this.censorship.data.adjacent ??= [];
     // Nothing is kept for a content page that has no comments: drop the empty sections
     // that earlier versions left behind when a page was merely read.
     for (const [key, section] of Object.entries(this.comments.data.sections)) {
@@ -834,6 +921,96 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   // -------------------------------------------------------------------------
 
   // -------------------------------------------------------------------------
+  // Censored words: the two sets the operator keeps (matched by the fold above). A
+  // comment carrying one is hidden exactly like an operator-hidden one — its header
+  // stays in the chain, its data never goes out — and a new post carrying one is
+  // refused outright so the commenter hears it right away; the read-time check then
+  // also covers comments written before a word joined the list.
+
+  private censoredSet(set: CensoredSet): string[] {
+    return set === 'words' ? this.censorship.data.words : this.censorship.data.adjacent;
+  }
+
+  /** Word sets are kept sorted (case-insensitively) so paging never skips an entry. */
+  private sortCensored(list: string[]): void {
+    list.sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0));
+  }
+
+  /**
+   * Whether a comment's text is kept back, and for which reason. Words close to a
+   * censored one count as it (leet-speak, padded letters, a typo, an inserted letter).
+   * Adjacent words are the second set, with deliberately simple semantics: their entries
+   * only count when one sits next to (within one word of) a censored word.
+   */
+  private censoredIn(text: string): 'censored' | 'adjacent' | null {
+    const { words, adjacent } = this.censorship.data;
+    if (!words.length && !adjacent.length) return null;
+    const tokens = censorTokens(text);
+    const hits = (token: string, list: string[]) => list.some((entry) => isCensoredVariant(token, entry));
+    if (tokens.some((token) => hits(token, words))) return 'censored';
+    for (let i = 0; i < tokens.length; i++) {
+      if (!hits(tokens[i], adjacent)) continue;
+      const neighbours = [tokens[i - 1], tokens[i + 1]].filter((token): token is string => Boolean(token));
+      if (neighbours.some((token) => hits(token, words))) return 'adjacent';
+    }
+    return null;
+  }
+
+  /** One page of a word set, by offset. */
+  private censoredPage(set: CensoredSet, cursor: string | undefined, limit: number): CensoredWordsPage {
+    const list = this.censoredSet(set);
+    const offset = offsetOf(cursor);
+    return {
+      set,
+      items: list.slice(offset, offset + limit),
+      cursor: offset + limit < list.length ? String(offset + limit) : undefined,
+      total: list.length,
+    };
+  }
+
+  /** Adds a word to a set. A word already there, in any casing, is a friendly no-op. */
+  private addCensoredWord(set: CensoredSet, raw: string): CensoredWordsChange {
+    const word = String(raw ?? '').trim().slice(0, 64);
+    if (!word) throw badRequest('A word is required');
+    const list = this.censoredSet(set);
+    if (list.some((entry) => entry.toLowerCase() === word.toLowerCase())) {
+      return { set, changed: false, total: list.length, note: `"${word}" is already on the list.` };
+    }
+    list.push(word);
+    this.sortCensored(list);
+    this.censorship.changed();
+    return { set, changed: true, total: list.length };
+  }
+
+  /** Renames one entry of a set, keeping the set free of repeats. */
+  private renameCensoredWord(set: CensoredSet, rawFrom: string, rawTo: string): CensoredWordsChange {
+    const from = String(rawFrom ?? '').trim();
+    const to = String(rawTo ?? '').trim().slice(0, 64);
+    if (!to) throw badRequest('A word is required');
+    const list = this.censoredSet(set);
+    const at = list.findIndex((entry) => entry.toLowerCase() === from.toLowerCase());
+    if (at < 0) return { set, changed: false, total: list.length, note: 'That word is not on the list.' };
+    if (list.some((entry, index) => index !== at && entry.toLowerCase() === to.toLowerCase())) {
+      return { set, changed: false, total: list.length, note: `"${to}" is already on the list.` };
+    }
+    list[at] = to;
+    this.sortCensored(list);
+    this.censorship.changed();
+    return { set, changed: true, total: list.length };
+  }
+
+  /** Drops one entry of a set. */
+  private deleteCensoredWord(set: CensoredSet, rawWord: string): CensoredWordsChange {
+    const word = String(rawWord ?? '').trim();
+    const list = this.censoredSet(set);
+    const at = list.findIndex((entry) => entry.toLowerCase() === word.toLowerCase());
+    if (at < 0) return { set, changed: false, total: list.length };
+    list.splice(at, 1);
+    this.censorship.changed();
+    return { set, changed: true, total: list.length };
+  }
+
+  // -------------------------------------------------------------------------
   // Comments: one hash-chained log per content page. Every comment is a block whose
   // header hashes the previous header (when there is one) and the hash of the comment
   // data. The node makes up the ids and writes the times down as precisely as each
@@ -894,7 +1071,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const hidden = new Set(section.hidden);
     return section.blocks.map((block, index) => {
       const comment = data[index];
-      const kept = Boolean(comment && hidden.has(comment.id));
+      // Operator-hidden and censored comments are both kept back: the header stays in
+      // the chain, the data never goes out.
+      const kept = Boolean(comment && (hidden.has(comment.id) || this.censoredIn(comment.text)));
       const sending = Boolean(section.shown && comment && !kept && (!load || load.has(comment.id)));
       return sending
         ? { ...block, data: comment as CommentData }
@@ -918,7 +1097,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const hidden = new Set(section.hidden);
     const votes = this.commentVotes(section, undefined);
     const latest = new Map<string, CommentData>();
-    for (const comment of data) if (comment && !hidden.has(comment.id)) latest.set(comment.id, comment);
+    for (const comment of data) if (comment && !hidden.has(comment.id) && !this.censoredIn(comment.text)) latest.set(comment.id, comment);
     const score = (id: string) => {
       const vote = votes[id] ?? { likes: 0, dislikes: 0 };
       return { likes: vote.likes, dislikes: vote.dislikes, at: Date.parse(latest.get(id)!.time) || 0 };
@@ -974,6 +1153,9 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     const maxLength = this.config.comments.maxLength;
     if (!text.trim()) throw badRequest('A comment needs text');
     if (text.length > maxLength) throw badRequest(`A comment is at most ${maxLength} characters`);
+    // The censored words are checked as the comment lands (posts and edits alike), and
+    // again every time comments are read — so a word added later hides older comments too.
+    if (this.censoredIn(text)) throw badRequest('This comment carries a word this node does not allow');
     const { key: root, section } = this.commentSection(contentId);
     const data = await this.commentDataOf(section);
     this.noteCommentBlock(account.id);
@@ -2713,7 +2895,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   private commentSyncBlocks(section: CommentSection, data: (CommentData | null)[]): CommentBlock[] {
     return section.blocks.map((block, index) => {
       const comment = data[index];
-      const keep = Boolean(section.shown && comment?.key && comment.sig && !section.hidden.includes(comment.id));
+      // Censored comment data travels no further than hidden data does.
+      const keep = Boolean(section.shown && comment?.key && comment.sig && !section.hidden.includes(comment.id) && !this.censoredIn(comment.text));
       return keep ? { ...block, data: comment as CommentData } : { prev: block.prev, dataHash: block.dataHash, hash: block.hash, id: block.id };
     });
   }
@@ -3621,6 +3804,28 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       });
       return this.adminComments(ctx.params.id);
     });
+
+    // The censored words of this node, edited from the comments page: two sets, listed
+    // one page at a time, and kept free of repeats (adding one already there is a no-op).
+    router.get('/v1/admin/censored/:set', (ctx) => {
+      admin(ctx);
+      return this.censoredPage(censoredSetOf(ctx.params.set), ctx.query.get('cursor') ?? undefined, this.listLimit(ctx.query.get('limit')));
+    });
+    router.post('/v1/admin/censored/:set', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ word?: string }>(ctx.req);
+      return this.addCensoredWord(censoredSetOf(ctx.params.set), String(body.word ?? ''));
+    });
+    router.put('/v1/admin/censored/:set', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ from?: string; to?: string }>(ctx.req);
+      return this.renameCensoredWord(censoredSetOf(ctx.params.set), String(body.from ?? ''), String(body.to ?? ''));
+    });
+    router.delete('/v1/admin/censored/:set/:word', (ctx) => {
+      admin(ctx);
+      return this.deleteCensoredWord(censoredSetOf(ctx.params.set), decodeURIComponent(ctx.params.word));
+    });
+
     router.get('/v1/admin/creators', (ctx) => {
       admin(ctx);
       const q = (ctx.query.get('q') ?? '').trim().slice(0, 100);
@@ -4229,6 +4434,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     super.flush();
     this.registry.flush();
     this.contributions.flush();
+    this.censorship.flush();
     this.crawler.flush();
   }
 }

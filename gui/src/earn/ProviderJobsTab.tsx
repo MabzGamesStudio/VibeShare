@@ -28,14 +28,24 @@ function FieldInput({ field, value, onChange }: { field: HostingField; value: st
     <label className="field" style={{ marginBottom: 0 }}>
       {field.label}
       <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-        <input
-          type={field.secret && !shown ? 'password' : 'text'}
-          value={value}
-          placeholder={field.placeholder}
-          autoComplete={field.secret ? 'off' : undefined}
-          style={{ flex: 1 }}
-          onChange={(event) => onChange(event.target.value)}
-        />
+        {field.options ? (
+          <select style={{ flex: 1 }} value={value} onChange={(event) => onChange(event.target.value)}>
+            {field.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type={field.secret && !shown ? 'password' : 'text'}
+            value={value}
+            placeholder={field.placeholder}
+            autoComplete={field.secret ? 'off' : undefined}
+            style={{ flex: 1 }}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        )}
         {field.secret && (
           <button
             type="button"
@@ -180,8 +190,10 @@ export function ProviderJobsTab() {
     typed && !parseHostUrl(platform, typed, values)
       ? `This address does not match ${platform.name}’s expected shape (${platform.describeUrlShape ?? 'https://<host>/<folder>/'}) — the fields above are left unchanged.`
       : null;
-  /** A field edit always wins back the URL: from here on it is rebuilt from the fields. */
-  const setField = (id: string, value: string) => update({ values: { ...values, [id]: value }, baseUrl: '' });
+  /** A field edit always wins back the URL: from here on it is rebuilt from the fields.
+   * Picking the URL type by hand is a choice auto-detection must never overwrite. */
+  const setField = (id: string, value: string) =>
+    update({ values: { ...values, [id]: value, ...(id === 'urlType' ? { urlTypeManual: '1' } : {}) }, baseUrl: '' });
   // The steps behind tabs 2–4: where the access details come from, how this platform
   // serves <base>/<cid>, and what saving and offering it does.
   const guide = platformGuide(platform.id);
@@ -250,9 +262,20 @@ export function ProviderJobsTab() {
     setResult(null);
     try {
       const cids = [draft.cid, ...jobItems.map((item) => item.cid)];
+      // The site check also looks under the platform's other address shapes (GitLab's
+      // project site and unique domain): whichever answers 200 is this site's shape.
+      const candidates = platform.siteUrlCandidates?.(values) ?? [];
+      const detected: Record<string, string>[] = [];
       const answer =
         kind === 'site'
-          ? await checkIndex(siteUrl, platform.siteUrlCandidates?.(values) ?? [])
+          ? await checkIndex(
+              siteUrl,
+              candidates.map((entry) => entry.url),
+              (root) => {
+                const hit = candidates.find((entry) => baseKey(entry.url) === baseKey(root));
+                if (hit) detected.push(hit.values);
+              }
+            )
           : kind === 'access'
             ? await checkAccess(platform.id, values)
             : kind === 'filled'
@@ -261,6 +284,9 @@ export function ProviderJobsTab() {
                 ? await checkCids(baseUrl, cids)
                 : await checkSite(baseUrl);
       setResult(answer);
+      // The shape the check found becomes the selected one, kept in the draft — unless
+      // the reader picked one by hand: a manual choice wins over auto-detection.
+      if (detected.length && !values.urlTypeManual) update({ values: { ...values, ...detected[0] } });
     } catch (error) {
       // A check always answers: a thrown error becomes a visible failure, never silence.
       setResult({ ok: false, message: `The check itself failed to run: ${errorMessage(error)}` });

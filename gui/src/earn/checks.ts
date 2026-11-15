@@ -81,9 +81,10 @@ export async function checkCids(baseUrl: string, cids: string[]): Promise<CheckR
  * The site answers with an index.html: the page the setup uploads is being served. Only
  * the address is used — no account, no access token: step 1 is about the site existing.
  * `alternates` holds the platform's other valid addresses for the same site (GitLab
- * serves one project under its classic and its unique domain); any one of them counts.
+ * serves one project under its project-site and its unique-domain shape); any one of
+ * them counts, and `onMatched` names the one that answered so the caller can keep it.
  */
-export async function checkIndex(baseUrl: string, alternates: string[] = []): Promise<CheckResult> {
+export async function checkIndex(baseUrl: string, alternates: string[] = [], onMatched?: (root: string) => void): Promise<CheckResult> {
   const roots = [...new Set([baseUrl, ...alternates].map((url) => url.trim().replace(/\/+$/, '/')).filter((url) => /^https?:\/\//.test(url)))];
   if (!roots.length) return { ok: false, message: 'There is no site address yet — fill in the fields first.' };
   const lines: string[] = [];
@@ -94,6 +95,7 @@ export async function checkIndex(baseUrl: string, alternates: string[] = []): Pr
     if (answer.error) {
       lines.push(`${url} could not be reached (${answer.error})`);
     } else if (answer.status === 200) {
+      onMatched?.(root);
       return { ok: true, message: `✓ index.html is at the hosted URL — ${url} answered 200${answer.bytes ? ` (${answer.bytes} bytes)` : ''} in ${answer.ms ?? 0} ms.` };
     } else {
       lines.push(`${url} answered ${answer.status || 'nothing'}`);
@@ -259,12 +261,13 @@ export async function checkAccess(platformId: string, values: Record<string, str
 /**
  * The panel-3 check: everything the base URL and the content path are built from is
  * filled in — project name, path, base URL, content id. Secret fields (the platform
- * access token) are never asked for here: the token is step 2's business and the URL
- * checks need none. When the content id is the only thing missing, the answer points at
- * the default article's id below.
+ * access token) and optional ones (only needed for one variant of the address) are never
+ * asked for here: the token is step 2's business and the URL checks need none. When the
+ * content id is the only thing missing, the answer points at the default article's id
+ * below.
  */
 export function checkFilled(fields: HostingField[], values: Record<string, string>, baseUrl: string, cid: string): CheckResult {
-  const missing = fields.filter((field) => !field.secret && !(values[field.id] ?? '').trim()).map((field) => field.label);
+  const missing = fields.filter((field) => !field.secret && !field.optional && !(values[field.id] ?? '').trim()).map((field) => field.label);
   if (!baseUrl.trim()) missing.push('Base URL');
   const noCid = !cid.trim();
   if (noCid) missing.push('Content id');

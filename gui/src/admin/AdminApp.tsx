@@ -6,6 +6,7 @@ import { CryptoSafetyNotice } from '../components/CryptoSafetyNotice';
 import { postToast, ToastArea } from './toasts';
 import { formatBytes, timeAgo } from '../util';
 import { admin, loadToken, message, setToken } from './api';
+import { PageSize, Pager, useConsoleList } from './paging';
 import { AlgorithmTabs } from './AlgorithmTabs';
 import { ProviderTabs } from './ProviderTabs';
 import { TracingTab } from './TracingTab';
@@ -182,6 +183,8 @@ function Accounts() {
   const [adjusting, setAdjusting] = useState<AccountRow | null>(null);
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
+  const [page, setPage] = useState(0);
+  const { prefs, save: savePaging } = useConsoleList('accounts');
   const [toast, show] = useToast();
   const load = useCallback(() => {
     admin<{ accounts: AccountRow[] }>(`/v1/admin/accounts?q=${encodeURIComponent(q)}`)
@@ -190,10 +193,29 @@ function Accounts() {
   }, [q, show]);
   useEffect(load, [load]);
 
+  // The whole filtered list comes in at once; it is shown one page at a time.
+  const perPage = prefs.perPage;
+  const pages = Math.max(1, Math.ceil((rows?.length ?? 0) / perPage));
+  const current = Math.min(page, pages - 1);
+  const pager = rows && rows.length > 0 && <Pager page={current} perPage={perPage} total={rows.length} loading={false} go={setPage} />;
+
   return (
     <div className="form-stack">
-      <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search accounts by id or note" />
+      <div className="row">
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(0);
+          }}
+          placeholder="Search accounts by id or note"
+          style={{ flex: 1 }}
+        />
+        <PageSize prefs={prefs} save={savePaging} />
+      </div>
       {toast && <div className="banner info small">{toast}</div>}
+      {pager}
       {!rows ? (
         <Loading />
       ) : (
@@ -211,7 +233,7 @@ function Accounts() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {rows.slice(current * perPage, (current + 1) * perPage).map((row) => (
                 <tr key={row.id}>
                   <td className="mono tiny" title={row.id}>
                     {row.id.slice(0, 22)}…{row.note && <div className="faint">{row.note}</div>}
@@ -264,6 +286,7 @@ function Accounts() {
           </table>
         </div>
       )}
+      {pager}
       {adjusting && (
         <Modal
           title="Adjust credits"
@@ -773,6 +796,8 @@ function Payments() {
   const [vouchers, setVouchers] = useState<{ total: number; redeemed: number } | null>(null);
   const [status, setStatus] = useState('pending-review');
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
+  const [page, setPage] = useState(0);
+  const { prefs, save: savePaging } = useConsoleList('invoices');
   const [toast, show] = useToast();
 
   const load = useCallback(() => {
@@ -782,6 +807,12 @@ function Payments() {
       .catch((e) => show(message(e)));
   }, [status, show]);
   useEffect(load, [load]);
+
+  // The invoices for the chosen status come in whole; they are shown one page at a time.
+  const perPage = prefs.perPage;
+  const pages = Math.max(1, Math.ceil(invoices.length / perPage));
+  const current = Math.min(page, pages - 1);
+  const pager = invoices.length > 0 && <Pager page={current} perPage={perPage} total={invoices.length} loading={false} go={setPage} />;
 
   return (
     <div className="form-stack">
@@ -827,20 +858,31 @@ function Payments() {
       <div className="card form-stack">
         <div className="row between">
           <h3>Invoices</h3>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 'auto' }}>
-            <option value="pending-review">Waiting for approval</option>
-            <option value="open">Open</option>
-            <option value="paid">Paid</option>
-            <option value="expired">Expired</option>
-            <option value="rejected">Rejected</option>
-          </select>
+          <div className="row">
+            <select
+              value={status}
+              onChange={(e) => {
+                setStatus(e.target.value);
+                setPage(0);
+              }}
+              style={{ width: 'auto' }}
+            >
+              <option value="pending-review">Waiting for approval</option>
+              <option value="open">Open</option>
+              <option value="paid">Paid</option>
+              <option value="expired">Expired</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <PageSize prefs={prefs} save={savePaging} />
+          </div>
         </div>
+        {pager}
         {invoices.length === 0 ? (
           <p className="small muted">None.</p>
         ) : (
           <table className="table">
             <tbody>
-              {invoices.map((invoice) => (
+              {invoices.slice(current * perPage, (current + 1) * perPage).map((invoice) => (
                 <tr key={invoice.id}>
                   <td className="small">
                     <strong>{invoice.credits}</strong> credits via {invoice.method}
@@ -878,6 +920,7 @@ function Payments() {
             </tbody>
           </table>
         )}
+        {pager}
       </div>
     </div>
   );
@@ -1543,8 +1586,6 @@ const PROVIDER_GROUPS: FieldGroup[] = [
     label: 'Storage service',
     fields: [
       { path: 'storageService.enabled', label: 'Storage service for clients', type: 'bool' },
-      { path: 'storageService.challengeIntervalSeconds', label: 'Seconds between challenges', type: 'number' },
-      { path: 'storageService.minPassRatio', label: 'Passing answers needed (0–1)', type: 'number' },
       { path: 'storageService.offlineGraceSeconds', label: 'Seconds before a holder counts offline', type: 'number' },
       { path: 'storageService.taskTimeoutSeconds', label: 'Seconds until a storage task expires', type: 'number' },
       { path: 'storageService.auto.enabled', label: 'Storage job for every upload', type: 'bool' },
@@ -1553,7 +1594,6 @@ const PROVIDER_GROUPS: FieldGroup[] = [
       { path: 'storageService.auto.requireIdentity', label: 'Only key accounts may hold data', type: 'bool' },
       { path: 'storageService.auto.rewards.upfront', label: 'Credits when hired', type: 'number' },
       { path: 'storageService.auto.rewards.perRetrieval', label: 'Credits per retrieval', type: 'number' },
-      { path: 'storageService.auto.rewards.perChallenge', label: 'Credits per passed challenge', type: 'number' },
       { path: 'storageService.auto.rewards.completion', label: 'Credits at the end of the term', type: 'number' },
     ],
   },

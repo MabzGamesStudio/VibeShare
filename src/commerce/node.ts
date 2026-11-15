@@ -494,11 +494,21 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
       trustProxy: this.config.trustProxy,
       name: this.type,
       // Local tracing: one timeline per API request (dependency + error events), only
-      // recorded when the operator has tracing on.
+      // recorded when the operator has tracing on. Each line carries the request's
+      // method, URL and response time — what the call actually was.
       trace: {
         request: (label) => this.traces.recorder.start({ kind: 'api', label }),
-        done: (traceId) => this.traces.trace('dependency', 'api', 'request ok', { traceId }),
-        failed: (traceId, error) => this.traces.trace('error', 'api', 'request failed', { traceId, error: (error as Error).message }),
+        done: (traceId, info) =>
+          this.traces.trace('dependency', 'api', 'request ok', {
+            traceId,
+            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+          }),
+        failed: (traceId, info, error) =>
+          this.traces.trace('error', 'api', 'request failed', {
+            traceId,
+            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            error: (error as Error).message,
+          }),
       },
       // Bans, suspensions and rate limits apply to every request before routing — the
       // admin itself is never locked out (it is how bans get lifted again).

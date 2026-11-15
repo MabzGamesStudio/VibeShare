@@ -1,5 +1,4 @@
-import { randomBytes } from 'node:crypto';
-import { randomId, sha256hex } from '../shared/crypto.js';
+import { randomId } from '../shared/crypto.js';
 import { chunkIdOf } from '../shared/content.js';
 import { badRequest, forbidden, HttpError, notFound } from '../shared/http.js';
 import { log } from '../shared/log.js';
@@ -15,13 +14,9 @@ import type { Account, Ledger } from '../commerce/ledger.js';
 
 export interface StorageServiceConfig {
   enabled: boolean;
-  /** Seconds between proof-of-storage challenges per assignment. */
-  challengeIntervalSeconds: number;
   /** Seconds between automatic test retrievals per assignment (0 = only on demand). */
   retrievalIntervalSeconds: number;
-  /** Share of challenges an assignment must pass to earn the completion reward. */
-  minPassRatio: number;
-  /** A client that has not polled for this long counts as offline (its challenges fail). */
+  /** A client that has not polled for this long counts as offline (its retrievals fail). */
   offlineGraceSeconds: number;
   /** Seconds a client gets to answer a task. */
   taskTimeoutSeconds: number;
@@ -31,8 +26,7 @@ export interface StorageServiceConfig {
     replicas: number;
     durationDays: number;
     rewards: StorageRewards;
-    /** Challenge and retrieval schedule of the jobs this node opens by itself. */
-    challengeIntervalSeconds: number;
+    /** Retrieval schedule of the jobs this node opens by itself. */
     retrievalIntervalSeconds: number;
     requireIdentity: boolean;
   };
@@ -54,8 +48,6 @@ export interface StorageJob {
   status: 'open' | 'closed' | 'failed';
   /** True for the tier-driven job the node opens and resizes by itself. */
   managed?: boolean;
-  /** Seconds between proof-of-storage challenges (defaults to the service setting). */
-  challengeIntervalSeconds?: number;
   /** How often the job's endpoints are tested automatically (0 or undefined = only on demand). */
   retrievalIntervalSeconds?: number;
   /** Endpoints slower than this many milliseconds count as failed checks. */
@@ -64,14 +56,13 @@ export interface StorageJob {
   failedRequestsBeforeFailure?: number;
   /** When the last automatic endpoint test ran (schedule: job.retrievalIntervalSeconds). */
   lastEndpointTestAt?: number;
+  /** How often the job was reopened for another client after a holder was removed. */
+  reopened: number;
 }
 
 interface Assignment extends StorageAssignment {
   accountId: string;
   upfrontPaid: boolean;
-  lastChallengeAt?: number;
-  /** When the last automatic test retrieval went out (schedule: job.retrievalIntervalSeconds). */
-  lastRetrievalAt?: number;
 }
 
 interface ServiceData {
@@ -82,20 +73,27 @@ interface ServiceData {
 interface PendingTask extends StorageTask {
   accountId: string;
   delivered: boolean;
-  expected?: string;
   /** For retrievals the provider is waiting on. */
   waiters: ((data: Buffer | null) => void)[];
 }
 
 const LIVE: Assignment['status'][] = ['downloading', 'active'];
 
+/** The three reward fields, picked over the defaults — never any stale extras. */
+function rewardsOf(partial: Partial<StorageRewards> | undefined, base: StorageRewards): StorageRewards {
+  return {
+    upfront: partial?.upfront ?? base.upfront,
+    perRetrieval: partial?.perRetrieval ?? base.perRetrieval,
+    completion: partial?.completion ?? base.completion,
+  };
+}
+
 /**
  * Client nodes can earn credits by storing data for this provider. The provider
  * publishes jobs (what to store, for how long, for which rewards); clients accept
  * them, download the chunks, and keep a long-poll open through which the provider
- * sends tasks: retrieve a chunk (paid per retrieval) or prove it is still stored
- * (paid per challenge). The long poll goes out from the client, so it works
- * behind NAT and firewalls.
+ * sends tasks: retrieve a chunk (paid per retrieval). The long poll goes out from
+ * the client, so it works behind NAT and firewalls.
  */
 export class StorageService {
   private store: JsonFile<ServiceData>;
@@ -144,7 +142,6 @@ export class StorageService {
     requireIdentity?: boolean;
     openUntil?: string;
     managed?: boolean;
-    challengeIntervalSeconds?: number;
     retrievalIntervalSeconds?: number;
     maxLatencyMs?: number;
     failedRequestsBeforeFailure?: number;
@@ -163,16 +160,16 @@ export class StorageService {
       bytes: [...unique.values()].reduce((sum, size) => sum + size, 0),
       replicas: Math.max(1, Math.floor(input.replicas ?? 2)),
       durationSeconds: Math.max(60, Math.floor(input.durationSeconds ?? 30 * 86400)),
-      rewards: { upfront: 0, perRetrieval: 1, perChallenge: 1, completion: 10, ...input.rewards },
+      rewards: rewardsOf(input.rewards, { upfront: 0, perRetrieval: 1, completion: 10 }),
       requireIdentity: input.requireIdentity ?? false,
       createdAt: new Date().toISOString(),
       openUntil: input.openUntil,
       status: 'open',
       managed: input.managed,
-      challengeIntervalSeconds: input.challengeIntervalSeconds,
       retrievalIntervalSeconds: input.retrievalIntervalSeconds,
       maxLatencyMs: input.maxLatencyMs,
       failedRequestsBeforeFailure: input.failedRequestsBeforeFailure,
+      reopened: 0,
     };
     this.data.jobs[job.id] = job;
     this.store.changed();
@@ -182,12 +179,11 @@ export class StorageService {
     return job;
   }
 
-  /** Updates one job's rewards and its challenge / endpoint-test schedule. */
+  /** Updates one job's rewards and its retrieval / endpoint-test schedule. */
   updateJob(
     id: string,
     patch: {
       rewards?: Partial<StorageRewards>;
-      challengeIntervalSeconds?: number;
       retrievalIntervalSeconds?: number;
       maxLatencyMs?: number;
       failedRequestsBeforeFailure?: number;
@@ -195,8 +191,7 @@ export class StorageService {
   ): void {
     const job = this.data.jobs[id];
     if (!job) throw notFound('No such job');
-    if (patch.rewards) job.rewards = { ...job.rewards, ...patch.rewards };
-    if (patch.challengeIntervalSeconds !== undefined) job.challengeIntervalSeconds = Math.max(30, Math.round(patch.challengeIntervalSeconds));
+    if (patch.rewards) job.rewards = rewardsOf(patch.rewards, job.rewards);
     if (patch.retrievalIntervalSeconds !== undefined) job.retrievalIntervalSeconds = Math.max(0, Math.round(patch.retrievalIntervalSeconds));
     if (patch.maxLatencyMs !== undefined) job.maxLatencyMs = Math.max(50, Math.round(patch.maxLatencyMs));
     if (patch.failedRequestsBeforeFailure !== undefined) job.failedRequestsBeforeFailure = Math.max(1, Math.round(patch.failedRequestsBeforeFailure));
@@ -244,6 +239,8 @@ export class StorageService {
     return Object.values(this.data.jobs)
       .map((job) => ({
         ...job,
+        // Jobs saved before reopenings existed still report zero.
+        reopened: job.reopened ?? 0,
         holders: this.liveAssignments(job.id).filter((a) => a.status === 'active').length,
         assignments: Object.values(this.data.assignments).filter((a) => a.jobId === job.id).length,
       }))
@@ -293,7 +290,16 @@ export class StorageService {
       }));
   }
 
-  accept(account: Account, jobId: string): StorageAssignment {
+  /**
+   * Takes one slot of one job. The upfront reward is earned by being live right away:
+   * the endpoint the account submitted must serve the content at this moment —
+   * otherwise it is paid the first time an endpoint check passes, or never.
+   */
+  async accept(
+    account: Account,
+    jobId: string,
+    checkEndpoint?: (accountId: string, job: StorageJob) => Promise<boolean>
+  ): Promise<StorageAssignment> {
     if (!this.config().enabled) throw forbidden('The storage service is turned off');
     const job = this.data.jobs[jobId];
     if (!job || !this.isOpen(job)) throw notFound('No such open job');
@@ -317,7 +323,6 @@ export class StorageService {
       status: 'downloading',
       acceptedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + job.durationSeconds * 1000).toISOString(),
-      challenges: { passed: 0, failed: 0 },
       retrievals: 0,
       earned: 0,
       upfrontPaid: false,
@@ -327,7 +332,33 @@ export class StorageService {
     this.traces?.trace('basic', 'provider.service', 'assignment accepted', {
       data: { assignment: assignment.id, job: job.id, account: account.id.slice(0, 16), bytes: job.bytes },
     });
+    if (await checkEndpoint?.(account.id, job)) this.payUpfront(assignment);
     return this.view(assignment);
+  }
+
+  /**
+   * Pays the one-time upfront reward — only for a holder whose submitted endpoint is
+   * (or has become) live, and only ever once per assignment.
+   */
+  private payUpfront(assignment: Assignment): void {
+    if (assignment.upfrontPaid || !LIVE.includes(assignment.status)) return;
+    assignment.upfrontPaid = true;
+    const reward = this.data.jobs[assignment.jobId]?.rewards.upfront ?? 0;
+    if (reward > 0) {
+      assignment.earned += reward;
+      this.ledger.credit(assignment.accountId, reward, 'storage upfront', assignment.id);
+      this.traces?.trace('basic', 'provider.service', 'reward paid', {
+        data: { account: assignment.accountId.slice(0, 16), type: 'upfront', credits: reward, assignment: assignment.id },
+      });
+    }
+    this.store.changed();
+  }
+
+  /** An endpoint of this holder passed a check: the upfront reward is due if not paid. */
+  endpointLive(assignmentId: string): void {
+    const assignment = this.data.assignments[assignmentId];
+    if (!assignment || assignment.upfrontPaid) return;
+    this.payUpfront(assignment);
   }
 
   private own(account: Account, id: string): Assignment {
@@ -351,8 +382,6 @@ export class StorageService {
     assignment.status = 'active';
     this.store.changed();
     this.traces?.trace('basic', 'provider.service', 'assignment active', { data: { assignment: assignment.id, job: assignment.jobId } });
-    // The first challenge comes right away; the upfront reward is paid once it passes.
-    void this.challenge(assignment);
     return this.view(assignment);
   }
 
@@ -375,7 +404,7 @@ export class StorageService {
   }
 
   private view(assignment: Assignment): StorageAssignment {
-    const { accountId: _account, upfrontPaid: _paid, lastChallengeAt: _last, ...rest } = assignment;
+    const { accountId: _account, upfrontPaid: _paid, ...rest } = assignment;
     const job = this.data.jobs[assignment.jobId];
     return { ...rest, cid: job?.cid, title: job?.title };
   }
@@ -388,7 +417,7 @@ export class StorageService {
       for (const task of this.tasks.values()) {
         if (task.accountId !== account.id || task.delivered) continue;
         task.delivered = true;
-        out.push({ id: task.id, type: task.type, assignmentId: task.assignmentId, chunkId: task.chunkId, nonce: task.nonce, deadline: task.deadline });
+        out.push({ id: task.id, type: task.type, assignmentId: task.assignmentId, chunkId: task.chunkId, deadline: task.deadline });
       }
       return out;
     };
@@ -432,7 +461,7 @@ export class StorageService {
     return full;
   }
 
-  /** The client answers a task: chunk bytes for a retrieval, or a proof for a challenge. */
+  /** The client answers a task: the bytes of a retrieval, hashed against the chunk id. */
   async answer(account: Account, taskId: string, body: Buffer): Promise<{ credited: number }> {
     const task = this.tasks.get(taskId);
     if (!task || task.accountId !== account.id) throw notFound('No such task (it may have timed out)');
@@ -440,29 +469,12 @@ export class StorageService {
     this.tasks.delete(taskId);
     if (!assignment) return { credited: 0 };
     const job = this.data.jobs[assignment.jobId];
+    const ok = chunkIdOf(body) === task.chunkId;
+    for (const waiter of task.waiters) waiter(ok ? body : null);
     let credited = 0;
-    let ok: boolean;
-    if (task.type === 'retrieve' || !task.expected) {
-      ok = chunkIdOf(body) === task.chunkId;
-      for (const waiter of task.waiters) waiter(ok ? body : null);
-      if (ok && task.type === 'retrieve') {
-        assignment.retrievals++;
-        credited += job?.rewards.perRetrieval ?? 0;
-      }
-    } else {
-      ok = body.toString('utf8').trim() === task.expected;
-    }
-    if (task.type === 'challenge') {
-      if (ok) {
-        assignment.challenges.passed++;
-        credited += job?.rewards.perChallenge ?? 0;
-        if (!assignment.upfrontPaid) {
-          assignment.upfrontPaid = true;
-          credited += job?.rewards.upfront ?? 0;
-        }
-      } else {
-        assignment.challenges.failed++;
-      }
+    if (ok) {
+      assignment.retrievals++;
+      credited += job?.rewards.perRetrieval ?? 0;
     }
     if (credited > 0) {
       assignment.earned += credited;
@@ -473,22 +485,33 @@ export class StorageService {
     }
     this.store.changed();
     if (!ok) {
-      // Wrong bytes or a wrong proof means the holder does not really have the data:
-      // out of the job right away, and the node pulls the data from their URLs instead.
+      // Wrong bytes mean the holder does not really have the data: out of the job right
+      // away, and the node pulls the data from their URLs instead.
       this.eliminate(assignment);
-      throw badRequest(task.type === 'retrieve' ? 'The bytes do not match the chunk' : 'Wrong proof');
+      throw badRequest('The bytes do not match the chunk');
     }
     return { credited };
   }
 
-  /** A holder that fails to hand back a chunk is out of the job: the node pulls the job's
-   *  data from the URLs that account offered instead and looks for other holders. */
+  /**
+   * A holder that fails is deleted from the job: the row stays for display (status
+   * 'removed'), the slot frees and the job reopens for another client — however often
+   * that happens. The node pulls the job's data from the URLs that account offered
+   * instead and looks for other holders.
+   */
   private eliminate(assignment: Assignment): void {
     if (!LIVE.includes(assignment.status)) return;
-    assignment.status = 'failed';
+    assignment.status = 'removed';
     this.store.changed();
+    // The job was not accepting anyone (full or closed) and now it is again: that is a
+    // reopen, and the count is what the dashboard shows for it.
+    const job = this.data.jobs[assignment.jobId];
+    if (job && job.status !== 'failed') {
+      if (job.status === 'closed') job.status = 'open';
+      job.reopened = (job.reopened ?? 0) + 1;
+    }
     // A tolerated failure: the holder is out, but the job lives on (URLs and other holders).
-    this.traces?.trace('error', 'provider.service', 'holder out', {
+    this.traces?.trace('error', 'provider.service', 'holder removed', {
       message: 'a holder no longer counts for this job',
       data: { assignment: assignment.id, job: assignment.jobId, account: assignment.accountId.slice(0, 16) },
     });
@@ -496,39 +519,13 @@ export class StorageService {
   }
 
   /**
-   * Marks one holder red failed and out of the job — used when every endpoint of that
-   * user failed its checks. The job itself fails when no holder is left.
+   * Marks one holder out of the job — used when every endpoint of that user failed its
+   * checks. The slot frees and the job reopens for another client.
    */
   failHolder(assignmentId: string): void {
     const assignment = this.data.assignments[assignmentId];
     if (!assignment) throw notFound('No such assignment');
     this.eliminate(assignment);
-    const job = this.data.jobs[assignment.jobId];
-    const remaining = job
-      ? Object.values(this.data.assignments).some((entry) => entry.jobId === job.id && LIVE.includes(entry.status))
-      : true;
-    if (job && !remaining) this.failJob(job.id);
-  }
-
-  private async challenge(assignment: Assignment): Promise<void> {
-    const chunkId = assignment.chunkIds[Math.floor(Math.random() * assignment.chunkIds.length)];
-    assignment.lastChallengeAt = Date.now();
-    const nonce = randomBytes(16).toString('hex');
-    // Never from client storage: that would ask the holders to answer their own challenge.
-    const own = await this.readChunk(chunkId, { peers: false }).catch((error) => {
-      // Tolerated: without its own copy the challenge simply asks for the chunk itself.
-      this.traces?.trace('error', 'provider.service', 'challenge read failed', {
-        error: (error as Error).message,
-        data: { chunk: chunkId.slice(0, 12) },
-      });
-      return null;
-    });
-    // With its own copy the provider asks for a proof; without one it asks for the chunk itself.
-    const expected = own ? sha256hex(Buffer.concat([Buffer.from(nonce), own])) : undefined;
-    this.addTask({ type: 'challenge', assignmentId: assignment.id, accountId: assignment.accountId, chunkId, nonce: expected ? nonce : undefined, expected });
-    this.traces?.trace('basic', 'provider.service', 'challenge scheduled', {
-      data: { assignment: assignment.id, account: assignment.accountId.slice(0, 16), chunk: chunkId.slice(0, 12), proof: Boolean(expected) },
-    });
   }
 
   /**
@@ -574,7 +571,6 @@ export class StorageService {
   }
 
   private async tick(): Promise<void> {
-    const config = this.config();
     const now = Date.now();
     for (const [id, task] of this.tasks) {
       if (Date.parse(task.deadline) > now) continue;
@@ -585,16 +581,9 @@ export class StorageService {
         message: `no answer to the ${task.type} in time`,
         data: { task: id, type: task.type, assignment: task.assignmentId, account: task.accountId.slice(0, 16) },
       });
-      if (task.type === 'challenge') {
-        const assignment = this.data.assignments[task.assignmentId];
-        if (assignment) assignment.challenges.failed++;
-        this.store.changed();
-      }
-      if (task.type === 'retrieve') {
-        // A retrieval nobody answered: that holder's copy does not count any more.
-        const assignment = this.data.assignments[task.assignmentId];
-        if (assignment) this.eliminate(assignment);
-      }
+      // A retrieval nobody answered: that holder's copy does not count any more.
+      const assignment = this.data.assignments[task.assignmentId];
+      if (assignment) this.eliminate(assignment);
     }
     for (const assignment of Object.values(this.data.assignments)) {
       if (!LIVE.includes(assignment.status)) continue;
@@ -609,37 +598,14 @@ export class StorageService {
         this.store.changed();
         continue;
       }
-      if (assignment.status !== 'active') continue;
-      const job = this.data.jobs[assignment.jobId];
-      // Data is never pulled back through the client's long poll: verifying that the
-      // bytes are really stored happens at the users' endpoints (see
-      // NodeService.testStorageJob). Only proof challenges still travel over the
-      // holder's own poll, on the job's challenge schedule.
-      const challengeEvery = (job?.challengeIntervalSeconds ?? config.challengeIntervalSeconds) * 1000;
-      const due = (assignment.lastChallengeAt ?? 0) + challengeEvery <= now;
-      if (!due) continue;
-      const outstanding = [...this.tasks.values()].some((task) => task.assignmentId === assignment.id && task.type === 'challenge');
-      if (outstanding) continue;
-      if (this.isOnline(assignment.accountId)) await this.challenge(assignment);
-      else {
-        // Offline holders are tolerated: the missed challenge counts against the pass
-        // ratio, the job and its other holders carry on.
-        assignment.lastChallengeAt = now;
-        assignment.challenges.failed++;
-        this.store.changed();
-        this.traces?.trace('error', 'provider.service', 'challenge failed', {
-          message: 'holder offline',
-          data: { assignment: assignment.id, account: assignment.accountId.slice(0, 16) },
-        });
-      }
     }
   }
 
   private finish(assignment: Assignment): void {
     const job = this.data.jobs[assignment.jobId];
-    const { passed, failed } = assignment.challenges;
-    const ratio = passed + failed === 0 ? 0 : passed / (passed + failed);
-    if (assignment.status === 'active' && ratio >= this.config().minPassRatio) {
+    // Still holding the data when the term ends: the completion reward is due. (A holder
+    // that failed along the way was already removed from the job.)
+    if (assignment.status === 'active') {
       assignment.status = 'completed';
       const reward = job?.rewards.completion ?? 0;
       if (reward > 0) {
@@ -654,7 +620,7 @@ export class StorageService {
     }
     this.store.changed();
     this.traces?.trace('basic', 'provider.service', 'assignment finished', {
-      data: { assignment: assignment.id, job: assignment.jobId, status: assignment.status, passed, failed },
+      data: { assignment: assignment.id, job: assignment.jobId, status: assignment.status, retrievals: assignment.retrievals },
     });
   }
 

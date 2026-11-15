@@ -312,7 +312,7 @@ export interface Settings {
   revision?: number;
   /** The pages of the client, in the order of the left panel. "home" is the start page. */
   pages: PageConfig[];
-  /** Where shared links point: a hosted copy of the web client. */
+  /** Where shared links point: a hosted copy of the web client. Empty: the page the user is on. */
   shareBaseUrl: string;
   preferences: Preferences;
   /** blend: mix every enabled algorithm node by priority; primary: only the first that answers. */

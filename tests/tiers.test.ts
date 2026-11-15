@@ -93,7 +93,7 @@ describe('content storage tiers', () => {
       assert.equal(bought.charged, 1, 'silver costs 1 credit per MiB');
 
       // One copy per user: the same account cannot take two jobs of the same content.
-      const rewards = { upfront: 1, perRetrieval: 1, perChallenge: 1, completion: 1 };
+      const rewards = { upfront: 1, perRetrieval: 1, completion: 1 };
       const first = provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 2, durationSeconds: 3600, rewards });
       provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 2, durationSeconds: 3600, rewards });
       await user.json(`/v1/services/storage/offers/${first.id}/accept`, { method: 'POST' });
@@ -111,7 +111,12 @@ describe('content storage tiers', () => {
       const task = (await provider.service.poll(fake, 0)).find((entry) => entry.type === 'retrieve');
       assert.ok(task);
       await assert.rejects(provider.service.answer(fake, task.id, randomBytesOf(16)), /do not match/);
-      assert.equal(provider.service.assignmentsForAdmin().find((entry) => entry.id === assignment.id)?.status, 'failed');
+      assert.equal(
+        provider.service.assignmentsForAdmin().find((entry) => entry.id === assignment.id)?.status,
+        'removed',
+        'a failing holder is deleted from the job — the row stays for display'
+      );
+      assert.equal(provider.service.jobs().find((job) => job.id === first.id)?.reopened, 1, 'the job reopens for another client');
 
       // Deleting a job takes its assignments with it.
       await admin(provider.url(), `/v1/admin/storage/jobs/${first.id}`, { method: 'DELETE' });
@@ -190,9 +195,10 @@ describe('content storage tiers', () => {
         assert.equal(allUsers.test.ok, true, 'the first user still serves the content');
         assert.equal(
           provider.service.assignmentsForAdmin().find((entry) => entry.id === poorAssignment.id)?.status,
-          'failed',
-          'a user whose endpoints all fail is red failed and out of the job'
+          'removed',
+          'a user whose endpoints all fail is deleted from the job'
         );
+        assert.equal(jobsFor()[0].reopened, 1, 'the job reopens for another client');
 
         // Any endpoint can be checked: available, hash-matching bytes pass — the rest fail.
         const good = await admin<{ verify: { ok: boolean; bytes: number } }>(provider.url(), `/v1/admin/content/${cid}/verify`, {

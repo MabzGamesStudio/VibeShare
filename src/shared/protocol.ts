@@ -309,13 +309,11 @@ export function receiptSigningPayload(receipt: Omit<PaymentReceipt, 'sig'>): str
 // Provider storage service: client nodes store data for a provider and earn credits.
 
 export interface StorageRewards {
-  /** Paid when the assignment is accepted and the data downloaded. */
+  /** Paid when the assignment is accepted and the submitted endpoint is live. */
   upfront: number;
   /** Paid each time the provider retrieves a chunk from the client. */
   perRetrieval: number;
-  /** Paid for each passed proof-of-storage challenge. */
-  perChallenge: number;
-  /** Paid at the end of the term if enough challenges were passed. */
+  /** Paid at the end of the term if the holder is still holding the data. */
   completion: number;
 }
 
@@ -331,7 +329,7 @@ export interface StorageOffer {
   requireIdentity: boolean;
 }
 
-export type AssignmentStatus = 'downloading' | 'active' | 'completed' | 'failed' | 'released';
+export type AssignmentStatus = 'downloading' | 'active' | 'completed' | 'failed' | 'released' | 'removed';
 
 export interface StorageAssignment {
   id: string;
@@ -344,7 +342,6 @@ export interface StorageAssignment {
   status: AssignmentStatus;
   acceptedAt: string;
   expiresAt: string;
-  challenges: { passed: number; failed: number };
   retrievals: number;
   earned: number;
   /** The URL backups this account offers for the job's content (provider's records). */
@@ -355,11 +352,9 @@ export interface StorageAssignment {
 
 export interface StorageTask {
   id: string;
-  type: 'retrieve' | 'challenge';
+  type: 'retrieve';
   assignmentId: string;
   chunkId: string;
-  /** For challenges: answer with sha256hex(nonce + chunk bytes). */
-  nonce?: string;
   deadline: string;
 }
 
@@ -1115,6 +1110,32 @@ export interface SubmissionRequest {
 
 export function claimSigningPayload(nodeId: string, contentBaseId: string, ts: number): string {
   return `vibeshare-claim\n${nodeId}\n${contentBaseId}\n${ts}`;
+}
+
+/**
+ * The two word sets an algorithm node's operator keeps on the comments page: `words`
+ * (a comment containing one — or a close, evasive variant of one — is hidden) and
+ * `adjacent` (entries that only count when they sit next to a censored word).
+ */
+export type CensoredSet = 'words' | 'adjacent';
+
+/** One page of a censored word set. */
+export interface CensoredWordsPage {
+  set: CensoredSet;
+  items: string[];
+  /** The offset of the next page, when the list has more. */
+  cursor?: string;
+  total: number;
+}
+
+/** What adding, renaming or deleting a word came to (a repeat add is a friendly no-op). */
+export interface CensoredWordsChange {
+  set: CensoredSet;
+  /** False when nothing changed (a repeat word, or one that is not on the list). */
+  changed: boolean;
+  total: number;
+  /** A friendly explanation when nothing changed. */
+  note?: string;
 }
 
 export interface ApiErrorBody {

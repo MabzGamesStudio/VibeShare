@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CensoredSet, CensoredWordsChange, CensoredWordsPage } from '../../../src/shared/protocol';
 import { formatSource, parseContentId, sourceFromUrl } from '../../../src/shared/sources';
 import {
   CREATOR_KIND_LABELS,
@@ -1532,6 +1533,177 @@ interface AdminCommentsView {
 }
 
 /**
+ * The censored words card at the top of the comments page: two sets the operator keeps —
+ * "censored words" (a comment carrying one, or a close variant of one, is hidden) and
+ * "adjacent words" (counted only next to a censored one). Both are sets — adding a word
+ * already on the list is a friendly no-op — and each is managed here: inline renaming,
+ * deleting, and its own little pager.
+ */
+function CensoredWordsCard() {
+  const [set, setSet] = useState<CensoredSet>('words');
+  const [page, setPage] = useState<CensoredWordsPage | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [word, setWord] = useState('');
+  const [edit, setEdit] = useState<{ from: string; to: string } | null>(null);
+  const [, show] = useToast();
+  const perPage = 10;
+
+  const load = useCallback(
+    (wanted: CensoredSet, at: number) => {
+      admin<CensoredWordsPage>(`/v1/admin/censored/${wanted}?cursor=${at}&limit=${perPage}`)
+        .then((result) => {
+          // A word deleted off the last page steps the pager back instead of stranding it.
+          if (!result.items.length && at > 0) return load(wanted, Math.max(0, at - perPage));
+          setPage(result);
+          setOffset(at);
+        })
+        .catch((e) => show(message(e)));
+    },
+    [show]
+  );
+  useEffect(() => {
+    load(set, 0);
+  }, [load, set]);
+
+  // Every change goes through the same path: a friendly note when nothing changed.
+  const change = async (call: Promise<CensoredWordsChange>, done: string) => {
+    try {
+      const result = await call;
+      show(result.changed ? done : (result.note ?? 'Nothing changed.'));
+      setEdit(null);
+      load(set, offset);
+    } catch (e) {
+      show(message(e));
+    }
+  };
+
+  const add = () => {
+    const value = word.trim();
+    if (!value) return;
+    setWord('');
+    void change(admin<CensoredWordsChange>(`/v1/admin/censored/${set}`, { body: { word: value } }), `"${value}" is on the list.`);
+  };
+
+  const rename = (from: string, to: string) => {
+    if (!to.trim()) return;
+    void change(admin<CensoredWordsChange>(`/v1/admin/censored/${set}`, { method: 'PUT', body: { from, to: to.trim() } }), 'Saved.');
+  };
+
+  const total = page?.total ?? 0;
+
+  return (
+    <div className="card">
+      <h3>Censored words</h3>
+      <p className="small muted">
+        A comment carrying one of these words is hidden (its block header stays) and a new one is refused. Evading with
+        lookalikes or leet-speak does not help: close variants are filtered too. Adjacent words only count when they sit
+        next to a censored word.
+      </p>
+      <div className="row" style={{ gap: 8 }}>
+        <button className={set === 'words' ? 'primary' : ''} onClick={() => setSet('words')}>
+          Censored words
+        </button>
+        <button className={set === 'adjacent' ? 'primary' : ''} onClick={() => setSet('adjacent')}>
+          Adjacent words
+        </button>
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <input
+          type="text"
+          value={word}
+          placeholder={set === 'words' ? 'A word that hides a comment' : 'A word that only counts next to a censored one'}
+          onChange={(e) => setWord(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') add();
+          }}
+          style={{ flex: 1 }}
+        />
+        <button className="primary" disabled={!word.trim()} onClick={add}>
+          Add
+        </button>
+      </div>
+      {!page ? (
+        <Loading />
+      ) : page.items.length === 0 ? (
+        <p className="small muted">Nothing on this list yet.</p>
+      ) : (
+        <table className="table">
+          <tbody>
+            {page.items.map((entry) => (
+              <tr key={entry}>
+                <td style={{ width: '100%' }}>
+                  {edit?.from === entry ? (
+                    <input
+                      type="text"
+                      value={edit.to}
+                      autoFocus
+                      onChange={(e) => setEdit({ from: entry, to: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') rename(entry, edit.to);
+                        if (e.key === 'Escape') setEdit(null);
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                  ) : (
+                    <span>{entry}</span>
+                  )}
+                </td>
+                <td>
+                  <div className="row" style={{ gap: 6 }}>
+                    {edit?.from === entry ? (
+                      <>
+                        <button
+                          className="small primary"
+                          disabled={!edit.to.trim()}
+                          onClick={() => rename(entry, edit.to)}
+                        >
+                          Save
+                        </button>
+                        <button className="small ghost" onClick={() => setEdit(null)}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="small" onClick={() => setEdit({ from: entry, to: entry })}>
+                          Rename
+                        </button>
+                        <button
+                          className="small"
+                          onClick={() =>
+                            void change(
+                              admin<CensoredWordsChange>(`/v1/admin/censored/${set}/${encodeURIComponent(entry)}`, { method: 'DELETE' }),
+                              `"${entry}" is gone.`
+                            )
+                          }
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="row between">
+        <span className="tiny faint">{total === 0 ? 'Nothing yet' : `${offset + 1}–${Math.min(offset + perPage, total)} of ${total}`}</span>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="small" disabled={offset === 0} onClick={() => load(set, Math.max(0, offset - perPage))}>
+            Previous
+          </button>
+          <button className="small" disabled={offset + perPage >= total} onClick={() => load(set, offset + perPage)}>
+            Next
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The comment sections of content pages: the operator opens one by its content id (or
  * from the list), reads what was said, and decides whether the page shows its comments
  * at all. Hiding a section — or one comment — keeps the block headers but sends no data;
@@ -1572,6 +1744,7 @@ function CommentsTab() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
+      <CensoredWordsCard />
       <p className="small muted">
         What people say on each content page, as one hash-chained log. Turning a page's comments off keeps the block headers but sends no
         comment data: clients see that something was removed here. Comments hidden one by one stay that way until shown again. Flushing a

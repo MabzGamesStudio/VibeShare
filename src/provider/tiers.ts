@@ -19,16 +19,14 @@ export interface TierMedium {
 
 /**
  * The storage job a tier opens for its content: what it pays and how often it is
- * checked. Retrieval and challenge pay per MiB of the content, so big jobs pay more.
+ * checked. Retrieval pays per MiB of the content, so big jobs pay more.
  */
 export interface TierJobSettings {
   upfrontCredits: number;
   perMbRetrieval: number;
-  perMbChallenge: number;
   endOfTerm: number;
   /** Endpoints slower than this count as failed checks. */
   maxLatencyMs: number;
-  challengeEveryMinutes: number;
   /** 0 = no periodic retrieval tests. */
   retrievalTestEveryMinutes: number;
   /** Consecutive failed requests before an endpoint counts as failed. */
@@ -39,10 +37,8 @@ export function defaultTierJobSettings(): TierJobSettings {
   return {
     upfrontCredits: 20,
     perMbRetrieval: 5,
-    perMbChallenge: 1,
     endOfTerm: 20,
     maxLatencyMs: 2000,
-    challengeEveryMinutes: 10,
     retrievalTestEveryMinutes: 60,
     failedRequestsBeforeFailure: 3,
   };

@@ -21,14 +21,10 @@ export function useConsoleList(what: string) {
   return { prefs, save };
 }
 
-/** The mode switch and page size of one console list (kept in the node's settings). */
-export function ListControls({ prefs, save }: { prefs: Paging; save: (patch: Partial<Paging>) => void }) {
+/** The page size of a console list. */
+export function PageSize({ prefs, save }: { prefs: Paging; save: (patch: Partial<Paging>) => void }) {
   return (
     <div className="row">
-      <select value={prefs.paging} style={{ width: 'auto' }} onChange={(e) => save({ paging: e.target.value as Paging['paging'] })}>
-        <option value="lazy">Lazy loading</option>
-        <option value="pages">Pagination</option>
-      </select>
       <input
         key={prefs.perPage}
         type="number"
@@ -42,6 +38,19 @@ export function ListControls({ prefs, save }: { prefs: Paging; save: (patch: Par
         }}
       />
       <span className="hint">items per page</span>
+    </div>
+  );
+}
+
+/** The mode switch and page size of one console list (kept in the node's settings). */
+export function ListControls({ prefs, save }: { prefs: Paging; save: (patch: Partial<Paging>) => void }) {
+  return (
+    <div className="row">
+      <select value={prefs.paging} style={{ width: 'auto' }} onChange={(e) => save({ paging: e.target.value as Paging['paging'] })}>
+        <option value="lazy">Lazy loading</option>
+        <option value="pages">Pagination</option>
+      </select>
+      <PageSize prefs={prefs} save={save} />
     </div>
   );
 }
@@ -65,17 +74,51 @@ export function Sentinel({ onMore, done }: { onMore: () => void; done: boolean }
 
 /** The Previous / Next row of a paginated console list (with the page number). */
 export function Pager({ page, perPage, total, loading, go }: { page: number; perPage: number; total: number; loading: boolean; go: (page: number) => void }) {
+  const [wanted, setWanted] = useState('');
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  // Skipping straight to a page: the typed number is clamped to the pages there are and
+  // committed on Go or Enter. Re-sending the wanted page is cheap for every list here,
+  // so no attempt is made to track typing between the keystrokes.
+  const skip = () => {
+    const typed = Number(wanted);
+    if (!wanted.trim() || !Number.isFinite(typed)) return;
+    const target = Math.min(pages, Math.max(1, Math.round(typed))) - 1;
+    setWanted('');
+    if (target !== page) go(target);
+  };
   return (
     <div className="row">
       <button className="small" disabled={page === 0 || loading} onClick={() => go(page - 1)}>
         Previous
       </button>
       <span className="small">
-        Page {page + 1} of {Math.max(1, Math.ceil(total / perPage))}
+        Page {page + 1} of {pages}
       </span>
       <button className="small" disabled={(page + 1) * perPage >= total || loading} onClick={() => go(page + 1)}>
         Next
       </button>
+      {pages > 1 && (
+        <>
+          <div className="spacer" />
+          <span className="tiny muted">Skip to</span>
+          <input
+            type="number"
+            min={1}
+            max={pages}
+            placeholder="page"
+            style={{ maxWidth: 72 }}
+            value={wanted}
+            disabled={loading}
+            onChange={(e) => setWanted(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') skip();
+            }}
+          />
+          <button className="small" disabled={loading || !wanted.trim()} onClick={skip}>
+            Go
+          </button>
+        </>
+      )}
     </div>
   );
 }
