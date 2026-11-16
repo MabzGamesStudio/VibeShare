@@ -105,6 +105,52 @@ export async function checkIndex(baseUrl: string, alternates: string[] = [], onM
 }
 
 /**
+ * The "Check URLs" button: probes `<base>/index.html` under every candidate address and
+ * names the one that answered 200 (the caller keeps it selected). When none answers yet,
+ * the message says to wait — a first deploy can take a few minutes.
+ */
+export async function checkIndexUrls(candidates: string[]): Promise<CheckResult & { matched?: string }> {
+  const roots = [...new Set(candidates.map((url) => url.trim().replace(/\/+$/, '/')).filter((url) => /^https?:\/\//.test(url)))];
+  if (!roots.length) return { ok: false, message: 'Fill in the fields first — the site addresses are built from them.' };
+  const lines: string[] = [];
+  for (const root of roots) {
+    const url = new URL('index.html', root).href;
+    const answer = await probe(url);
+    if (answer.local) return { ok: false, message: localRefused(url, answer.error ?? 'no answer') };
+    if (answer.error) {
+      lines.push(`${url} could not be reached (${answer.error})`);
+    } else if (answer.status === 200) {
+      return { ok: true, matched: root, message: `✓ ${url} answered 200 — the site is live at this address.` };
+    } else {
+      lines.push(`${url} answered ${answer.status || 'nothing'}`);
+    }
+  }
+  return { ok: false, message: `No index.html answered yet (${lines.join(' · ')}). The site may take a few minutes to deploy after the first commit — wait and try again.` };
+}
+
+/**
+ * The final check: the bytes at `<base>/<cid>` hash to the chosen content id. The client
+ * downloads and verifies them through POST /api/content-link — a wrong hash is called
+ * out by name, never folded into a generic failure.
+ */
+export async function checkContentHash(baseUrl: string, cid: string): Promise<CheckResult> {
+  const id = cid.trim();
+  if (!id) return { ok: false, message: 'No content id yet — fetch one from a provider job or paste one first.' };
+  if (!/^https?:\/\//.test(baseUrl)) return { ok: false, message: 'There is no base URL yet — fill in the fields first.' };
+  const url = contentUrl(baseUrl, id);
+  try {
+    const answer = await api<{ ok: boolean; size: number; error?: string }>('/api/content-link', { body: { url, cid: id } });
+    if (answer.ok) return { ok: true, message: `✓ the bytes at ${url} hash to ${id} (${answer.size} bytes).` };
+    if (answer.error && /does not match|match the expected/i.test(answer.error)) {
+      return { ok: false, message: `✗ the downloaded bytes at ${url} do not match the content id ${id} (got a different hash).` };
+    }
+    return { ok: false, message: `✗ could not verify ${url} — ${answer.error ?? 'the download failed'}.` };
+  } catch (error) {
+    return { ok: false, message: `✗ the check could not run: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+/**
  * The reason a failed platform response carries in its body — GitLab answers
  * {"message":"401 Unauthorized"} (or {"error":…}); others spell it out similarly. Used so
  * a 4xx/5xx always shows the platform's own words beside the status code.

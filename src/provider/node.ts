@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
 import { defaultCryptoPaymentConfigs } from '../commerce/payments.js';
 import type { Account } from '../commerce/ledger.js';
-import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
+import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, bytesMatchManifest, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
 import { isDevBuild } from '../shared/devbuild.js';
 import { buildManifestFromFile } from '../shared/contentfile.js';
 import type { ContentLink, ContentUrlRecord, ContentUrlSubmission } from '../shared/protocol.js';
@@ -757,6 +757,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     }
     const manifest = this.store.getManifest(cid);
     if (manifest?.chunks.length) {
+      // The endpoint must serve the whole file: every chunk slice hashing to its id (the
+      // shared helper), or a downloadable copy whose bytes hash to the cid itself.
       let start = 0;
       let matched = 0;
       for (const chunk of manifest.chunks) {
@@ -765,7 +767,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         if (chunkIdOf(slice) === chunk.id) matched++;
       }
       const chunks = { matched, total: manifest.chunks.length };
-      if (matched === manifest.chunks.length) return report({ ok: true, url: target, bytes: data.length, chunks });
+      if (bytesMatchManifest(data, manifest)) return report({ ok: true, url: target, bytes: data.length, chunks });
       if (bytesMatchCid(data, cid)) return report({ ok: true, url: target, bytes: data.length, chunks });
       return report({
         ok: false,

@@ -222,27 +222,30 @@ export function TracingView({ api }: { api: TraceApi }) {
         </div>
         {error && <div className="banner danger small">{error}</div>}
         {mode === 'events' ? (
-          <div className="form-stack" style={{ gap: 6, maxHeight: 480, overflowY: 'auto' }}>
+          <div className="trace-list">
             {events.map((event) => (
               <EventRow key={event.id} event={event} onOpen={() => setOpen({ kind: 'event', event })} />
             ))}
             {!events.length && !loading && <p className="small muted">Nothing recorded yet — tracing is off, or no events match.</p>}
           </div>
         ) : (
-          <div className="form-stack" style={{ gap: 6, maxHeight: 480, overflowY: 'auto' }}>
+          <div className="trace-list">
             {timelines.map((timeline) => (
               <button
                 key={timeline.traceId}
-                className="row between small"
-                style={{ background: 'none', border: 0, ...ROW_DIVIDER, textAlign: 'left', cursor: 'pointer' }}
+                type="button"
+                className="trace-row"
                 onClick={() => setOpen({ kind: 'timeline', timeline })}
                 title="Open the whole timeline"
               >
-                <span>
-                  <strong>{timeline.initiator?.label ?? 'Timeline'}</strong>
-                  <span className="faint"> · {timeline.initiator?.kind ?? 'event'} · started {new Date(timeline.startedAt).toLocaleString()}</span>
+                <span className="trace-head">
+                  <span className="badge">timeline</span>
+                  <span className="trace-time">{new Date(timeline.startedAt).toLocaleString()}</span>
                 </span>
-                <span className="tiny faint">{timeline.events.length} events</span>
+                <span className="trace-main">{timeline.initiator?.label ?? 'Timeline'}</span>
+                <span className="trace-sub">
+                  {timeline.initiator?.kind ?? 'event'} · {timeline.events.length} event{timeline.events.length === 1 ? '' : 's'}
+                </span>
               </button>
             ))}
             {!timelines.length && !loading && <p className="small muted">No timelines yet — each user action or API call starts one.</p>}
@@ -255,26 +258,21 @@ export function TracingView({ api }: { api: TraceApi }) {
   );
 }
 
+/**
+ * One trace in the list: the level and its time on the first line (the time at the right
+ * edge), the main text on the next, and a short subtext under it. Everything else — the
+ * ids, the data payload, the error, the initiator — is in the modal this row opens.
+ */
 function EventRow({ event, onOpen }: { event: TraceEvent; onOpen: () => void }) {
+  const subtext = [event.component, event.message, event.error].filter(Boolean).join(' · ');
   return (
-    <button
-      className="row small"
-      style={{ background: 'none', border: 0, ...ROW_DIVIDER, gap: 8, alignItems: 'baseline', textAlign: 'left', cursor: 'pointer' }}
-      onClick={onOpen}
-      title="Open the full event"
-    >
-      <LevelBadge level={event.level} />
-      <span className="tiny faint" style={{ whiteSpace: 'nowrap' }}>
-        {new Date(event.at).toLocaleTimeString()}
+    <button type="button" className="trace-row" onClick={onOpen} title="Open the full event">
+      <span className="trace-head">
+        <LevelBadge level={event.level} />
+        <span className="trace-time">{new Date(event.at).toLocaleString()}</span>
       </span>
-      <span className="tiny faint">{event.component}</span>
-      <span>
-        {event.action}
-        {event.message ? <span className="muted"> — {event.message}</span> : null}
-        {event.error ? <span className="faint"> — {event.error}</span> : null}
-        <DependencyLine data={event.data} />
-        {event.data !== undefined ? <span className="mono tiny faint"> {safeJson(event.data)}</span> : null}
-      </span>
+      <span className="trace-main">{event.action}</span>
+      {subtext ? <span className="trace-sub">{subtext}</span> : null}
     </button>
   );
 }
@@ -321,7 +319,7 @@ function TimelineModal({ timeline, onClose }: { timeline: TraceTimeline; onClose
         <Field label="initiator" value={timeline.initiator ? `${timeline.initiator.kind} · ${timeline.initiator.label}` : '—'} />
         <Field label="started" value={new Date(timeline.startedAt).toLocaleString()} />
         <Field label="events" value={String(timeline.events.length)} />
-        <div className="form-stack" style={{ gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+        <div className="form-stack" style={{ gap: 8 }}>
           {timeline.events.map((event) => (
             <div key={event.id} style={ROW_DIVIDER}>
               <EventFields event={event} />
@@ -345,6 +343,7 @@ function EventFields({ event }: { event: TraceEvent }) {
       <Field label="component" value={event.component} />
       <Field label="action" value={event.action} />
       <Field label="message" value={event.message ?? '—'} />
+      <Field label="dependency" value={<DependencyLine data={event.data} />} />
       <Field label="data" value={event.data === undefined ? '—' : <pre className="mono tiny" style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{prettyJson(event.data)}</pre>} />
       <Field label="error" value={event.error ?? '—'} />
       <Field label="initiator" value={event.initiator ? `${event.initiator.kind} · ${event.initiator.label}` : '—'} />
@@ -369,9 +368,9 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
  */
 function DependencyLine({ data }: { data: unknown }) {
   const record = data as { url?: unknown; method?: unknown; status?: unknown; ms?: unknown; bytes?: unknown } | undefined;
-  if (!record || typeof record !== 'object') return null;
+  if (!record || typeof record !== 'object') return <span className="muted">—</span>;
   const { url, method, status, ms, bytes } = record;
-  if (url === undefined && ms === undefined && status === undefined) return null;
+  if (url === undefined && ms === undefined && status === undefined) return <span className="muted">—</span>;
   return (
     <span className="tiny" style={{ display: 'block', opacity: 0.85 }}>
       {method !== undefined ? `${String(method)} ` : ''}

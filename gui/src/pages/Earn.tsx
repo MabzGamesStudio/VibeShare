@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AlgorithmJobsTab } from '../earn/AlgorithmJobsTab';
 import { AlgorithmNodesTab } from '../earn/AlgorithmNodesTab';
@@ -20,6 +21,14 @@ export function EarnPage() {
   const wanted = params.get('tab');
   const tab: EarnTab = EARN_TABS.some(([id]) => id === wanted) ? (wanted as EarnTab) : 'provider-jobs';
   const setTab = (id: EarnTab) => setParams({ tab: id });
+  // ?card=… names the card to bring into view once the tab renders (the card's element
+  // id is its name): the wizard links here to show a published job where it is listed.
+  const card = params.get('card');
+  useEffect(() => {
+    if (!card) return;
+    const timer = setTimeout(() => document.getElementById(card)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+    return () => clearTimeout(timer);
+  }, [card, tab]);
   return (
     <div className="page page-narrow">
       <div className="page-header">

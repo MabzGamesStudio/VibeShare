@@ -16,9 +16,11 @@ export interface HostingField {
   secret?: boolean;
   default?: string;
   /** Fixed choices for this field: shown as a dropdown instead of a text input. */
-  options?: { value: string; label: string }[];
+  options?: { value: string; label: string; /** Rebuilt per render from the current values (labels that show the typed URL). */ optionLabel?: (values: Record<string, string>) => string }[];
   /** Only needed for one of the platform's variants — the filled-check never demands it. */
   optional?: boolean;
+  /** Rendered by the wizard's own UI (never as a leftover field of another panel). */
+  custom?: boolean;
 }
 
 /** One step of a platform's setup: what to do in order, what to copy instead of typing,
@@ -39,6 +41,10 @@ export interface HostingStep {
   /** A starter to download instead of making by hand: a zip of these files — or the file
    * itself when there is one and its name is not a .zip. */
   download?: { label: string; zip: string; entries: { path: string; text: string }[] };
+  /** File contents to copy into the repository, one highlighted block per file. */
+  files?: { path: string; language: 'html' | 'yaml'; text: string; note?: string }[];
+  /** The fields come before the instructions (the reader fills them in first). */
+  fieldsFirst?: boolean;
   /** What you have when this step is done. The reader ticks it off. */
   check: string;
 }
@@ -51,7 +57,8 @@ export interface HostingPlatform {
   signup: string;
   /** Where the platform explains publishing a static site. */
   docs: string;
-  about: string;
+  /** The one line under the heading — left out when empty. */
+  about?: string;
   /** How to create the account and get the site serving files, in order. */
   steps: HostingStep[];
   fields: HostingField[];
@@ -352,18 +359,39 @@ export function buildZip(entries: { path: string; text: string }[]): Uint8Array 
 const STARTER_HTML = `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>VibeShare data host</title>
-<style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 20px;color:#222}h1{font-size:22px}code{background:#f2f2f7;padding:2px 6px;border-radius:6px}</style>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VibeShare data host</title>
+    <style>
+        body {
+            font: 16px/1.6 system-ui, sans-serif;
+            max-width: 640px;
+            margin: 15vh auto;
+            padding: 0 20px;
+            color: #222;
+        }
+        h1 {
+            font-size: 22px;
+        }
+        code {
+            background: #f2f2f7;
+            padding: 2px 6px;
+            border-radius: 6px;
+        }
+    </style>
 </head>
 <body>
-<h1>VibeShare data host</h1>
-<p>This site hosts content for VibeShare provider jobs: every content id lives at <code>&lt;base&gt;/&lt;content-id&gt;</code>, and providers download the bytes from here and pay for them.</p>
-<p>Content ids are pushed into the <code>public</code> folder of this site. This page is only the welcome screen.</p>
+    <h1>VibeShare data host</h1>
+    <p>
+        This site hosts content for VibeShare provider jobs: every content id lives at
+        <code>&lt;base&gt;/&lt;content-id&gt;</code>, and providers download the bytes from here and pay for them.
+    </p>
+    <p>
+        Content ids are pushed into the <code>public</code> folder of this site.
+        This page is only the welcome screen.
+    </p>
 </body>
-</html>
-`;
+</html>`;
 
 export const HOSTING_PLATFORMS: HostingPlatform[] = [
   {
@@ -525,7 +553,6 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     name: 'GitLab Pages',
     signup: 'https://gitlab.com/users/sign_up',
     docs: 'https://docs.gitlab.com/user/project/pages/',
-    about: 'Free project sites published by the project pipeline — at https://<namespace>.gitlab.io/<project>/<folder>/ or the unique domain https://<project>-<six-digit-id>.gitlab.io/<folder>/ that new projects get by default. No credit card.',
     steps: [
       {
         title: 'Open the free account',
@@ -537,7 +564,8 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
         title: 'Create the project',
         lines: [
           'Click “New project” → “Create blank project”.',
-          'Project name: paste the value below. Visibility: Public. Keep “Initialize repository with a README”.',
+          'Project name: paste the value below.',
+          'Visibility: Public. Keep “Initialize repository with a README”.',
           'Click “Create project”.',
         ],
         copies: [{ label: 'Project name', value: 'vibeshare-data' }],
@@ -546,62 +574,55 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
       {
         title: 'Add the page and the pipeline that publishes it',
         lines: [
-          'Download the starter folder below (one zip) and unzip it — it holds three files at their repository paths: public/index.html, public/public/index.html and .gitlab-ci.yml.',
-          'The page comes twice on purpose: public/index.html is the site root (Pages needs an index at the root of the folder it publishes), and the copy inside the content folder is where the base URL points (public is the folder for content ids — change the folder field later only together with this copy).',
-          'Upload all three into the project at exactly those paths: “+” → “Upload file” for each one — set the folder to the path shown beside each file (the repository root for .gitlab-ci.yml); the Web IDE can commit the whole folder in one go.',
-          'Click “Commit changes”. There is nothing to build: the pages job publishes the public folder exactly as it is in the repository.',
+          'Click “+” → “New file”. Name it public/index.html, paste the HTML below, then commit.',
+          'Add .gitlab-ci.yml at the repository root with the pipeline below, then commit.',
         ],
-        copies: [
-          { label: 'File path (the site root)', value: 'public/index.html' },
-          { label: 'File path (inside the content folder)', value: 'public/public/index.html' },
-          { label: 'File path (repository root)', value: '.gitlab-ci.yml' },
+        files: [
+          { path: 'public/index.html', language: 'html', text: STARTER_HTML, note: 'The same HTML goes at public/public/index.html too: the base URL ends in the content folder (public) while Pages publishes the public folder as the site root.' },
+          { path: '.gitlab-ci.yml', language: 'yaml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' },
         ],
-        download: {
-          label: 'Download the starter folder (zip)',
-          zip: 'VibeShare.zip',
-          entries: [
-            { path: 'public/index.html', text: STARTER_HTML },
-            { path: 'public/public/index.html', text: STARTER_HTML },
-            { path: '.gitlab-ci.yml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' },
-          ],
-        },
         check: 'public/index.html, public/public/index.html and .gitlab-ci.yml are all listed in the project files.',
       },
       {
         title: 'See your site',
         lines: [
-          'Wait a minute for the pipeline to turn green, then open the project’s Deploy → Pages (older layouts say Settings → Pages).',
-          'GitLab lists the exact address of your site — copy the one it shows and paste it into the Base URL field of step 3. Two shapes exist: the project site https://<namespace>.gitlab.io/<project>/<folder>/ and the unique domain https://<project>-<six-digit-id>.gitlab.io/<folder>/ that new projects get by default. The same site answers at both; the unique one is the safest because the classic address redirects to it.',
-          'Both shapes end in the content folder (public by default): content ids land at <folder>/<cid> there, so the base URL always carries the folder.',
-          'Fill the fields below with the user or group path and the project name from the project page (gitlab.com/<namespace>/<project>) — and the unique domain id if you use that shape. “Check this step” finds the shape by itself and selects it in the URL type field.',
+          'The project page address reads gitlab.com/<userid>/<projectname> — those two values fill the first fields. Under Deploy → Pages GitLab shows the site address; its first part holds the six-character id for the last field.',
+          'The site may take a few minutes to go live after the first commit.',
         ],
-        fields: ['namespace', 'project', 'uniqueId', 'urlType'],
-        copies: [
-          { label: 'Project site address (built from your answers)', value: 'https://<namespace>.gitlab.io/<project>/<folder>/' },
-          { label: 'Unique domain address (built from your answers)', value: 'https://<project>-<uniqueId>.gitlab.io/<folder>/' },
-        ],
+        fields: ['namespace', 'project', 'uniqueId'],
+        fieldsFirst: true,
+        copies: [],
         check: 'The address GitLab shows opens your index.html — not a 404.',
       },
     ],
     fields: [
-      { id: 'namespace', label: 'User or group', placeholder: 'yourname', hint: 'The path your project lives under (gitlab.com/<namespace>/<project>).' },
-      { id: 'project', label: 'Project', placeholder: 'vibeshare-data', hint: 'The project path — the last part of the project page address.' },
-      {
-        id: 'urlType',
-        label: 'URL type',
-        default: 'project',
-        options: [
-          { value: 'project', label: 'Project site — https://<namespace>.gitlab.io/<project>/<folder>/' },
-          { value: 'unique', label: 'Unique domain — https://<project>-<six-digit-id>.gitlab.io/<folder>/' },
-        ],
-        hint: 'The address shape this site is served under. “Check this step” finds it by itself; picking one here keeps that choice.',
-      },
+      { id: 'namespace', label: 'User or group', placeholder: 'yourname', hint: 'The path your project lives under (gitlab.com/<userid>/<projectname>).' },
+      { id: 'project', label: 'Project name', placeholder: 'vibeshare-data', hint: 'The project path — the last part of the project page address.' },
       {
         id: 'uniqueId',
         label: 'Unique domain id',
         placeholder: '7bd6b8',
         optional: true,
         hint: 'The six characters at the end of the unique domain GitLab shows under Deploy → Pages. Only needed for the unique domain type; a pasted unique domain fills it in.',
+      },
+      {
+        id: 'urlType',
+        label: 'URL type',
+        default: 'project',
+        custom: true,
+        options: [
+          {
+            value: 'project',
+            label: 'Project site',
+            optionLabel: (values) => `Project site — ${gitlabBaseUrl({ ...values, urlType: 'project' }) || 'https://<userid>.gitlab.io/<projectname>/<folderpath>/'}`,
+          },
+          {
+            value: 'unique',
+            label: 'Unique domain',
+            optionLabel: (values) => `Unique domain — ${gitlabBaseUrl({ ...values, urlType: 'unique' }) || 'https://<project>-<uniqueId>.gitlab.io/<folderpath>/'}`,
+          },
+        ],
+        hint: 'The address shape this site is served under — “Check URLs” finds it by itself; picking one here keeps that choice.',
       },
       { id: 'branch', label: 'Branch', default: 'main', hint: 'The branch the pages job runs on (Manage → Repository → Branches).' },
       {
@@ -618,20 +639,21 @@ export const HOSTING_PLATFORMS: HostingPlatform[] = [
     // folder and hash-verifies. The unique type trades the long project path for the
     // unique domain <project>-<six-digit-id>.gitlab.io — same site, no redirect.
     buildBaseUrl: gitlabBaseUrl,
+    // The step-1 site check probes the site root — without the folder, which only holds
+    // content ids, never an index of its own.
+    // The site check probes the content folder's own index — <base>/index.html — so a
+    // root index that answers while the folder path is broken cannot pass for the site.
+    buildSiteUrl: (values) => gitlabBaseUrl(values),
     // Both shapes are parsed back into the fields — the unique domain one sets the URL
     // type and the six-character id from its host.
     parseBaseUrl: parseGitlabUrl,
-    describeUrlShape: 'https://<namespace>.gitlab.io/<project>/<folder>/ or the unique domain https://<project>-<six-digit-id>.gitlab.io/<folder>/ that Deploy → Pages shows',
-    // The site check probes the index under both shapes: whichever answers 200 is the
-    // address this site is served under, and its urlType becomes the selected one.
-    siteUrlCandidates: (values) => {
-      const candidates: { url: string; values: Record<string, string> }[] = [];
-      for (const urlType of ['unique', 'project']) {
-        const url = gitlabBaseUrl({ ...values, urlType });
-        if (/^https?:\/\//.test(url)) candidates.push({ url, values: { urlType } });
-      }
-      return candidates;
-    },
+    describeUrlShape: 'https://<userid>.gitlab.io/<projectname>/<folderpath>/\nhttps://<project-uniqueId>.gitlab.io/<folderpath>/',
+    // The site check probes both address shapes at the content folder: whichever answers
+    // 200 is the address this site is served under, and its urlType becomes the selected one.
+    siteUrlCandidates: (values) =>
+      (['unique', 'project'] as const)
+        .map((urlType) => ({ url: gitlabBaseUrl({ ...values, urlType }), values: {} }))
+        .filter((entry) => /^https?:\/\//.test(entry.url)),
     // Wired: commits each content id with the GitLab files API (POST or PUT
     // /api/v4/projects/<id>/repository/files/<path>, authenticated with PRIVATE-TOKEN).
     publish: 'gitlab',
@@ -1543,15 +1565,6 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
   gitlab: {
     access: [
       {
-        title: 'Where the project lives',
-        lines: [
-          'Open your project: the address reads gitlab.com/NAMESPACE/PROJECT. The namespace is your user or group path.',
-          'Take both parts from that address only. The unique domain from Deploy → Pages (https://<project>-<six-digit-id>.gitlab.io) is a site address, not a project name — never copy its first part into the Project field.',
-        ],
-        fields: ['namespace', 'project'],
-        check: 'Namespace and Project match the address of your project page (gitlab.com/NAMESPACE/PROJECT).',
-      },
-      {
         title: 'Which branch the pipeline runs on',
         lines: ['Open Manage → Repository → Branches: the branch with the pages job is the one to use (new projects start on main).'],
         fields: ['branch'],
@@ -1579,7 +1592,7 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       },
     ],
     url: urlGuide(
-      'Both address shapes end in the content folder: content ids live at <folder>/<cid> in the site (public/<folder>/<cid> in the repository, one level under the folder Pages publishes). Paste the exact address GitLab shows under Deploy → Pages into the field below — it fills the fields back in and picks the URL type: the project site https://<namespace>.gitlab.io/<project>/<folder>/ or the unique domain https://<project>-<six-digit-id>.gitlab.io/<folder>/ that new projects get by default (the classic address redirects to the unique one, so that is the safer pick). The base URL under the field is exactly what providers will query.',
+      'Both address shapes end in the content folder: content ids live at <folder>/<cid> in the site (public/<folder>/<cid> in the repository, one level under the folder Pages publishes). The base URL is built from the fields above — edit it if the platform shows a different address and it fills the fields back in. Take User or group and Project name from the project page only: the unique domain from Deploy → Pages is a site address, not a project name — never copy its first part into the Project name field.',
       'Open the example address — 404 until the commit below is pushed and the pipeline turns green. The address ends in the folder; the content id is appended after it.'
     ),
     save: saveGuide(

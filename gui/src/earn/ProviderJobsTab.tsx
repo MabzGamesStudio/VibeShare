@@ -1,10 +1,12 @@
-import { Download, Eye, EyeOff, ExternalLink, Globe, Save, Upload } from 'lucide-react';
-import { Fragment, useEffect, useState } from 'react';
+import { Check, Copy, Download, Eye, EyeOff, ExternalLink, Globe, Save, Upload } from 'lucide-react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, errorMessage, streamUrl } from '../api';
-import { CodeBox } from '../components/ui';
+import { CodeBox, CopyButton } from '../components/ui';
+import { copyText } from '../util';
 import { downloadBlob } from '../qr';
 import { useApp } from '../state';
-import { baseKey, checkAccess, checkCids, checkFilled, checkIndex, checkSite, offerHost, type CheckResult } from './checks';
+import { baseKey, checkAccess, checkContentHash, checkCids, checkFilled, checkIndex, checkIndexUrls, checkSite, offerHost, type CheckResult } from './checks';
 import { buildZip, DUMMY_CID, HOSTING_PLATFORMS, contentUrl, hostingPlatform, loadDrafts, loadHosts, newHostId, parseHostUrl, platformGuide, pushHostedContent, recordUrlJobs, saveDrafts, saveHosts, type HostConfig, type HostDraft, type HostingField, type HostingStep } from './hosting';
 
 /** The platform setup as a guided flow: one step per screen instead of all at once. */
@@ -21,8 +23,103 @@ function substitute(text: string, values: Record<string, string>): string {
   return text.replace(/<([a-zA-Z][\w-]*)>/g, (whole, id: string) => (values[id] ?? '').trim() || whole);
 }
 
+// --------------------------------------------------------------- file blocks
+
+interface Token {
+  text: string;
+  cls?: string;
+}
+
+/**
+ * A small dependency-free highlighter for the two languages the tutorial ships as
+ * source: regex tokenizing, output in the theme's own colors. It marks up the obvious
+ * structure only — enough to read the file, not a parser.
+ */
+function highlight(text: string, language: 'html' | 'yaml'): Token[] {
+  const pattern =
+    language === 'html'
+      ? /<!--[\s\S]*?-->|<!DOCTYPE[^>]*>|<\/?[a-zA-Z][\w:-]*|\/?>|"[^"]*"|'[^']*'/gi
+      : /#[^\n]*|^[ \t-]*[^\s:#][^:\n]*(?=:)|: [^\n]+/gm;
+  const tokens: Token[] = [];
+  let at = 0;
+  for (const match of text.matchAll(pattern)) {
+    const piece = match[0];
+    const start = match.index ?? 0;
+    if (start > at) tokens.push({ text: text.slice(at, start) });
+    at = start + piece.length;
+    if (language === 'html') {
+      if (piece.startsWith('<!--') || piece.startsWith('<!')) tokens.push({ text: piece, cls: 'tok-com' });
+      else if (piece.startsWith('<')) tokens.push({ text: piece, cls: 'tok-tag' });
+      else if (piece === '>' || piece === '/>') tokens.push({ text: piece, cls: 'tok-tag' });
+      else tokens.push({ text: piece, cls: 'tok-str' });
+    } else {
+      if (piece.startsWith('#')) tokens.push({ text: piece, cls: 'tok-com' });
+      else if (piece.startsWith(':')) tokens.push({ text: piece, cls: 'tok-val' });
+      else if (piece.includes(':')) tokens.push({ text: piece, cls: 'tok-key' });
+      else tokens.push({ text: piece });
+    }
+  }
+  if (at < text.length) tokens.push({ text: text.slice(at) });
+  return tokens;
+}
+
+/** The copy feedback a click anywhere in the block gives. */
+function FileBlock({ path, language, text, note }: { path: string; language: 'html' | 'yaml'; text: string; note?: string }) {
+  const [done, setDone] = useState(false);
+  const [pathDone, setPathDone] = useState(false);
+  const copy = async () => {
+    await copyText(text);
+    setDone(true);
+    setTimeout(() => setDone(false), 1500);
+  };
+  const copyPath = async () => {
+    await copyText(path);
+    setPathDone(true);
+    setTimeout(() => setPathDone(false), 1500);
+  };
+  return (
+    <div className="file-block">
+      <div className="file-head">
+        {/* The path is copied on its own too: it is what the reader types into the
+            platform's file-name box. */}
+        <button type="button" className="file-path" title="Click to copy the file path" onClick={() => void copyPath()}>
+          <code>{path}</code>
+          {pathDone ? <Check size={13} /> : <Copy size={13} />}
+        </button>
+        <button type="button" className="small" onClick={() => void copy()}>
+          {done ? <Check size={14} /> : <Download size={14} />} {done ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre onClick={() => void copy()} title="Click to copy the whole file">
+        <code>
+          {highlight(text, language).map((token, index) =>
+            token.cls ? (
+              <span key={index} className={token.cls}>
+                {token.text}
+              </span>
+            ) : (
+              token.text
+            )
+          )}
+        </code>
+      </pre>
+      {note && <span className="hint">{note}</span>}
+    </div>
+  );
+}
+
 /** One platform field: its label, its input — and an eye to show or hide a secret value. */
-function FieldInput({ field, value, onChange }: { field: HostingField; value: string; onChange: (value: string) => void }) {
+function FieldInput({
+  field,
+  value,
+  values,
+  onChange,
+}: {
+  field: HostingField;
+  value: string;
+  values: Record<string, string>;
+  onChange: (value: string) => void;
+}) {
   const [shown, setShown] = useState(false);
   return (
     <label className="field" style={{ marginBottom: 0 }}>
@@ -32,7 +129,7 @@ function FieldInput({ field, value, onChange }: { field: HostingField; value: st
           <select style={{ flex: 1 }} value={value} onChange={(event) => onChange(event.target.value)}>
             {field.options.map((option) => (
               <option key={option.value} value={option.value}>
-                {option.label}
+                {option.optionLabel ? option.optionLabel(values) : option.label}
               </option>
             ))}
           </select>
@@ -86,6 +183,7 @@ function StepCard({
   fields,
   values,
   onField,
+  extra,
 }: {
   step: HostingStep;
   number: number;
@@ -95,11 +193,17 @@ function StepCard({
   fields: HostingField[];
   values: Record<string, string>;
   onField: (id: string, value: string) => void;
+  /** The platform's own panel for this step (the GitLab site card), kept inside the card
+   * so the fields, the addresses and the check all read in order. */
+  extra?: ReactNode;
 }) {
   const mine = (step.fields ?? [])
     .map((id) => fields.find((field) => field.id === id))
     .filter((field): field is HostingField => Boolean(field));
   const action = step.download;
+  const fieldInputs = mine.map((field) => (
+    <FieldInput key={field.id} field={field} value={values[field.id] ?? ''} values={values} onChange={(value) => onField(field.id, value)} />
+  ));
   return (
     <div className="card form-stack" style={{ padding: 12 }}>
       <div className="row between">
@@ -108,6 +212,7 @@ function StepCard({
         </strong>
         <span className="hint">{done ? '✓ Done' : `Step ${number} of ${total}`}</span>
       </div>
+      {step.fieldsFirst && fieldInputs}
       <ol className="instructions muted" style={{ margin: 0, paddingLeft: 18 }}>
         {step.lines.map((line, index) => (
           <li key={index}>{line}</li>
@@ -124,6 +229,9 @@ function StepCard({
           <CodeBox text={substitute(copy.value, values)} />
         </div>
       ))}
+      {step.files?.map((file) => (
+        <FileBlock key={file.path} path={file.path} language={file.language} text={file.text} note={file.note} />
+      ))}
       {action && (
         <div className="row">
           <button className="small" onClick={() => downloadZip(action)}>
@@ -131,9 +239,8 @@ function StepCard({
           </button>
         </div>
       )}
-      {mine.map((field) => (
-        <FieldInput key={field.id} field={field} value={values[field.id] ?? ''} onChange={(value) => onField(field.id, value)} />
-      ))}
+      {!step.fieldsFirst && fieldInputs}
+      {extra}
       <label className="row instructions" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
         <input type="checkbox" checked={done} onChange={onToggle} />
         <span>
@@ -186,10 +293,7 @@ export function ProviderJobsTab() {
   // alone and warns under the input instead of corrupting them.
   const typed = (draft.baseUrl ?? '').trim();
   const baseUrl = (typed || platform.buildBaseUrl(values)).trim();
-  const urlWarning =
-    typed && !parseHostUrl(platform, typed, values)
-      ? `This address does not match ${platform.name}’s expected shape (${platform.describeUrlShape ?? 'https://<host>/<folder>/'}) — the fields above are left unchanged.`
-      : null;
+  const urlWarning = typed && !parseHostUrl(platform, typed, values) ? `This address matches neither template:\n${platform.describeUrlShape ?? 'https://<host>/<folder>/'}` : null;
   /** A field edit always wins back the URL: from here on it is rebuilt from the fields.
    * Picking the URL type by hand is a choice auto-detection must never overwrite. */
   const setField = (id: string, value: string) =>
@@ -202,7 +306,7 @@ export function ProviderJobsTab() {
   const firstSecret = platform.fields.findIndex((field) => field.secret);
   /** Fields no step asks for, so nothing of the platform disappears from the form. */
   const covered = new Set([...platform.steps, ...guide.access].flatMap((instruction) => instruction.fields ?? []));
-  const leftoverFields = platform.fields.filter((field) => !covered.has(field.id));
+  const leftoverFields = platform.fields.filter((field) => !covered.has(field.id) && !field.custom);
   /**
    * Which steps of a group are ticked. Older saved drafts hold a plain array (the
    * account steps only), so both shapes are read.
@@ -220,7 +324,9 @@ export function ProviderJobsTab() {
     update({ done: { ...legacy, [group]: current } });
   };
   /** A group of steps as cards, each with its own check, in one list. */
-  const stepCards = (group: string, steps: HostingStep[], after?: (index: number) => React.ReactNode) => (
+  // `extra` renders the platform's own panel inside a step card (GitLab's site card), so
+  // the fields, its addresses and its check read top to bottom in one card.
+  const stepCards = (group: string, steps: HostingStep[], after?: (index: number) => React.ReactNode, extra?: (index: number) => ReactNode) => (
     <div className="form-stack">
       {steps.map((instruction, index) => (
         <Fragment key={index}>
@@ -233,6 +339,7 @@ export function ProviderJobsTab() {
             fields={platform.fields}
             values={values}
             onField={(id, value) => setField(id, value)}
+            extra={extra?.(index)}
           />
           {after?.(index)}
         </Fragment>
@@ -248,9 +355,23 @@ export function ProviderJobsTab() {
     setResult(null);
     setChecking(null);
   }, [step, activeId]);
-  // Panel 1 promises the starter page is served — an index.html at the site address, even
-  // before the content folder exists.
+  // Panel 1 promises the starter page is served — an index.html at the SITE ROOT of the
+  // address (without the content folder, which never holds one).
   const siteUrl = platform.buildSiteUrl ? platform.buildSiteUrl(values) : baseUrl;
+  /** The shape each site-root candidate stands for (GitLab's two address shapes). */
+  const siteCandidates = (): { url: string; urlType: string }[] => {
+    const entries = platform.siteUrlCandidates?.(values) ?? [];
+    return entries.map((entry) => ({
+      url: entry.url,
+      urlType: parseHostUrl(platform, entry.url, values)?.urlType ?? (values.urlType ?? 'project'),
+    }));
+  };
+  /** The two base addresses the site card shows (with the content folder), and the shape
+   * each one stands for — the check the reader presses must test exactly these. */
+  const baseCandidates = (): { url: string; urlType: string }[] =>
+    (['unique', 'project'] as const)
+      .map((urlType) => ({ url: platform.buildBaseUrl({ ...values, urlType }), urlType }))
+      .filter((entry) => /^https?:\/\//.test(entry.url));
   const stepsOf = (group: string): HostingStep[] =>
     group === 'account' ? platform.steps : group === 'access' ? guide.access : group === 'url' ? guide.url : guide.save;
   // "Next" stays disabled until every step of the current tab is ticked off (hover it to
@@ -261,32 +382,28 @@ export function ProviderJobsTab() {
     setChecking(kind);
     setResult(null);
     try {
-      const cids = [draft.cid, ...jobItems.map((item) => item.cid)];
-      // The site check also looks under the platform's other address shapes (GitLab's
-      // project site and unique domain): whichever answers 200 is this site's shape.
-      const candidates = platform.siteUrlCandidates?.(values) ?? [];
-      const detected: Record<string, string>[] = [];
+      // The final check is about the one content id chosen earlier — its bytes must hash
+      // to it exactly. The job list is never mixed in.
       const answer =
         kind === 'site'
           ? await checkIndex(
               siteUrl,
-              candidates.map((entry) => entry.url),
+              siteCandidates().map((entry) => entry.url),
               (root) => {
-                const hit = candidates.find((entry) => baseKey(entry.url) === baseKey(root));
-                if (hit) detected.push(hit.values);
+                // Whichever shape answered is this site's shape — kept, unless the
+                // reader picked one by hand: a manual choice wins over auto-detection.
+                const hit = siteCandidates().find((entry) => baseKey(entry.url) === baseKey(root));
+                if (hit && values.urlType !== hit.urlType && !values.urlTypeManual) {
+                  update({ values: { ...values, urlType: hit.urlType } });
+                }
               }
             )
           : kind === 'access'
             ? await checkAccess(platform.id, values)
             : kind === 'filled'
               ? checkFilled(platform.fields, values, baseUrl, draft.cid)
-              : (await checkSite(baseUrl)).ok
-                ? await checkCids(baseUrl, cids)
-                : await checkSite(baseUrl);
+              : await checkContentHash(baseUrl, draft.cid);
       setResult(answer);
-      // The shape the check found becomes the selected one, kept in the draft — unless
-      // the reader picked one by hand: a manual choice wins over auto-detection.
-      if (detected.length && !values.urlTypeManual) update({ values: { ...values, ...detected[0] } });
     } catch (error) {
       // A check always answers: a thrown error becomes a visible failure, never silence.
       setResult({ ok: false, message: `The check itself failed to run: ${errorMessage(error)}` });
@@ -314,12 +431,78 @@ export function ProviderJobsTab() {
       <div className="banner info small">This step appears to be complete — move on to the next step unless you want to change anything.</div>
     ) : null;
 
+  /**
+   * The "Check URLs" button of the site card: probes `<base>/index.html` under both
+   * address shapes and keeps whichever answered selected in the URL type dropdown.
+   */
+  const [urlCheck, setUrlCheck] = useState<CheckResult | null>(null);
+  const runUrlCheck = async () => {
+    setUrlCheck(null);
+    const candidates = baseCandidates();
+    const answer = await checkIndexUrls(candidates.map((entry) => entry.url));
+    if (answer.matched) {
+      const hit = candidates.find((entry) => baseKey(entry.url) === baseKey(answer.matched ?? ''));
+      // Pressing the check is an explicit request to find the working address, so the
+      // shape it found becomes the selected one (unlike the automatic site check, which
+      // leaves a hand-picked URL type alone).
+      if (hit && values.urlType !== hit.urlType) update({ values: { ...values, urlType: hit.urlType } });
+    }
+    setUrlCheck(answer);
+  };
+  /** The site card's own check row: the Check URLs button and its answer, nothing else. */
+  const urlCheckRow = (
+    <div className="form-stack" style={{ gap: 6 }}>
+      <div className="row">
+        <button className="primary small" onClick={() => void runUrlCheck()}>
+          Check URLs
+        </button>
+      </div>
+      {urlCheck && <span className={`small ${urlCheck.ok ? 'check-ok' : 'check-bad'}`}>{urlCheck.message}</span>}
+    </div>
+  );
+  /**
+   * The GitLab site card, shown under the account's last step: the two candidate
+   * addresses built from the fields, the Check URLs button and the URL type dropdown
+   * whose labels carry those same addresses.
+   */
+  const gitlabSiteCard = (
+    <div className="form-stack">
+      {(
+        [
+          ['Project site', platform.buildBaseUrl({ ...values, urlType: 'project' }), 'Fill in the user or group and the project name above.'],
+          [
+            'Unique domain',
+            platform.buildBaseUrl({ ...values, urlType: 'unique' }),
+            'Fill in the unique domain id above (Deploy → Pages shows it as <project>-<six-digit-id>.gitlab.io).',
+          ],
+        ] as const
+      ).map(([label, url, missing]) => (
+        <div key={label} className="field" style={{ marginBottom: 0 }}>
+          <span className="hint">{label}</span>
+          {url ? <CodeBox text={url} /> : <span className="hint">{missing}</span>}
+        </div>
+      ))}
+      {urlCheckRow}
+      {platform.fields
+        .filter((field) => field.id === 'urlType')
+        .map((field) => (
+          <FieldInput key={field.id} field={field} value={values[field.id] ?? ''} values={values} onChange={(value) => setField(field.id, value)} />
+        ))}
+    </div>
+  );
+
+  /** Jumps to the "Store data for providers" card on the Provider nodes tab. */
+  const navigate = useNavigate();
+  const viewStoreCard = () => navigate('/earn?tab=providers&card=store-data');
+
   const commit = (list: HostConfig[]) => {
     setHosts(list);
     saveHosts(list);
   };
 
-  const save = (): HostConfig | null => {
+  /** Saves the host. `quiet` skips the "Saved" toast when a button reports its own result
+   * (publishing says what happened to the content; a second toast adds nothing). */
+  const save = (quiet = false): HostConfig | null => {
     if (!/^https?:\/\//.test(baseUrl)) {
       toast('Fill in the fields so a base URL can be built (or type one)', 'error');
       return null;
@@ -338,7 +521,7 @@ export function ProviderJobsTab() {
     const existing = hosts.find((entry) => baseKey(entry.baseUrl) === key);
     commit(existing ? hosts.map((entry) => (entry.id === existing.id ? { ...host, id: entry.id, createdAt: entry.createdAt } : entry)) : [...hosts, host]);
     update({ label: '' });
-    toast(`Saved ${host.label}`, 'success');
+    if (!quiet) toast(`Saved ${host.label}`, 'success');
     return host;
   };
 
@@ -363,7 +546,7 @@ export function ProviderJobsTab() {
       toast('Fetch a job content id first', 'error');
       return;
     }
-    const host = save();
+    const host = save(true);
     if (!host) return;
     try {
       setPushing(true);
@@ -419,7 +602,7 @@ export function ProviderJobsTab() {
           </button>
         )}
       </span>
-      {urlWarning && <span className="small check-bad">{urlWarning}</span>}
+      {urlWarning && <span className="small check-bad" style={{ whiteSpace: 'pre-line' }}>{urlWarning}</span>}
     </label>
   );
   const nameField = (
@@ -620,7 +803,7 @@ export function ProviderJobsTab() {
         {step === 0 && (
           <>
             {completeBanner('account')}
-            <p className="instructions muted">{platform.about}</p>
+            {platform.about && <p className="instructions muted">{platform.about}</p>}
             <div className="row">
               <a className="link small" href={platform.signup} target="_blank" rel="noreferrer">
                 Sign up <ExternalLink size={12} />
@@ -636,7 +819,9 @@ export function ProviderJobsTab() {
               One step at a time: read it, click or copy what it says, then tick the check at the end. When every check is ticked, the site is
               serving files and you can go to the next step of this panel.
             </p>
-            {stepCards('account', platform.steps)}
+            {stepCards('account', platform.steps, undefined, (index) =>
+              platform.id === 'gitlab' && index === platform.steps.length - 1 ? gitlabSiteCard : null
+            )}
             {checkRow('site')}
           </>
         )}
@@ -656,6 +841,7 @@ export function ProviderJobsTab() {
                     key={field.id}
                     field={field}
                     value={values[field.id] ?? ''}
+                    values={values}
                     onChange={(value) => setField(field.id, value)}
                   />
                 ))}
@@ -698,6 +884,11 @@ export function ProviderJobsTab() {
 
         {step === 4 && (
           <>
+            <div className="row">
+              <button className="small" onClick={viewStoreCard}>
+                View on Store data for providers card
+              </button>
+            </div>
             <p className="hint">
               Everything this platform needs on one screen — the same fields and buttons as the tabs before, in one place.
             </p>
@@ -723,6 +914,7 @@ export function ProviderJobsTab() {
                   <FieldInput
                     field={field}
                     value={values[field.id] ?? ''}
+                    values={values}
                     onChange={(value) => setField(field.id, value)}
                   />
                 </Fragment>
@@ -738,6 +930,11 @@ export function ProviderJobsTab() {
               {publishButton}
             </div>
             {checkRow('final', 'Check the file hosting status')}
+            <div className="row">
+              <button className="small" onClick={viewStoreCard}>
+                View on Store data for providers card
+              </button>
+            </div>
           </>
         )}
 

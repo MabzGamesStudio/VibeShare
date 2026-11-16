@@ -86,6 +86,24 @@ export function bytesMatchCid(data: Uint8Array, cid: string): boolean {
   return cid === bytesCid(data) || cid === chunkIdOf(data);
 }
 
+/**
+ * True when these bytes are the whole file a manifest describes: the same total size and
+ * every chunk slice hashing to the chunk id the manifest lists. A native content id names
+ * its manifest, so the file itself never hashes to the id — the chunks are what prove the
+ * bytes (this is how a provider checks a URL that hosts the full file).
+ */
+export function bytesMatchManifest(data: Uint8Array, manifest: Manifest): boolean {
+  if (data.length !== manifest.size) return false;
+  let at = 0;
+  for (const chunk of manifest.chunks) {
+    if (chunkIdOf(data.subarray(at, at + chunk.size)) !== chunk.id) return false;
+    at += chunk.size;
+  }
+  // The chunks must account for every byte: a manifest that stops short leaves the rest
+  // of the file unproven, so it matches nothing.
+  return at === data.length;
+}
+
 export function contentIdOf(manifest: Manifest): string {
   return NATIVE_PREFIX + base32Encode(sha256(canonicalJson(manifest)));
 }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, describe, it } from 'node:test';
-import { bytesCid, bytesMatchCid } from '../src/shared/content.js';
+import { bytesCid, bytesMatchCid, bytesMatchManifest, chunkIdOf, contentIdOf, type Manifest } from '../src/shared/content.js';
 import { clientFor, randomBytesOf, startClient, startProvider, tempDir } from './helpers.js';
 
 describe('downloadable content copies (URLs and base URLs)', async () => {
@@ -168,6 +168,79 @@ describe('downloadable content copies (URLs and base URLs)', async () => {
       assert.equal(result.results[0].record.status, 'accepted', 'submitted one URL + cid through the client API');
       const mine = await api<{ items: { cid?: string }[] }>(`/api/nodes/${pid}/content-urls`);
       assert.ok(mine.items.some((i) => i.cid === cid), 'and it shows among the client’s links');
+    } finally {
+      await node.stop();
+      cleanup();
+    }
+  });
+});
+
+describe('a hosted URL job copy is the whole file behind a manifest', () => {
+  // A native content id names its manifest, so the file itself never hashes to the id:
+  // the manifest's chunk hashes are what prove the bytes. This is the check a provider
+  // runs on a URL job endpoint and the one the client now runs when testing that URL.
+  const data = randomBytesOf(4096, 23);
+  const chunkSize = 1024;
+  const chunks = Array.from({ length: Math.ceil(data.length / chunkSize) }, (_, index) => {
+    const slice = data.subarray(index * chunkSize, (index + 1) * chunkSize);
+    return { id: chunkIdOf(slice), size: slice.length };
+  });
+  const manifest = { v: 1, name: 'job.bin', mime: 'application/octet-stream', size: data.length, chunkSize, chunks, createdAt: new Date().toISOString() } as Manifest;
+
+  it('matches the whole file by its chunk hashes, not by the file hash', () => {
+    assert.ok(bytesMatchManifest(data, manifest), 'the whole file matches its manifest');
+    assert.ok(!bytesMatchCid(data, contentIdOf(manifest)), 'the file itself does not hash to the content id');
+  });
+
+  it('rejects a tampered byte, a truncated file, and a wrong manifest', () => {
+    const tampered = Buffer.from(data);
+    tampered[1500] ^= 0xff;
+    assert.ok(!bytesMatchManifest(tampered, manifest), 'a changed byte breaks its chunk');
+    assert.ok(!bytesMatchManifest(data.subarray(0, data.length - 1), manifest), 'a short file does not match');
+    const other = { ...manifest, chunks: manifest.chunks.map((chunk) => ({ ...chunk, id: chunk.id })).slice(0, -1) };
+    assert.ok(!bytesMatchManifest(data, other as Manifest), 'a different manifest does not match');
+  });
+});
+
+describe('a client tests a URL job that hosts the whole file', async () => {
+  // The user-facing bug this covers: a URL job hosts the full file at <base>/<cid>, whose
+  // id names the manifest — so a whole-file hash check alone always failed with
+  // "The downloaded content from the node/link does not match the expected cid".
+  const files = new Map<string, Buffer>();
+  const server: Server = createServer((req, res) => {
+    const key = (req.url ?? '').split('?')[0].slice(1);
+    const data = files.get(key);
+    if (!data) return res.writeHead(404).end();
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(data.length) }).end(data);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const provider = await startProvider({ signup: { grant: 100 } });
+  after(async () => {
+    await provider.stop();
+    server.close();
+  });
+
+  it('accepts the whole file by its manifest chunk hashes, and rejects tampered bytes', async () => {
+    const data = randomBytesOf(3 * 1024, 77);
+    const { cid } = await provider.importBuffer(data, { name: 'job.bin' });
+    const { dir, cleanup } = tempDir();
+    const { client: node, api } = await startClient(dir);
+    try {
+      await api('/api/nodes', { body: { text: provider.reference() } });
+      files.set(cid, data);
+      const good = await api<{ ok: boolean; size: number; error?: string }>('/api/content-link', {
+        body: { url: `${origin}/${cid}`, cid },
+      });
+      assert.equal(good.ok, true, 'the hosted whole file is accepted through its manifest');
+      assert.equal(good.size, data.length);
+
+      const tampered = Buffer.from(data);
+      tampered[2048] ^= 0xff;
+      files.set(cid, tampered);
+      const bad = await api<{ ok: boolean; error?: string }>('/api/content-link', { body: { url: `${origin}/${cid}`, cid } });
+      assert.equal(bad.ok, false, 'tampered bytes are refused');
+      assert.match(bad.error ?? '', /does not match the expected cid/);
     } finally {
       await node.stop();
       cleanup();

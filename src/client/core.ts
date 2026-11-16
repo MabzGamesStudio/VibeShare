@@ -39,7 +39,7 @@ import {
   type SealKey,
 } from '../shared/profiles.js';
 import { SOFTWARE, claimSigningPayload, type AccountFilterState, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type GroupInfo, type GroupSuggestion, type GroupSuggestionRequest, type GroupSuggestionResponse, type LookupResult, type Page, type Preferences, type TopicCreateRequest, type TopicCreateResponse, type TopicInfo, type TopicSuggestion, type TopicSuggestionRequest, type TopicSuggestionResponse } from '../shared/protocol.js';
-import { bytesMatchCid, CID_MISMATCH } from '../shared/content.js';
+import { bytesMatchCid, bytesMatchManifest, CID_MISMATCH } from '../shared/content.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
 import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
 import { signData } from '../shared/crypto.js';
@@ -50,7 +50,7 @@ import type { CreatorKind } from '../shared/taxonomy.js';
 import { conflictsWithDisregard } from '../shared/taxonomy.js';
 import { sourceKeyOf } from '../algorithm/sources.js';
 import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
-import { embedFor, formatSource, parseContentId, parseSource, platformOf, sourceFromUrl, withSources, baseId } from '../shared/sources.js';
+import { embedFor, formatSource, isNativeId, parseContentId, parseSource, platformOf, sourceFromUrl, withSources, baseId } from '../shared/sources.js';
 import { FetchError, Fetcher } from './fetcher.js';
 import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
 import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
@@ -1319,9 +1319,12 @@ export class ClientCore {
 
   /**
    * Fetches content from a link a provider offered (a provider sends a link instead of
-   * the bytes when it does not hold them). The retrieved content is accepted only when
-   * its bytes hash to the requested cid exactly — otherwise the answer says the
-   * downloaded content from the node/link does not match the expected cid.
+   * the bytes when it does not hold them), or from a URL job's host. The retrieved
+   * content is accepted only on an exact match: bytes that hash to the cid (a
+   * downloadable copy), or — for a native content id, which names its manifest — a file
+   * whose size and every chunk hash to that manifest (the same check a provider runs).
+   * Otherwise the answer says the downloaded content from the node/link does not match
+   * the expected cid.
    */
   async fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number; error?: string }> {
     let data: Uint8Array;
@@ -1332,8 +1335,25 @@ export class ClientCore {
     } catch {
       return { ok: false, size: 0, error: 'The link could not be reached' };
     }
-    if (!bytesMatchCid(data, cid)) return { ok: false, size: 0, error: CID_MISMATCH }; // only an exact cid match
-    return { ok: true, size: data.length };
+    if (bytesMatchCid(data, cid)) return { ok: true, size: data.length };
+    // A native content id is the hash of its manifest, so the file itself never hashes to
+    // it: the manifest's chunk hashes prove the bytes. The manifest comes from the cache
+    // when it was just fetched, otherwise from the providers holding that content.
+    if (isNativeId(cid)) {
+      try {
+        const { manifest } = await this.fetcher.manifest(cid);
+        if (bytesMatchManifest(data, manifest)) return { ok: true, size: data.length };
+        // Say how the bytes differ, so a wrong file at the URL is easy to spot.
+        return {
+          ok: false,
+          size: 0,
+          error: `${CID_MISMATCH} (the link served ${data.length} bytes; this content is ${manifest.size} bytes and its chunks do not match)`,
+        };
+      } catch {
+        // No manifest could be read: nothing proves these bytes are that content.
+      }
+    }
+    return { ok: false, size: 0, error: CID_MISMATCH }; // only an exact match is accepted
   }
 
   async contributions() {
