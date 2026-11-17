@@ -1,7 +1,7 @@
 // Node-side VVSH encoding: native FFmpeg first, shared Mediabunny/NodeAV as the explicit
 // no-executable fallback. Browsers use MediaRecorder when no local FFmpeg is configured.
-import { log } from '../shared/log.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import { log } from '../shared/node/log.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
 import { transcodeVvshChunks } from '../shared/vvsh-transcode.js';
 import { ffmpegAvailable, transcodeVvshFfmpeg } from './ffmpeg.js';

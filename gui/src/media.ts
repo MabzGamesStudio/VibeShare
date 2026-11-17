@@ -2,7 +2,7 @@
 // backend; discovered content plays from the platform's own media file, or its embed.
 import { useEffect, useState } from 'react';
 import type { FeedItem } from '../../src/shared/clientapi';
-import { embedFor, parseContentId } from '../../src/shared/sources';
+import { embedFor, parseContentId, sourceSchemeOf } from '../../src/shared/sources';
 import { needsResolving, resolveStream, streamUrl } from './api';
 
 export interface Playable {
@@ -74,11 +74,12 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
   if (item.media && /^https?:\/\//.test(item.media.url)) {
     return { kind: item.media.type, src: item.media.url, page: item.pageUrl ?? embed.page, fallback: embed.kind !== 'none' ? embed : undefined };
   }
-  // An Internet Archive image with no media URL still shows as the image itself — the
-  // feed renders it right away instead of an embedded player with a play button.
+  // A scheme that serves its own stills (an Internet Archive image) shows as the image
+  // itself — the feed renders it right away instead of an embedded player with a play button.
   const source = parsed?.sources[0];
-  if (item.format === 'image' && source?.scheme === 'ia') {
-    return { kind: 'image', src: `https://archive.org/services/img/${encodeURIComponent(source.value)}`, page: item.pageUrl ?? embed.page };
+  const still = source && sourceSchemeOf(source.scheme)?.imageFor?.(source.value);
+  if (item.format === 'image' && still) {
+    return { kind: 'image', src: still, page: item.pageUrl ?? embed.page };
   }
   return { ...embed, page: item.pageUrl ?? embed.page };
 }
@@ -107,9 +108,10 @@ export function imageFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'thumb
   if (item.format === 'image') {
     if (parsed?.native) return streamUrl(parsed.base);
     if (item.media?.type === 'image') return item.media.url;
-    // An Internet Archive image is its own picture: it loads in the feed at once.
-    const ia = parsed?.sources[0];
-    if (ia?.scheme === 'ia') return `https://archive.org/services/img/${encodeURIComponent(ia.value)}`;
+    // A scheme that serves its own stills is its own picture (see the registry).
+    const source = parsed?.sources[0];
+    const still = source && sourceSchemeOf(source.scheme)?.imageFor?.(source.value);
+    if (still) return still;
   }
   return item.thumbnailUrl;
 }

@@ -4,12 +4,25 @@ import { request as send, RemoteError, type RequestOptions, type Transport } fro
 import type { NodeType } from './noderef.js';
 import {
   infoSigningPayload,
+  negotiateProtocol,
   powInput,
+  PROTOCOL_VERSION,
   sessionSigningPayload,
+  type ProtocolVerdict,
   type NodeInfo,
   type SessionResponse,
   type SignedInfo,
 } from './protocol.js';
+
+/**
+ * A node outside the protocol versions this build speaks. Typed on purpose — not a
+ * random 400: the verdict says which side is out of range and what to do about it.
+ */
+export class ProtocolMismatchError extends RemoteError {
+  constructor(readonly verdict: ProtocolVerdict) {
+    super(0, 'protocol_incompatible', verdict.message ?? 'Incompatible protocol versions', verdict);
+  }
+}
 
 /**
  * How a client holds its account on a node:
@@ -78,7 +91,13 @@ export class NodeClient {
   }
 
   private request(url: string, options: RequestOptions = {}): Promise<Response> {
-    return send(url, { ...options, transport: this.options.transport?.() });
+    // Every request carries the protocol version this build speaks (v2): servers may
+    // serve an older shape because of it; old servers simply ignore the header.
+    return send(url, {
+      ...options,
+      headers: { 'x-vs-protocol': String(PROTOCOL_VERSION), ...options.headers },
+      transport: this.options.transport?.(),
+    });
   }
 
   /** Fetches the node's signed info and checks it is the node the reference names. */
@@ -108,6 +127,11 @@ export class NodeClient {
     if (this.options.expectedType && signed.info.type !== this.options.expectedType) {
       throw new RemoteError(0, 'wrong_type', `This is a ${signed.info.type} node, not a ${this.options.expectedType} node`);
     }
+    // Version negotiation: a node outside the protocol range this build speaks is a
+    // typed failure before anything else is asked of it. Pre-v2 nodes carry no range
+    // and advertise their bare `v`, which every range still covers.
+    const verdict = negotiateProtocol(signed.info.protocol, signed.info.v);
+    if (!verdict.ok) throw new ProtocolMismatchError(verdict);
     this.info = signed.info;
     return signed.info;
   }

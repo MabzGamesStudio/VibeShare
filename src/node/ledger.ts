@@ -1,7 +1,7 @@
 import { randomId } from '../shared/crypto.js';
-import { paymentRequired, notFound } from '../shared/http.js';
+import { paymentRequired, notFound } from '../shared/node/http.js';
 import type { AccountView, LedgerEntry } from '../shared/protocol.js';
-import { AppendLog, JsonFile } from '../shared/store.js';
+import { AppendLog, JsonFile } from '../shared/node/store.js';
 
 export interface Account {
   id: string;

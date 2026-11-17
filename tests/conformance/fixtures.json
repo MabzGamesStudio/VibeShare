@@ -1,0 +1,149 @@
+{
+  "$schema": "./README.md",
+  "sources": [
+    { "adapter": "youtube", "url": "https://www.youtube.com/watch?v=longVideo01", "source": "yt:longVideo01" },
+    { "adapter": "youtube", "url": "https://www.youtube.com/shorts/shortVid001", "source": "yt:shortVid001" },
+    { "adapter": "youtube", "url": "https://youtu.be/longVideo01", "source": "yt:longVideo01" },
+    { "adapter": "peertube", "url": "https://tube.example/w/kkGMgK9ZtnKfYAgnEtQxbv", "source": "peertube:tube.example/kkGMgK9ZtnKfYAgnEtQxbv" },
+    { "adapter": "peertube", "url": "https://tube.example/videos/watch/kkGMgK9ZtnKfYAgnEtQxbv", "source": "peertube:tube.example/kkGMgK9ZtnKfYAgnEtQxbv" },
+    { "adapter": "dailymotion", "url": "https://www.dailymotion.com/video/x8abcde", "source": "dm:x8abcde" },
+    { "adapter": "archive", "url": "https://archive.org/details/aurora_film", "source": "ia:aurora_film" },
+    { "adapter": "wikimedia", "url": "https://commons.wikimedia.org/wiki/File:Aurora_borealis_over_lake.jpg", "source": "url:${enc:https://commons.wikimedia.org/wiki/File:Aurora_borealis_over_lake.jpg}" },
+    { "adapter": "openverse", "url": "https://openverse.org/search?q=aurora", "source": "url:${enc:https://openverse.org/search?q=aurora}" },
+    { "adapter": "flickr", "url": "https://www.flickr.com/photos/me/555/", "source": "url:${enc:https://www.flickr.com/photos/me/555/}" },
+    { "adapter": "mastodon", "url": "https://masto.example/@ann/111111111111111111", "source": "masto:masto.example/@ann/111111111111111111" },
+    { "adapter": "bluesky", "url": "https://bsky.app/profile/did:plc:abc123/post/3kxyzpost", "source": "bsky:did:plc:abc123/3kxyzpost" },
+    { "adapter": "lemmy", "url": "https://lemmy.example/post/1", "source": "lemmy:lemmy.example/post/1" },
+    { "adapter": "web", "url": "https://example.org/elsewhere", "source": "url:${enc:https://example.org/elsewhere}" },
+    { "adapter": "vimeo", "url": "https://vimeo.com/76979871", "source": "vimeo:76979871" },
+    { "adapter": "vimeo", "url": "https://player.vimeo.com/video/76979871", "source": "vimeo:76979871" },
+    { "adapter": "twitch", "url": "https://www.twitch.tv/videos/12345", "source": "twitch:v12345" },
+    { "adapter": "unsplash", "url": "https://unsplash.com/photos/a-bridge-at-night-abc123", "source": "url:${enc:https://unsplash.com/photos/a-bridge-at-night-abc123}" },
+    { "adapter": "pexels", "url": "https://www.pexels.com/video/aurora-timelapse-12345/", "source": "url:${enc:https://www.pexels.com/video/aurora-timelapse-12345/}" },
+    { "adapter": "giphy", "url": "https://giphy.com/gifs/aurora-lights-abc", "source": "url:${enc:https://giphy.com/gifs/aurora-lights-abc}" },
+    { "adapter": "tenor", "url": "https://tenor.com/view/aurora-gif-123", "source": "url:${enc:https://tenor.com/view/aurora-gif-123}" },
+    { "adapter": "imgur", "url": "https://imgur.com/gallery/aurora-abc", "source": "url:${enc:https://imgur.com/gallery/aurora-abc}" },
+    { "adapter": "deviantart", "url": "https://www.deviantart.com/ann/art/Aurora-borealis-123", "source": "url:${enc:https://www.deviantart.com/ann/art/Aurora-borealis-123}" },
+    { "adapter": "europeana", "url": "https://www.europeana.eu/en/item/123/aurora_abc", "source": "url:${enc:https://www.europeana.eu/en/item/123/aurora_abc}" },
+    { "adapter": "reddit", "url": "https://www.reddit.com/r/pics/comments/abc123/aurora_over_the_lake/", "source": "url:${enc:https://www.reddit.com/r/pics/comments/abc123/aurora_over_the_lake/}" },
+    { "adapter": "tumblr", "url": "https://ann.tumblr.com/post/1234567890/aurora", "source": "url:${enc:https://ann.tumblr.com/post/1234567890/aurora}" },
+    { "adapter": "x", "url": "https://x.com/ann/status/1234567890123456789", "source": "x:1234567890123456789" },
+    { "adapter": "instagram", "url": "https://www.instagram.com/p/ABC123xyz/", "source": "ig:p/ABC123xyz" },
+    { "adapter": "spotify", "url": "https://open.spotify.com/track/abc123", "source": "spotify:track:abc123" },
+    { "adapter": "jamendo", "url": "https://www.jamendo.com/track/123/aurora-song", "source": "url:${enc:https://www.jamendo.com/track/123/aurora-song}" },
+    { "adapter": "freesound", "url": "https://freesound.org/people/ann/sounds/12345/", "source": "url:${enc:https://freesound.org/people/ann/sounds/12345/}" },
+    { "url": "https://soundcloud.com/ann/aurora-track", "source": "sc:ann/aurora-track" },
+    { "url": "https://www.tiktok.com/@ann/video/7234567890123456789", "source": "tiktok:7234567890123456789" },
+    { "url": "https://ipfs.io/ipfs/QmHash123abc/aurora.png", "source": "ipfs:QmHash123abc/aurora.png" }
+  ],
+  "discovery": [
+    {
+      "adapter": "youtube",
+      "config": { "youtube": { "enabled": true, "channels": ["UC1"], "siteUrl": "$FAKEWEB/yt" } },
+      "expectCount": 2,
+      "expect": [
+        { "id": "yt:longVideo01", "title": "How auroras form & why", "format": "video", "creator": { "name": "Science Channel" }, "stats": { "views": 12345 }, "topics": ["science"] },
+        { "id": "yt:shortVid001", "format": "short-video" }
+      ]
+    },
+    {
+      "adapter": "peertube",
+      "target": "instance:$FAKEWEB/peertube",
+      "config": { "peertube": { "enabled": true, "instances": ["$FAKEWEB/peertube"], "searchIndex": "$FAKEWEB/sepia" } },
+      "expect": [
+        { "id": "peertube:tube.example/kkGMgK9ZtnKfYAgnEtQxbv", "format": "video", "creator": { "name": "Ann makes videos" } },
+        { "id": "peertube:other.example/vertical1shortuuid0001", "format": "short-video", "rating": "nsfw" }
+      ]
+    },
+    {
+      "adapter": "dailymotion",
+      "target": "trending",
+      "config": { "dailymotion": { "enabled": true, "apiUrl": "$FAKEWEB/dm" } },
+      "expect": [{ "id": "dm:x8abcde", "title": "Aurora timelapse", "format": "video", "stats": { "likes": 50 } }]
+    },
+    {
+      "adapter": "archive",
+      "target": "recent",
+      "config": { "archive": { "enabled": true, "apiUrl": "$FAKEWEB/ia" } },
+      "expectCount": 3,
+      "expect": [
+        { "id": "ia:aurora_film", "format": "video" },
+        { "id": "ia:old_book", "format": "book" },
+        { "id": "ia:live_set", "format": "music" }
+      ]
+    },
+    {
+      "adapter": "wikimedia",
+      "target": "search:aurora",
+      "config": { "wikimedia": { "enabled": true, "apiUrl": "$FAKEWEB/commons/w/api.php" } },
+      "expect": [
+        {
+          "id": "url:${enc:https://commons.wikimedia.org/wiki/File:Aurora_borealis_over_lake.jpg}",
+          "title": "Aurora borealis over lake",
+          "description": "Green aurora over a lake",
+          "media": { "type": "image" }
+        }
+      ]
+    },
+    {
+      "adapter": "openverse",
+      "target": "search:aurora",
+      "config": { "openverse": { "enabled": true, "apiUrl": "$FAKEWEB/openverse/v1" } },
+      "expect": [
+        {
+          "id": "url:${enc:https://www.flickr.com/photos/ann/12345}",
+          "media": { "url": "https://live.staticflickr.com/aurora_big.jpg", "width": 1600 }
+        }
+      ]
+    },
+    {
+      "adapter": "flickr",
+      "target": "tags:aurora",
+      "config": { "flickr": { "enabled": true, "feedUrl": "$FAKEWEB/flickr/feed", "tags": [] } },
+      "expect": [
+        {
+          "id": "url:${enc:https://www.flickr.com/photos/me/555/}",
+          "creator": { "name": "Me Photo" },
+          "media": { "url": "https://live.staticflickr.com/65535/555_abc_b.jpg" }
+        }
+      ]
+    },
+    {
+      "adapter": "mastodon",
+      "target": "$FAKEWEB/masto#aurora",
+      "config": { "mastodon": { "enabled": true, "instances": ["$FAKEWEB/masto"], "tags": [] } },
+      "expect": [
+        {
+          "id": "masto:masto.example/@ann/111111111111111111",
+          "title": "Look at the #aurora tonight!",
+          "format": "short-video",
+          "media": { "url": "https://files.masto.example/v.mp4" }
+        }
+      ]
+    },
+    {
+      "adapter": "bluesky",
+      "target": "search:aurora",
+      "config": { "bluesky": { "enabled": true, "apiUrl": "$FAKEWEB/bsky" } },
+      "expectCount": 1,
+      "expect": [{ "id": "bsky:did:plc:abc123/3kxyzpost", "format": "image", "media": { "url": "https://cdn.bsky.app/full.jpg" } }]
+    },
+    {
+      "adapter": "lemmy",
+      "config": { "lemmy": { "enabled": true, "instances": ["$FAKEWEB/lemmy"] } },
+      "expect": [
+        { "id": "url:${enc:https://i.example/aurora.png}", "format": "image" },
+        { "id": "yt:lemmyvid01", "format": "video" }
+      ]
+    },
+    {
+      "adapter": "web",
+      "rounds": 7,
+      "config": { "web": { "enabled": true, "seeds": ["$FAKEWEB/site/"], "maxDepth": 1, "sameSite": true } },
+      "expect": [
+        { "id": "url:${enc:$FAKEWEB/site/page2}", "title": "Sunset over the hills", "format": "image" },
+        { "id": "url:${enc:$FAKEWEB/site/video}", "format": "short-video", "durationSeconds": 45, "media": { "url": "$FAKEWEB/media/clip.mp4" } }
+      ]
+    }
+  ]
+}

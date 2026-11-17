@@ -1,6 +1,6 @@
 // Just enough HTML understanding for the crawler: page metadata (title, OpenGraph,
 // Twitter cards, JSON-LD) and links. Regex based on purpose — no DOM, no scripts.
-import type { TraceStore } from '../../shared/tracing-node.js';
+import type { TraceStore } from '../../shared/node/tracing-node.js';
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
 

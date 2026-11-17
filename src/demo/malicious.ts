@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { blockHash, commentDataHash, commentIdAt, commentSigningPayload, type CommentBlock, type CommentData } from '../shared/comments.js';
 import { canonicalJson } from '../shared/encoding.js';
 import { generateIdentity, randomToken, signData, type Identity } from '../shared/crypto.js';
-import { createHttpServer, readJson, Router, type Ctx } from '../shared/http.js';
+import { createHttpServer, readJson, Router, type Ctx } from '../shared/node/http.js';
 import { infoSigningPayload, PROTOCOL_VERSION, SOFTWARE } from '../shared/protocol.js';
 
 /** One signed /v1/info answer, enough for a NodeClient to accept the node. */

@@ -1,6 +1,6 @@
 import { cleanText } from '../html.js';
 import type { Adapter, ApiBudget, CrawlContext, Discovered } from '../types.js';
-import { inferTopics, toIso, videoFormat } from '../types.js';
+import { hostMatcher, inferTopics, toIso, videoFormat } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Wikimedia Commons: freely licensed images, video and audio through the MediaWiki API.
@@ -83,6 +83,7 @@ async function commonsSearch(ctx: CrawlContext, config: WikimediaConfig, query: 
 }
 
 export const wikimedia: Adapter<WikimediaConfig> = {
+  ...hostMatcher(['wikimedia.org', 'wikipedia.org']),
   id: 'wikimedia',
   label: 'Wikimedia Commons',
   description: 'Freely licensed photos, illustrations and videos.',
@@ -141,6 +142,7 @@ async function openverseSearch(ctx: CrawlContext, config: OpenverseConfig, query
 }
 
 export const openverse: Adapter<OpenverseConfig> = {
+  ...hostMatcher(['openverse.org', 'wordpress.org']),
   id: 'openverse',
   label: 'Openverse',
   description: 'Openly licensed images from museums, Flickr, Wikimedia and more.',
@@ -259,6 +261,7 @@ const asTags = (query: string) =>
     .join(',');
 
 export const flickr: Adapter<FlickrConfig> = {
+  ...hostMatcher(['flickr.com', 'staticflickr.com']),
   id: 'flickr',
   label: 'Flickr',
   description: 'Recent public photos by tag (public feed, no key); with an API key, full-text search for the queries and client searches.',

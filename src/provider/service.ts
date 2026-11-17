@@ -1,16 +1,16 @@
 import { randomId } from '../shared/crypto.js';
 import { chunkIdOf } from '../shared/content.js';
-import { badRequest, forbidden, HttpError, notFound } from '../shared/http.js';
-import { log } from '../shared/log.js';
+import { badRequest, forbidden, HttpError, notFound } from '../shared/node/http.js';
+import { log } from '../shared/node/log.js';
 import type {
   StorageAssignment,
   StorageOffer,
   StorageRewards,
   StorageTask,
 } from '../shared/protocol.js';
-import { JsonFile } from '../shared/store.js';
-import type { TraceStore } from '../shared/tracing-node.js';
-import type { Account, Ledger } from '../commerce/ledger.js';
+import { JsonFile } from '../shared/node/store.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
+import type { Account, Ledger } from '../node/ledger.js';
 
 export interface StorageServiceConfig {
   enabled: boolean;

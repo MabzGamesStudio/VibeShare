@@ -4,6 +4,7 @@
 // development it can be passed as ?t=… instead.
 
 import type { NodeEntry } from '../../src/shared/clientapi';
+import { CLIENT_API, clientApiPath, type ClientApiRequest, type ClientApiResponse } from '../../src/shared/clientapi.generated';
 import type { TraceSettings } from '../../src/shared/tracing';
 import { APP_BASE } from './util';
 
@@ -173,6 +174,47 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiError(response.status, error?.code ?? 'error', error?.message ?? response.statusText, parsed);
   }
   return parsed as T;
+}
+
+// ---------------------------------------------------------------------------
+// A handful of calls through the generated typed route map
+// (src/shared/clientapi.generated.ts): their paths and response types come straight
+// from the route table, so a route that changes is a compile error here rather than a
+// broken call. Exactly the same requests as calling api() with a literal path — the
+// rest of the GUI migrates to these gradually.
+/** GET /api/version — the contract version of the local API. */
+export function getApiVersion(): Promise<ClientApiResponse<'get-version'>> {
+  return api(CLIENT_API['get-version'].path);
+}
+
+/** GET /api/state — everything the GUI renders from. */
+export function getClientState(): Promise<ClientApiResponse<'get-state'>> {
+  return api(CLIENT_API['get-state'].path);
+}
+
+/** PATCH /api/settings — a partial settings update. */
+export function patchSettings(body: ClientApiRequest<'patch-settings'>): Promise<ClientApiResponse<'patch-settings'>> {
+  return api(CLIENT_API['patch-settings'].path, { method: 'PATCH', body });
+}
+
+/** GET /api/jobs — the publish jobs of this device. */
+export function getJobs(): Promise<ClientApiResponse<'get-jobs'>> {
+  return api(CLIENT_API['get-jobs'].path);
+}
+
+/** GET /api/jobs/:id — one publish job. */
+export function getJob(id: string): Promise<ClientApiResponse<'get-jobs-id'>> {
+  return api(clientApiPath('get-jobs-id', { id }));
+}
+
+/** GET /api/saved — the saved cids and their collections. */
+export function getSaved(): Promise<ClientApiResponse<'get-saved'>> {
+  return api(CLIENT_API['get-saved'].path);
+}
+
+/** GET /api/toasts — the saved toast messages (optionally searched). */
+export function getToasts(query?: string): Promise<ClientApiResponse<'get-toasts'>> {
+  return api(query ? `${CLIENT_API['get-toasts'].path}?q=${encodeURIComponent(query)}` : CLIENT_API['get-toasts'].path);
 }
 
 /** Uploads a file to the daemon with progress (fetch cannot report upload progress). */

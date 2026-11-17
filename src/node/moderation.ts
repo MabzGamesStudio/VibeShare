@@ -2,8 +2,8 @@
 // and node peers. Every node keeps its own list and shares it with its peers when they
 // sync, so one operator's ban reaches the rest of the network.
 import { randomId } from '../shared/crypto.js';
-import { forbidden, HttpError } from '../shared/http.js';
-import { JsonFile } from '../shared/store.js';
+import { forbidden, HttpError } from '../shared/node/http.js';
+import { JsonFile } from '../shared/node/store.js';
 
 export type ModerationAction = 'permaban' | 'tempban' | 'ratelimit';
 export type ModerationSubject = 'account' | 'ip' | 'peer';

@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateIdentity } from '../src/shared/crypto.js';
-import { log } from '../src/shared/log.js';
+import { log } from '../src/shared/node/log.js';
 import { NodeClient, type AuthMode } from '../src/shared/nodeclient.js';
 import { ProviderNode, type ProviderConfig } from '../src/provider/node.js';
-import type { DeepPartial } from '../src/commerce/node.js';
+import type { DeepPartial } from '../src/node/node.js';
 
 log.setLevel((process.env.VIBESHARE_LOG as 'debug') ?? 'error');
 

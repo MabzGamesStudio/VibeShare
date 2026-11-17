@@ -1,5 +1,7 @@
 import type { ContentMedia } from '../../shared/protocol.js';
-import type { TraceStore } from '../../shared/tracing-node.js';
+import type { ExternalSource, SourceAdapter } from '../../shared/sources.js';
+import { sourceFromUrl, sourceSchemeOf } from '../../shared/sources.js';
+import type { TraceStore } from '../../shared/node/tracing-node.js';
 import { TOPICS, type CreatorKind, type Format, type Rating } from '../../shared/taxonomy.js';
 import type { ApiRequest, Fetched, PoliteFetcher } from './fetcher.js';
 
@@ -77,8 +79,14 @@ export interface AdapterResult {
 /**
  * A source of content: a platform API, a feed, or the web. `targets` lists units of
  * discovery work (an instance, a tag, a channel…); the crawler cycles through them.
+ *
+ * This interface is the public contract for content sources: the built-in adapters in
+ * ./adapters and every operator module (crawler.modules) speak it. It extends the
+ * shared SourceAdapter so URL recognition is one contract across the crawler and the
+ * client — every adapter recognizes its own platform's URLs (`match`) and turns them
+ * into the canonical source id (`parse`, `yt:…`).
  */
-export interface Adapter<C = Record<string, unknown>> {
+export interface Adapter<C = Record<string, unknown>> extends SourceAdapter {
   id: string;
   label: string;
   /** What this adapter finds, shown to operators. */
@@ -89,6 +97,29 @@ export interface Adapter<C = Record<string, unknown>> {
   targets?(config: C, queries: string[]): string[];
   discover?(ctx: CrawlContext, config: C, target: string): Promise<AdapterResult>;
   search?(ctx: CrawlContext, config: C, query: string): Promise<Discovered[]>;
+}
+
+/** URL recognition for an adapter that surfaces one registered source scheme. */
+export function schemeMatcher(scheme: string): Pick<SourceAdapter, 'match' | 'parse'> {
+  return {
+    match: (url) => sourceSchemeOf(scheme)?.match(url) ?? false,
+    parse: (url) => sourceSchemeOf(scheme)?.parse(url) ?? null,
+  };
+}
+
+/**
+ * URL recognition for a platform that carries no scheme of its own: its hosts
+ * (subdomains included), mapping to the plain web-link source they canonically carry.
+ */
+export function hostMatcher(hosts: string[]): Pick<SourceAdapter, 'match' | 'parse'> {
+  const onPlatform = (url: URL): boolean => {
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    return hosts.some((name) => host === name || host.endsWith(`.${name}`));
+  };
+  return {
+    match: onPlatform,
+    parse: (url) => (onPlatform(url) ? sourceFromUrl(url.toString()) : null),
+  };
 }
 
 /** Vertical media is short-form video; everything else keeps its format. */

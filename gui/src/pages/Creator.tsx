@@ -5,7 +5,7 @@ import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import type { AccountLinkProposal, AlgorithmInfo, CreatorAccount, CreatorContentSuggestion, CreatorIconSuggestion, CreatorInfo } from '../../../src/shared/protocol';
 import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
-import { creatorRefOf, SOURCE_LABELS } from '../../../src/shared/sources';
+import { creatorRefOf, sourceSchemeLabel } from '../../../src/shared/sources';
 import { api, errorMessage } from '../api';
 import { GridLayout } from '../components/feed/Cards';
 import { compact } from '../components/feed/Fields';
@@ -32,7 +32,7 @@ function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]
           <div className="hint" style={{ marginBottom: 6 }}>Related creators of {creatorName}</div>
           <div className="carousel">
             {related.map((account) => {
-              const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+              const label = sourceSchemeLabel(account.platform) ?? account.platform;
               const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
               const title = account.name ?? handle;
               return (
@@ -60,7 +60,7 @@ function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]
           <div className="hint" style={{ marginBottom: 6 }}>Links of {creatorName} on other platforms</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {elsewhere.map((account) => {
-              const label = SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform;
+              const label = sourceSchemeLabel(account.platform) ?? account.platform;
               const handle = account.handle.startsWith('@') ? account.handle : `@${account.handle}`;
               return account.url ? (
                 <a key={`${account.platform}:${account.handle}`} className="link row small" href={account.url} target="_blank" rel="noreferrer" title={account.url}>
@@ -495,7 +495,7 @@ export function CreatorPage() {
   for (const account of creator.accounts ?? []) {
     if (account.url && !seenUrls.has(account.url)) {
       seenUrls.add(account.url);
-      channelLinks.push({ url: account.url, label: SOURCE_LABELS[account.platform as keyof typeof SOURCE_LABELS] ?? account.platform });
+      channelLinks.push({ url: account.url, label: sourceSchemeLabel(account.platform) ?? account.platform });
     }
   }
   for (const url of creator.links ?? []) {

@@ -1,0 +1,16 @@
+{
+  "name": "@vibeshare/protocol",
+  "version": "0.1.0",
+  "description": "The VibeShare wire protocol: node info, accounts, content, storage and peering types.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": ["index.ts", "README.md"],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  }
+}

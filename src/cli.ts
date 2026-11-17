@@ -4,14 +4,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { AlgorithmNode, type AlgorithmConfig } from './algorithm/node.js';
 import { ClientNode } from './client/daemon.js';
-import type { BaseConfig, DeepPartial } from './commerce/node.js';
+import type { BaseConfig, DeepPartial } from './node/node.js';
 import { startDemo } from './demo/demo.js';
 import { sampleCommentChain, startMaliciousLoops, startMaliciousNetwork } from './demo/malicious.js';
 import { ProviderNode, type ProviderConfig } from './provider/node.js';
-import { findGuiDir } from './shared/assets.js';
-import { log } from './shared/log.js';
+import { findGuiDir } from './shared/node/assets.js';
+import { log } from './shared/node/log.js';
 import { SOFTWARE } from './shared/protocol.js';
-import { defaultDataDir } from './shared/store.js';
+import { defaultDataDir } from './shared/node/store.js';
 
 const HELP = `${SOFTWARE} — decentralized file sharing and streaming
 

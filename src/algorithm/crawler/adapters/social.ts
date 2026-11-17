@@ -2,7 +2,7 @@ import { formatSource, sourceFromUrl } from '../../../shared/sources.js';
 import { cleanText } from '../html.js';
 import { formatForSource } from '../oembed.js';
 import type { Adapter, AdapterResult, CrawlContext, Discovered } from '../types.js';
-import { inferTopics, shorten, toIso, videoFormat } from '../types.js';
+import { inferTopics, schemeMatcher, shorten, toIso, videoFormat } from '../types.js';
 
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|avif)(\?.*)?$/i;
 
@@ -79,6 +79,7 @@ async function mastodonTag(ctx: CrawlContext, origin: string, tag: string): Prom
 const hashtag = (query: string) => query.replace(/^#/, '').replace(/[^\p{L}\p{N}_]/gu, '');
 
 export const mastodon: Adapter<MastodonConfig> = {
+  ...schemeMatcher('masto'),
   id: 'mastodon',
   label: 'Mastodon',
   description: 'Photos and videos posted under hashtags on Mastodon servers.',
@@ -185,6 +186,7 @@ async function blueskySearch(ctx: CrawlContext, config: BlueskyConfig, query: st
 }
 
 export const bluesky: Adapter<BlueskyConfig> = {
+  ...schemeMatcher('bsky'),
   id: 'bluesky',
   label: 'Bluesky',
   description: 'Images and videos posted on Bluesky, and the links people share there.',
@@ -254,6 +256,7 @@ async function lemmyPosts(ctx: CrawlContext, url: string): Promise<Discovered[]>
 }
 
 export const lemmy: Adapter<LemmyConfig> = {
+  ...schemeMatcher('lemmy'),
   id: 'lemmy',
   label: 'Lemmy',
   description: 'Popular image posts and video links on Lemmy instances.',

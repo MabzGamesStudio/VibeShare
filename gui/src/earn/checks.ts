@@ -4,6 +4,7 @@
 import { sha1hex } from '../../../src/shared/crypto';
 import { api } from '../api';
 import { contentPath, contentUrl, DUMMY_CID, type HostConfig, type HostingField } from './hosting';
+import { baseKey } from './hosting/drafts';
 
 export interface CheckResult {
   ok: boolean;
@@ -333,10 +334,9 @@ function authHeader(platformId: string, token: string): Record<string, string> {
   return {};
 }
 
-/** A base URL as a key, so the same address never counts twice. */
-export function baseKey(url: string): string {
-  return url.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
-}
+// The base-URL key lives with the saved-hosts persistence now; re-exported here so its
+// importers keep finding it where they always did.
+export { baseKey } from './hosting/drafts';
 
 /**
  * Offers a host's base URL to every provider node that does not already have it — the list

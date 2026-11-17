@@ -5,7 +5,7 @@ import { normalizeSettings } from '../shared/clientdefaults.js';
 import { emptyClientData, formatSeed, parseSeed, type ClientData, type ClientStoreLike } from './model.js';
 import type { StoredReceipt } from './receipts.js';
 import type { StoredAccount } from '../shared/nodeclient.js';
-import { JsonFile } from '../shared/store.js';
+import { JsonFile } from '../shared/node/store.js';
 
 export type { ClientData } from './model.js';
 export { defaultSettings } from '../shared/clientdefaults.js';

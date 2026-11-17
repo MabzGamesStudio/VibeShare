@@ -1,0 +1,381 @@
+import assert from 'node:assert/strict';
+import { after, describe, it } from 'node:test';
+import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../../src/shared/content.js';
+import { defaultSettings, normalizeSettings } from '../../src/shared/clientdefaults.js';
+import type { SavedState } from '../../src/shared/clientapi.js';
+import { buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../../src/shared/vvsh-encode.js';
+import { chunkAt, parseVvshFile, parseVvshNode, pathToChunk, previewAt, serializeVvshFile, treeLeaves, unpackVvshNode, vvshFileJson, walkToChunk, type VvshHash } from '../../src/shared/vvsh.js';
+import { base64url, fromBase64url } from '../../src/shared/encoding.js';
+import { clientFor, randomBytesOf, startClient, startProvider, tempDir, waitFor } from '../helpers.js';
+
+const RENDITIONS = [
+  { id: '8k', label: '8K', height: 4320, kbps: 40_000 },
+  { id: '4k', label: '4K', height: 2160, kbps: 20_000 },
+  { id: '1080p', label: '1080p', height: 1080, kbps: 5_000 },
+  { id: '720p', label: '720p', height: 720, kbps: 2_500 },
+];
+const CONFIG: VvshBuildConfig = { bitrates: RENDITIONS, chunkSeconds: 10, previewSplits: 6, gop: 8 };
+
+/** Every payload of one rendition, in chunk order (the chunks of one bitrate). */
+function payloadsOf(objects: Map<VvshHash, Uint8Array>, rendition: string): Uint8Array[] {
+  const chunks: { index: number; data: Uint8Array }[] = [];
+  for (const bytes of objects.values()) {
+    const node = parseVvshNode(bytes);
+    if (node?.kind === 'chunk') {
+      const leaf = node.renditions.find((entry) => entry.id === rendition)!;
+      chunks.push({ index: node.index, data: objects.get(leaf.hash)! });
+    }
+  }
+  return chunks.sort((a, b) => a.index - b.index).map((entry) => entry.data);
+}
+
+describe('the .vvsh verifiable video stream format', async () => {
+  // A one minute video in ten second chunks: six chunks, four bitrate encodings each.
+  const source = randomBytesOf(60_000);
+  const objects = new Map<VvshHash, Uint8Array>();
+  const { file } = await buildVvsh(source, { totalSeconds: 60, config: CONFIG }, (hash, data) => { objects.set(hash, data); });
+  const fetchObject = async (hash: VvshHash) => objects.get(hash) ?? null;
+
+  it('takes the metadata the format names: version, bitrates, chunk length, counts and length', () => {
+    const plan = vvshPlan(60, CONFIG);
+    assert.equal(plan.chunkCount, 6, 'a minute in ten second chunks');
+    assert.equal(plan.previewCount, 6);
+    const meta = file.meta;
+    assert.equal(meta.v, 1);
+    assert.equal(meta.chunkSeconds, 10);
+    assert.equal(meta.chunkCount, 6);
+    assert.equal(meta.totalSeconds, 60);
+    assert.deepEqual(meta.bitrates.map((rendition) => rendition.id), ['8k', '4k', '1080p', '720p']);
+    assert.ok(meta.frames.gop >= 2, 'chunks hold more than one frame');
+  });
+
+  it('uses I, P and B frames in every chunk, and the last tree layers split into the encodings', async () => {
+    const node = await walkToChunk(file.root, 6, 3, fetchObject);
+    assert.ok(node && node.kind === 'chunk');
+    assert.equal(node.index, 3);
+    assert.deepEqual(
+      node.renditions.map((rendition) => rendition.id),
+      ['8k', '4k', '1080p', '720p'],
+      'the chunk node holds every bitrate encoding of that moment'
+    );
+    for (const rendition of node.renditions) {
+      const payload = objects.get(rendition.hash)!;
+      assert.equal(chunkIdOf(payload), rendition.hash, 'every leaf is the hash of its payload');
+      const frames = decodeVvshChunk(payload);
+      assert.equal(frames[0].type, 'I', 'every chunk starts with its keyframe');
+      assert.ok(frames.some((frame) => frame.type === 'P'));
+      assert.ok(frames.some((frame) => frame.type === 'B'));
+      assert.deepEqual(frameStats(frames), rendition.frames);
+    }
+  });
+
+  it('finds one node with a single path down the tree, and refuses a tampered step', async () => {
+    assert.deepEqual(treeLeaves(6), [0, 1, 2, 3, 4, 5], 'the chunk nodes sit in time order');
+    assert.equal(pathToChunk(6, 5).length, 3, 'one path of branch decisions, from the root down');
+    for (let index = 0; index < 6; index++) {
+      const node = await walkToChunk(file.root, 6, index, fetchObject);
+      assert.equal(node?.index, index, `every chunk has its own single path down (chunk ${index})`);
+    }
+    const node = await walkToChunk(file.root, 6, 5, fetchObject);
+    assert.equal(node && node.kind === 'chunk' ? node.index : null, 5);
+    // One flipped byte anywhere on the path and the walk stops believing it — the root
+    // record is on every path.
+    const original = objects.get(file.root)!;
+    const tampered = Uint8Array.from(original);
+    tampered[tampered.length - 1] ^= 1;
+    objects.set(file.root, tampered);
+    assert.equal(await walkToChunk(file.root, 6, 5, fetchObject), null);
+    objects.set(file.root, original);
+  });
+
+  it('seeks by timestamp to one chunk and shows the preview of that section', () => {
+    const meta = file.meta;
+    assert.equal(chunkAt(meta, 0), 0);
+    assert.equal(chunkAt(meta, 35), 3, '10 second chunks: 35 seconds in is chunk 3');
+    assert.equal(chunkAt(meta, 599), 5, 'the last chunk covers the tail');
+    const first = previewAt(meta, 2)!;
+    const later = previewAt(meta, 55)!;
+    assert.ok(first.startsWith('data:image/'), 'previews are small images, not chunks');
+    assert.notEqual(first, later, 'each section of the video has its own preview');
+  });
+
+  it('reassembles one bitrate back into the exact video, and round-trips the file', () => {
+    const exported = exportVvshStream(payloadsOf(objects, '8k'));
+    assert.deepEqual(Buffer.from(exported), Buffer.from(source), 'the top encoding keeps every byte');
+    const smaller = payloadsOf(objects, '720p');
+    assert.ok(smaller[0].length < payloadsOf(objects, '8k')[0].length, 'the lower encodings hold less');
+    const parsed = parseVvshFile(serializeVvshFile(file));
+    assert.equal(parsed.root, file.root);
+    assert.equal(parsed.meta.chunkCount, 6);
+    assert.throws(() => parseVvshFile('{ "meta": {} }'), /bad metadata/);
+    const broken = parseVvshNode(objects.get([...objects.keys()][0])!, 'chk1wrong');
+    assert.equal(broken, null, 'a record that hashes to something else is refused');
+  });
+
+  it('packs the file and the records as bytes, with the JSON only as a translation', () => {
+    const packed = serializeVvshFile(file);
+    assert.equal(String.fromCharCode(...packed.subarray(0, 4)), 'VVSH', 'the file is packed bytes, not JSON');
+    const back = parseVvshFile(packed);
+    assert.equal(back.root, file.root);
+    assert.equal(back.meta.chunkCount, file.meta.chunkCount);
+    assert.deepEqual(back.meta.bitrates, file.meta.bitrates);
+    assert.deepEqual(back.meta.previews, file.meta.previews);
+    // The same data as readable JSON — what the testing page shows.
+    assert.equal(parseVvshFile(JSON.stringify(vvshFileJson(file))).root, file.root);
+    // Records pack the same way and read back exactly.
+    const record = objects.get(file.root)!;
+    assert.equal(String.fromCharCode(...record.subarray(0, 4)), 'VVND', 'records are packed bytes too');
+    assert.equal(unpackVvshNode(record)?.kind, 'branch');
+    assert.equal(parseVvshNode(record, file.root)?.kind, 'branch');
+    assert.throws(() => parseVvshFile('this is not a vvsh file'), /not a \.vvsh file/);
+  });
+
+  it('packs large frames without allocating past anything', () => {
+    const block = randomBytesOf(2_000_000);
+    const frames = encodeVvshFrames([block, block, block, block, block, block, block, block]);
+    assert.equal(frames[0].type, 'I');
+    assert.ok(frames[1].data.length < 1000, 'a P frame over unchanged bytes costs almost nothing');
+  });
+
+  it('really stores fewer bytes in the smaller encoding than the bigger one', async () => {
+    // Two encoded streams the way the browser transcoder makes them: one big and sharp,
+    // one small and soft. The tree must keep them apart — never two identical leaves.
+    const big = randomBytesOf(240_000);
+    const small = randomBytesOf(60_000);
+    const renditions = [
+      { id: 'hi', label: '1080p', height: 1080, kbps: 5_000, fps: 30 },
+      { id: 'lo', label: '480p', height: 480, kbps: 1_200, fps: 30 },
+    ];
+    const objects = new Map<VvshHash, Uint8Array>();
+    const { file: built } = await buildVvsh(
+      big,
+      {
+        totalSeconds: 30,
+        config: { bitrates: renditions, chunkSeconds: 10, gop: 8 },
+        sourceMime: 'video/webm',
+        streams: { hi: big, lo: small },
+      },
+      (hash, data) => {
+        objects.set(hash, data);
+      }
+    );
+    const hiBytes = built.meta.bitrates.find((r) => r.id === 'hi')!.bytes!;
+    const loBytes = built.meta.bitrates.find((r) => r.id === 'lo')!.bytes!;
+    assert.ok(loBytes < hiBytes / 2, `the smaller encoding is really smaller (${loBytes} vs ${hiBytes} bytes)`);
+    let leaves = 0;
+    for (const bytes of objects.values()) {
+      const node = parseVvshNode(bytes);
+      if (node?.kind === 'chunk') {
+        leaves++;
+        const hi = node.renditions.find((rendition) => rendition.id === 'hi')!;
+        const lo = node.renditions.find((rendition) => rendition.id === 'lo')!;
+        assert.notEqual(hi.hash, lo.hash, 'the two encodings are different bytes, not copies');
+        assert.ok(lo.size < hi.size);
+      }
+    }
+    assert.equal(leaves, 3, 'three chunks');
+    assert.deepEqual(Buffer.from(exportVvshStream(payloadsOf(objects, 'lo'))), Buffer.from(small), 'the small encoding reassembles to its own stream');
+    assert.deepEqual(Buffer.from(exportVvshStream(payloadsOf(objects, 'hi'))), Buffer.from(big), 'the big encoding reassembles to its own stream');
+    // A missing encoding is an error — never a silent copy of another one.
+    await assert.rejects(
+      buildVvsh(
+        big,
+        {
+          totalSeconds: 30,
+          config: { bitrates: renditions, chunkSeconds: 10, gop: 8 },
+          sourceMime: 'video/webm',
+          streams: { hi: big },
+        },
+        () => undefined
+      ),
+      /No encoded stream for lo/
+    );
+  });
+
+  it('keeps a real upload intact in every encoding, so any of them plays', async () => {
+    const real = new Map<VvshHash, Uint8Array>();
+    const { file: realFile } = await buildVvsh(
+      source,
+      { totalSeconds: 60, config: CONFIG, sourceMime: 'video/mp4' },
+      (hash, data) => {
+        real.set(hash, data);
+      }
+    );
+    for (const rendition of realFile.meta.bitrates) {
+      assert.deepEqual(
+        Buffer.from(exportVvshStream(payloadsOf(real, rendition.id))),
+        Buffer.from(source),
+        `${rendition.label} carries the exact video (container and audio intact)`
+      );
+    }
+  });
+});
+
+describe('a provider storing a .vvsh stream', async () => {
+  const provider = await startProvider();
+  const url = provider.url();
+  after(() => provider.stop());
+  const source = randomBytesOf(20_000);
+  const objects = new Map<VvshHash, Uint8Array>();
+  const { file } = await buildVvsh(source, { totalSeconds: 30, config: CONFIG }, (hash, data) => { objects.set(hash, data); });
+
+  it('keeps the file (metadata and root) and stores every branch and child on its own', async () => {
+    const uploader = clientFor(url, 'identity');
+    for (const [hash, data] of objects) {
+      const put = await uploader.json<{ ok: boolean }>(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
+      assert.equal(put.ok, true);
+    }
+    await assert.rejects(
+      uploader.json(`/v1/vvsh/objects/${encodeURIComponent([...objects.keys()][0])}`, { method: 'PUT', raw: randomBytesOf(16) }),
+      /do not match/
+    );
+    const manifest: Manifest = { v: 1, name: 'clip.vvsh', mime: 'video/x-vvsh', size: 0, chunkSize: 1024 * 1024, chunks: [], createdAt: new Date().toISOString(), vvsh: file };
+    validateManifest(manifest);
+    const committed = await uploader.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest } });
+    assert.equal(committed.cid, contentIdOf(manifest));
+  });
+
+  it('charges per chunk for every object a user pulls while walking down from a branch', async () => {
+    const viewer = clientFor(url, 'pseudonym');
+    const balance = async () => (await viewer.json<{ account: { balance: number } }>('/v1/account')).account.balance;
+    const before = await balance();
+    const first = await viewer.fetch(`/v1/vvsh/objects/${encodeURIComponent(file.root)}`);
+    assert.ok(Number(first.headers.get('x-vs-charged')) >= 0, 'every object is priced per chunk');
+    const record = parseVvshNode(new Uint8Array(await first.arrayBuffer()), file.root);
+    assert.ok(record && record.kind === 'branch', 'the root is a branch stored on its own');
+    assert.ok((await balance()) <= before, 'the walk paid for what it fetched');
+    await assert.rejects(viewer.json('/v1/vvsh/objects/chk1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'), /does not have/);
+  });
+
+  it('quotes a conversion and refuses invalid media instead of copying it into every quality', async () => {
+    const account = clientFor(url, 'identity');
+    const config: VvshBuildConfig = { bitrates: RENDITIONS.slice(0, 2), chunkSeconds: 10, previewSplits: 3 };
+    const quoted = await account.json<{ quote: { credits: number; breakdown: { chunks: number; renditions: number; previews: number } } }>('/v1/vvsh/quote', {
+      body: { bytes: source.length, totalSeconds: 30, config },
+    });
+    assert.equal(quoted.quote.breakdown.chunks, 6, 'three chunks of two encodings');
+    assert.equal(quoted.quote.breakdown.previews, 3);
+    assert.ok(quoted.quote.credits > 0);
+    const before = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
+    const started = await account.json<{ jobId: string; quote: { credits: number } }>('/v1/vvsh/convert', {
+      body: { name: 'made-here.vvsh', bytes: source.length, totalSeconds: 30, config },
+    });
+    await account.json(`/v1/vvsh/convert/${started.jobId}/piece?index=0`, { method: 'PUT', raw: source });
+    const repeated = await account.json<{ bytes: number; duplicate?: boolean }>(`/v1/vvsh/convert/${started.jobId}/piece?index=0`, { method: 'PUT', raw: source });
+    assert.equal(repeated.bytes, source.length, 'a retried piece is not appended twice');
+    assert.equal(repeated.duplicate, true);
+    const finishing = await account.json<{ status: string }>(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {} });
+    assert.equal(finishing.status, 'running');
+    const failed = await waitFor(async () => {
+      const state = await account.json<{ status: string; error?: string }>(`/v1/vvsh/convert/${started.jobId}`);
+      return state.status === 'error' ? state : undefined;
+    });
+    assert.match(failed.error!, /Could not encode 8K/, 'invalid media cannot become several identical quality leaves');
+    const after = (await account.json<{ account: { balance: number } }>('/v1/account')).account.balance;
+    assert.equal(after, before - started.quote.credits, 'the quote was charged before the work ran');
+  });
+});
+
+describe('the video prefetch setting', () => {
+  it('keeps fetching a minute ahead by default, configurable within bounds', () => {
+    const settings = defaultSettings();
+    assert.equal(settings.vvshPrefetchSeconds, 60, 'a minute ahead by default');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 99_999 }).vvshPrefetchSeconds, 3_600, 'clamped to an hour');
+    assert.equal(normalizeSettings({ ...settings, vvshPrefetchSeconds: 0 }).vvshPrefetchSeconds, 0, '0 fetches only what is playing');
+    assert.equal(normalizeSettings({ vvshPrefetchSeconds: 30 }).vvshPrefetchSeconds, 30);
+    assert.equal(normalizeSettings({}).vvshPrefetchSeconds, 60, 'older settings pick up the default');
+  });
+});
+
+describe('a client streaming and exporting a .vvsh', async () => {
+  const provider = await startProvider();
+  const { dir, cleanup } = tempDir();
+  const { client, api } = await startClient(dir);
+  after(async () => {
+    await client.stop();
+    await provider.stop();
+    cleanup();
+  });
+  await api('/api/nodes', { body: { text: provider.reference() } });
+  const source = randomBytesOf(30_000);
+  const config: VvshBuildConfig = { bitrates: RENDITIONS, chunkSeconds: 10, previewSplits: 3, gop: 8 };
+  const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
+  const session = await api<{ jobId: string }>('/api/vvsh/session', {
+    body: { mode: 'publish', nodeId, name: 'stream.vvsh', totalSeconds: 30, config, sourceMime: 'video/mp4' },
+  });
+  await api(`/api/vvsh/session/${session.jobId}/piece`, { body: { data: base64url(source), index: 0 } });
+  const retried = await api<{ bytes: number; duplicate?: boolean }>(`/api/vvsh/session/${session.jobId}/piece`, {
+    body: { data: base64url(source), index: 0 },
+  });
+  assert.equal(retried.bytes, source.length, 'a local piece retry is idempotent');
+  assert.equal(retried.duplicate, true);
+  const finishing = await api<{ status: string }>(`/api/vvsh/session/${session.jobId}/finish`, { body: {} });
+  assert.equal(finishing.status, 'running', 'finishing answers at once and runs the work as a polled job');
+  const published = await waitFor(async () => {
+    const state = await api<{ status: string; cid?: string; manifest?: Manifest; error?: string }>(`/api/vvsh/session/${session.jobId}`);
+    if (state.status === 'error') throw new Error(state.error);
+    return state.status === 'done' ? state : undefined;
+  });
+  const file = published.manifest!.vvsh!;
+
+  it('automatically saves the VVSH id in Published Content', async () => {
+    const saved = await api<SavedState>('/api/saved');
+    const collection = saved.collections.find((entry) => entry.name === 'Published Content');
+    assert.ok(collection);
+    assert.ok(saved.items.find((item) => item.id === published.cid)?.collections.includes(collection.id));
+  });
+
+  it('skips to a timestamp and retrieves only that chunk, verified', async () => {
+    const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
+    // The request is just where to look: the root, the index and the encoding.
+    const chunk = await api<{ data: string; frames: { i: number; p: number; b: number }; path: string[] }>('/api/vvsh/chunk', {
+      body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index: 2, rendition: '1080p' },
+    });
+    assert.ok(chunk.frames.i >= 1, 'the chunk node carried its frame statistics');
+    assert.ok(chunk.path.length >= 2, 'the answer carries the merkle path it walked');
+    assert.equal(chunk.path[0], file.root, 'the path starts at the root');
+    assert.ok(chunk.data.length > 0);
+
+    // Starting from a branch the caller already checked walks only the rest of the path.
+    const again = await api<{ data: string; path: string[] }>('/api/vvsh/chunk', {
+      body: { nodeId, root: file.root, chunkCount: file.meta.chunkCount, index: 2, rendition: '1080p', from: { hash: chunk.path[1], depth: 1 } },
+    });
+    assert.equal(again.data, chunk.data, 'the same verified chunk comes back from a starting branch');
+    assert.equal(again.path.length, chunk.path.length - 1, 'only the rest of the path is walked');
+  });
+
+  it('downloads every chunk through the player request contract without a chunk-count error', async () => {
+    const pieces: Uint8Array[] = [];
+    for (let index = 0; index < file.meta.chunkCount; index++) {
+      // This is the request the download button used to send: { file } rather than
+      // { root, chunkCount }. It used to become pathToChunk(0, 0) → "No such chunk".
+      const answer = await api<{ data: string }>('/api/vvsh/chunk', {
+        body: { nodeId, file, index, rendition: '1080p' },
+      });
+      pieces.push(fromBase64url(answer.data));
+    }
+    assert.deepEqual(Buffer.from(exportVvshStream(pieces)), source, 'all downloaded chunks rebuild the selected video');
+  });
+
+  it('hands out byte ranges of the decoded stream, fetching only the chunks they fall in', async () => {
+    const rendition = file.meta.bitrates.find((entry) => entry.id === '1080p')!;
+    assert.equal(rendition.decodedBytes, source.length, 'the metadata knows the decoded size — that maps bytes to chunks');
+    const spec = base64url(new TextEncoder().encode(JSON.stringify({ n: nodeId, r: file.root, c: file.meta.chunkCount, q: '1080p', d: rendition.decodedBytes })));
+    const response = await fetch(`${client.url()}/stream/vvsh.${spec}?t=${client.token}`, { headers: { range: 'bytes=0-99' } });
+    assert.equal(response.status, 206, 'a range is answered as a part of the file');
+    assert.equal(response.headers.get('content-range'), `bytes 0-99/${source.length}`);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), source.subarray(0, 100), 'the first bytes come back exactly');
+    // A small range far into the stream: only the chunk that holds it is fetched.
+    const tail = await fetch(`${client.url()}/stream/vvsh.${spec}?t=${client.token}`, { headers: { range: 'bytes=29000-29099' } });
+    assert.equal(tail.status, 206);
+    assert.deepEqual(Buffer.from(await tail.arrayBuffer()), source.subarray(29000, 29100), 'the bytes of a far seek come back exactly');
+  });
+
+  it('downloads the whole stream at one bitrate as a full video file', async () => {
+    const nodeId = (await api<{ nodes: { id: string; type: string }[] }>('/api/state')).nodes.find((node) => node.type === 'provider')!.id;
+    const whole = await api<{ data: string; name: string }>('/api/vvsh/export', { body: { nodeId, file, rendition: '8k', name: 'movie.mp4' } });
+    assert.equal(whole.name, 'movie.mp4');
+    const exported = Buffer.from((await import('../../src/shared/encoding.js')).fromBase64url(whole.data));
+    assert.deepEqual(exported, Buffer.from(source), 'the top bitrate pieces back into the exact video');
+  });
+});

@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256hex } from '../shared/crypto.js';
-import { badRequest } from '../shared/http.js';
+import { badRequest } from '../shared/node/http.js';
 import type { ContentItem, ContentMedia, ContentOrigin, CreatorInfo, LookupResult, Preferences, SearchSort, TagNote } from '../shared/protocol.js';
 import type { Discovered } from './crawler/types.js';
 import { baseId, formatSource, isNativeId, parseContentId, parseSource, sourceFromUrl } from '../shared/sources.js';
-import { JsonFile } from '../shared/store.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import { JsonFile } from '../shared/node/store.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 import {
   CREATOR_KINDS,
   FORMATS,

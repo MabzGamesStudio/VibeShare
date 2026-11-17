@@ -1,5 +1,5 @@
 import { checkProofOfWork, isKeyId, randomToken, sha256hex, verifySignature } from '../shared/crypto.js';
-import { badRequest, forbidden, HttpError, readJson, unauthorized, type Ctx, type Router } from '../shared/http.js';
+import { badRequest, forbidden, HttpError, readJson, unauthorized, type Ctx, type Router } from '../shared/node/http.js';
 import { powInput, sessionSigningPayload, type SessionResponse, type SignupInfo } from '../shared/protocol.js';
 import type { Account, Ledger } from './ledger.js';
 

@@ -3,24 +3,28 @@ import { createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { pipeline } from 'node:stream/promises';
-import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../commerce/node.js';
-import { defaultCryptoPaymentConfigs } from '../commerce/payments.js';
-import type { Account } from '../commerce/ledger.js';
+import { BaseNode, DEFAULT_NODE_TOR, type BaseConfig, type NodeOptions } from '../node/node.js';
+import { defaultCryptoPaymentConfigs } from '../node/payments.js';
+import type { Account } from '../node/ledger.js';
 import { chunkIdOf, contentIdOf, bytesCid, bytesMatchCid, bytesMatchManifest, mimeFromName, MiB, validateManifest, type Manifest } from '../shared/content.js';
-import { isDevBuild } from '../shared/devbuild.js';
-import { buildManifestFromFile } from '../shared/contentfile.js';
+import { peerLinkFromProvider } from '../shared/peering.js';
+import { isDevBuild } from '../shared/node/devbuild.js';
+import { buildManifestFromFile } from '../shared/node/contentfile.js';
 import type { ContentLink, ContentUrlRecord, ContentUrlSubmission } from '../shared/protocol.js';
 import {
   badRequest,
   forbidden,
   HttpError,
+  immutableHeaders,
   notFound,
+  notModified,
   readBody,
   readJson,
+  sendJson,
   unauthorized,
   type Ctx,
-} from '../shared/http.js';
-import { log } from '../shared/log.js';
+} from '../shared/node/http.js';
+import { log } from '../shared/node/log.js';
 import { NodeClient } from '../shared/nodeclient.js';
 import { parseNodeRef } from '../shared/noderef.js';
 import type {
@@ -38,8 +42,8 @@ import type {
 } from '../shared/protocol.js';
 import { randomId } from '../shared/crypto.js';
 import { baseId, isChunkId, isNativeId } from '../shared/sources.js';
-import { JsonFile } from '../shared/store.js';
-import { RemoteError } from '../shared/http.js';
+import { JsonFile } from '../shared/node/store.js';
+import { RemoteError } from '../shared/node/http.js';
 import { StorageService, type StorageServiceConfig } from './service.js';
 import { ContentStore } from './store.js';
 import {
@@ -1194,16 +1198,20 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         if (links.length) return { missing: true, links };
         throw notFound('This node does not have the content');
       }
+      const price = this.config.pricing.manifest;
+      // A priced manifest is the account's alone; a free one can sit in shared caches.
+      const headers = immutableHeaders(cid, { scope: price > 0 ? 'private' : 'public' });
       if (ctx.req.method === 'HEAD') {
-        ctx.res.writeHead(200, { 'content-type': 'application/json' }).end();
+        ctx.res.writeHead(200, { 'content-type': 'application/json', ...headers }).end();
         return;
       }
-      const price = this.config.pricing.manifest;
-      if (price > 0) {
-        const account = this.auth.require(ctx);
-        this.ledger.debit(account.id, price, 'manifest', cid);
-      }
-      return manifest;
+      const account = price > 0 ? this.auth.require(ctx) : undefined;
+      // Revalidating clients already hold the manifest: answer 304 instead of sending
+      // — and charging for — a body they do not receive.
+      if (notModified(ctx, cid)) return;
+      if (account) this.ledger.debit(account.id, price, 'manifest', cid);
+      sendJson(ctx.res, 200, manifest, headers);
+      return undefined;
     });
 
     router.post('/v1/has', async (ctx) => {
@@ -1414,12 +1422,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.requirePeer(ctx, 'send');
       const id = ctx.params.id;
       if (!isChunkId(id)) throw badRequest('Not a chunk id');
+      if (!this.store.hasChunk(id)) throw notFound('This node does not have the chunk');
+      // Peer exchange is account-scoped: only the peer's own caches may keep the bytes.
+      if (notModified(ctx, id)) return;
       const data = await this.store.getChunk(id, { peers: false });
       if (!data) throw notFound('This node does not have the chunk');
       ctx.res.writeHead(200, {
         'content-type': 'application/octet-stream',
         'content-length': data.length,
-        'cache-control': 'private, max-age=31536000, immutable',
+        ...immutableHeaders(id, { scope: 'private' }),
         'x-content-type-options': 'nosniff',
       });
       ctx.res.end(data);
@@ -1433,7 +1444,9 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const data = await readBody(ctx.req, 9 * MiB);
       if (chunkIdOf(data) !== id) throw badRequest('The bytes do not match the chunk id');
       await this.store.putChunk(id, data);
-      return { ok: true };
+      // The ack names what the content-addressed URL now holds: exactly these bytes.
+      sendJson(ctx.res, 200, { ok: true }, immutableHeaders(id, { scope: 'private' }));
+      return undefined;
     });
 
     // A peer pushing content here sends the manifest as well: chunks without it cannot be
@@ -1493,10 +1506,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       // Check the price before reading, so an account without credits costs no backend traffic.
       const price = this.chunkPrice(record.size, cid);
       if (price > 0 && !account) throw unauthorized('An account is needed to download from this node');
+      // Paid bytes are the account's alone (their balance rides on the reply); free
+      // reads can sit in shared caches.
+      const headers = immutableHeaders(id, { scope: account ? 'private' : 'public' });
+      // The client already holds this exact chunk: no body, no backend read, no charge.
+      if (notModified(ctx, id)) return;
       const data = await this.store.getChunk(id);
       if (!data) throw new HttpError(503, 'unavailable', 'The chunk is stored but no backend can read it right now');
       if (ctx.req.method === 'HEAD') {
-        ctx.res.writeHead(200, { 'content-length': data.length, 'x-vs-price': String(price) }).end();
+        ctx.res.writeHead(200, { 'content-length': data.length, 'x-vs-price': String(price), ...headers }).end();
         return;
       }
       const { charged, balance } = this.charge(account, data.length, cid, 'download');
@@ -1507,7 +1525,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       ctx.res.writeHead(200, {
         'content-type': 'application/octet-stream',
         'content-length': data.length,
-        'cache-control': 'private, max-age=31536000, immutable',
+        ...headers,
         'x-content-type-options': 'nosniff',
         'x-vs-charged': String(charged),
         ...(balance !== undefined ? { 'x-vs-balance': String(balance) } : {}),
@@ -2118,7 +2136,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     // Peering: other content providers this node exchanges content bytes with.
     router.get('/v1/admin/peers', (ctx) => {
       this.requireAdmin(ctx);
-      return { peers: this.config.peering.peers, acceptPush: this.config.peering.acceptPush, sync: this.config.peering.sync };
+      return {
+        peers: this.config.peering.peers,
+        // The same relationships in the vocabulary every node kind shares (src/shared/peering.ts),
+        // so a fork's admin UI does not have to learn send/receive vs fetch/serve.
+        links: this.config.peering.peers.map(peerLinkFromProvider),
+        acceptPush: this.config.peering.acceptPush,
+        sync: this.config.peering.sync,
+      };
     });
     router.put('/v1/admin/peers', async (ctx) => {
       this.requireAdmin(ctx);

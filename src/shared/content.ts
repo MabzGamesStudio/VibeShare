@@ -27,6 +27,13 @@ export interface ManifestMeta {
   durationSeconds?: number;
   /** The images of a list-of-images content (their content ids or links), in order. */
   gallery?: string[];
+  /**
+   * Namespaced extension bag: arbitrary members a fork or app adds without a protocol
+   * change. Like every other manifest field it is covered by the content id (the
+   * canonical-JSON hash), so anything that stores or serves a manifest keeps it
+   * byte-faithfully; readers that do not understand it simply ignore it.
+   */
+  x?: Record<string, unknown>;
 }
 
 export interface ManifestCreator {
@@ -178,6 +185,13 @@ export function validateManifest(value: unknown): Manifest {
     if (meta.rating !== undefined && !RATINGS.includes(meta.rating)) fail('bad meta.rating');
     if (meta.durationSeconds !== undefined && !(typeof meta.durationSeconds === 'number' && meta.durationSeconds >= 0)) {
       fail('bad meta.durationSeconds');
+    }
+    // The extension bag is free-form but hashed into the content id: keep it a plain
+    // object of a sane size so ids stay cheap to compute. Unknown keys are fine —
+    // validation only ever looks at the members it knows.
+    if (meta.x !== undefined) {
+      if (!meta.x || typeof meta.x !== 'object' || Array.isArray(meta.x)) fail('bad meta.x');
+      if (canonicalJson(meta.x).length > 8192) fail('meta.x is too large');
     }
   }
   if (manifest.sources !== undefined) {

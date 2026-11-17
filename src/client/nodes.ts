@@ -1,11 +1,12 @@
 import type { AccountResponse, AuthMode, NodeEntry } from '../shared/clientapi.js';
 import { RemoteError, type Transport } from '../shared/remote.js';
-import { log } from '../shared/log.js';
+import { log } from '../shared/node/log.js';
 import { NodeClient, type RequestResult } from '../shared/nodeclient.js';
 import { formatNodeRef, parseNodeRefs, type NodeType } from '../shared/noderef.js';
 import type { ProviderInfo, AlgorithmInfo } from '../shared/protocol.js';
 import type { ClientStoreLike } from './model.js';
 import { NO_TRACES, type TraceLog } from './trace.js';
+import type { ClientCore } from './core.js';
 
 export function errorText(error: unknown): string {
   if (error instanceof RemoteError) return error.message;
@@ -284,5 +285,46 @@ export class NodeManager {
     return this.list(type)
       .map((node) => node.ref)
       .join('\n');
+  }
+}
+
+/**
+ * Asks a node on the account only when it charges for the answer. When the node says
+ * "this node charges …" to an anonymous request, its cached price was stale: the
+ * question is asked again with the account and the node's info is refreshed in the
+ * background, so the next question carries the account right away.
+ */
+export async function askJson<T>(core: ClientCore, node: NodeEntry, path: string, body: unknown, auth: boolean, timeoutMs?: number): Promise<T> {
+  const client = core.nodes.client(node);
+  // One dependency line per request, with where it went and how long it took: the
+  // pieces are collected here and only built into an event when tracing would record.
+  const call = (extra: Record<string, unknown>, error?: string) => {
+    if (!core.traces.recorder.shouldLog(error ? 'error' : 'dependency')) return;
+    core.traces.trace('dependency', 'core', `ask ${path}`, {
+      message: node.name,
+      data: core.traces.summarize({ node: node.id, url: `${client.url}${path}`, method: 'POST', auth, ...extra }),
+      error,
+    });
+  };
+  try {
+    const started = Date.now();
+    const result = await client.json<T>(path, { body, auth, timeoutMs });
+    call({ ms: Date.now() - started });
+    return result;
+  } catch (error) {
+    if (auth || !(error instanceof RemoteError) || error.status !== 401) {
+      call({ status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
+      throw error;
+    }
+    void core.nodes.refresh(node);
+    try {
+      const started = Date.now();
+      const result = await client.json<T>(path, { body, auth: true, timeoutMs });
+      call({ ms: Date.now() - started, auth: true });
+      return result;
+    } catch (error) {
+      call({ auth: true, status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
+      throw error;
+    }
   }
 }

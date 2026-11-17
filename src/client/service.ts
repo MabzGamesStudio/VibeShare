@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chunkIdOf } from '../shared/content.js';
 import type { NodeEntry, ServiceStatus, ServiceVerifyReport } from '../shared/clientapi.js';
-import { log } from '../shared/log.js';
+import { log } from '../shared/node/log.js';
 import type { ProviderInfo, StorageAssignment, StorageOffer, StorageTask } from '../shared/protocol.js';
 import { isChunkId } from '../shared/sources.js';
 import { errorText, type NodeManager } from './nodes.js';

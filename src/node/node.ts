@@ -13,12 +13,13 @@ import {
   readJson,
   Router,
   type Ctx,
-} from '../shared/http.js';
-import { log } from '../shared/log.js';
+} from '../shared/node/http.js';
+import { log } from '../shared/node/log.js';
 import type { Transport } from '../shared/remote.js';
-import { isOnionUrl, OnionService, TorRouter, type TorMode } from '../shared/tor.js';
+import { isOnionUrl, OnionService, TorRouter, type TorMode } from '../shared/node/tor.js';
 import { formatNodeRef, parseNodeRef, type NodeType } from '../shared/noderef.js';
 import {
+  enrichNodeInfo,
   infoSigningPayload,
   PROTOCOL_VERSION,
   SOFTWARE,
@@ -26,14 +27,14 @@ import {
   type NodeInfoBase,
   type SignedInfo,
 } from '../shared/protocol.js';
-import { ensureDir, JsonFile } from '../shared/store.js';
+import { ensureDir, JsonFile } from '../shared/node/store.js';
 import { normalizeTraceSettings, type TraceSettings } from '../shared/tracing.js';
-import { TraceStore, tracingRoutes } from '../shared/tracing-node.js';
+import { TraceStore, tracingRoutes } from '../shared/node/tracing-node.js';
 import { Auth, type SignupConfig } from './auth.js';
 import { Ledger } from './ledger.js';
 import { Moderation } from './moderation.js';
 import { Payments, assertNoPaymentSecrets, type PaymentConfig } from './payments.js';
-import { serveStatic } from '../shared/assets.js';
+import { serveStatic } from '../shared/node/assets.js';
 
 export interface BaseConfig {
   name: string;
@@ -278,7 +279,10 @@ export abstract class BaseNode<C extends BaseConfig> {
       peers: config.peers.filter((peer) => parseNodeRef(peer)),
       tracing: this.traces.info(),
     };
-    return { ...base, ...this.extraInfo() } as NodeInfo;
+    // The v2 additive fields (protocol range, capability map) come from the complete
+    // info — including what extraInfo() contributes — so every node kind publishes
+    // them without knowing they exist.
+    return enrichNodeInfo({ ...base, ...this.extraInfo() } as NodeInfo);
   }
 
   signedInfo(): SignedInfo {

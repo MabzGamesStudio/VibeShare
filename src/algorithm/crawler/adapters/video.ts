@@ -1,6 +1,6 @@
 import { decodeEntities, cleanText } from '../html.js';
 import type { Adapter, ApiBudget, CrawlContext, Discovered } from '../types.js';
-import { inferTopics, toIso, videoFormat } from '../types.js';
+import { inferTopics, schemeMatcher, toIso, videoFormat } from '../types.js';
 import type { Format } from '../../../shared/taxonomy.js';
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,7 @@ async function youtubeSearch(ctx: CrawlContext, config: YouTubeConfig, query: st
 }
 
 export const youtube: Adapter<YouTubeConfig> = {
+  ...schemeMatcher('yt'),
   id: 'youtube',
   label: 'YouTube',
   description: 'New uploads of followed channels (RSS, no key); with a YouTube Data API key also searches for the queries and for client searches.',
@@ -201,6 +202,7 @@ async function peertubeList(ctx: CrawlContext, origin: string, path: string): Pr
 }
 
 export const peertube: Adapter<PeerTubeConfig> = {
+  ...schemeMatcher('peertube'),
   id: 'peertube',
   label: 'PeerTube',
   description: 'Recent videos of PeerTube instances, and the federation-wide SepiaSearch index.',
@@ -282,6 +284,7 @@ async function dailymotionList(ctx: CrawlContext, config: DailymotionConfig, par
 }
 
 export const dailymotion: Adapter<DailymotionConfig> = {
+  ...schemeMatcher('dm'),
   id: 'dailymotion',
   label: 'Dailymotion',
   description: 'Trending and topical videos through the public Dailymotion API.',
@@ -377,6 +380,7 @@ async function archiveSearch(ctx: CrawlContext, config: ArchiveConfig, q: string
 const MEDIA = 'mediatype:(movies OR audio OR image)';
 
 export const archive: Adapter<ArchiveConfig> = {
+  ...schemeMatcher('ia'),
   id: 'archive',
   label: 'Internet Archive',
   description: 'Films, recordings and images from archive.org.',

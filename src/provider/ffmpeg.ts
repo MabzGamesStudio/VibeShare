@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TraceStore } from '../shared/tracing-node.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 import { vvshPlan, type VvshBuildConfig } from '../shared/vvsh-encode.js';
 
 const executable = () => process.env.VIBESHARE_FFMPEG?.trim() || 'ffmpeg';

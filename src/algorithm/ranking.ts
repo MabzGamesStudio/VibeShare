@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { log } from '../shared/log.js';
+import { log } from '../shared/node/log.js';
 import type { Preferences } from '../shared/protocol.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 import type { Entry } from './registry.js';
 
 export const STRATEGIES = ['balanced', 'hot', 'new', 'top', 'random', 'custom'] as const;

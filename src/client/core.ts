@@ -1,8 +1,14 @@
-// The client's logic: nodes, feeds, content, credits, publishing and the user's data.
-// The desktop/command-line daemon and the web client (in a service worker) both run
-// it; they only differ in where data is kept and how requests arrive. Browser-safe.
+// The client's coordinator: nodes, feeds, content, credits, publishing and the user's
+// data meet here. Each seam lives in its own module (feeds.ts, content.ts, credits.ts,
+// publish.ts, profile.ts) and this class owns the shared collaborators and delegates to
+// them — the public surface of ClientCore is what the daemon, the route table (api.ts)
+// and the web client use, unchanged. The desktop/command-line daemon and the web client
+// (in a service worker) both run it; they only differ in where data is kept and how
+// requests arrive. Browser-safe.
 import type {
-  ClientState,
+  BloomStatus,
+  CommentPostRequest,
+  CommentsResponse,
   ContentView,
   CreatorView,
   FeedItem,
@@ -14,73 +20,55 @@ import type {
   ProfileSummary,
   PublishPreview,
   PublishRequest,
+  SavedState,
+  SearchHistoryItem,
   Settings,
-  Subscription,
+  ToastMessage,
   TopicView,
 } from '../shared/clientapi.js';
-import type { BloomStatus, CommentPostRequest, CommentsResponse, SavedState, SearchHistoryItem, ToastMessage } from '../shared/clientapi.js';
-import { applySettingsPatch, defaultSettings, normalizeSettings, pagePreferences } from '../shared/clientdefaults.js';
-import { base64url, fromBase64url } from '../shared/encoding.js';
-import { badRequest, notFound } from '../shared/errors.js';
-import { log } from '../shared/log.js';
-import { parseNodeRef } from '../shared/noderef.js';
-import { matchesLanguages } from '../shared/language.js';
-import {
-  decodeProfileSeed,
-  encodeProfileSeed,
-  hashProfilePassword,
-  newProfileSeed,
-  profileSealKey,
-  randomProfileSalt,
-  sealProfile,
-  unsealProfile,
-  verifyProfilePassword,
-  type ProfileAccess,
-  type SealKey,
-} from '../shared/profiles.js';
-import { SOFTWARE, claimSigningPayload, type AccountFilterState, type AccountLinkProposal, type AccountLinkResponse, type AlgorithmInfo, type BloomStorageState, type ClaimResponse, type ContentItem, type CreatorContentResponse, type CreatorContentSuggestion, type CreatorIconResponse, type CreatorIconSuggestion, type CreatorInfo, type GroupInfo, type GroupSuggestion, type GroupSuggestionRequest, type GroupSuggestionResponse, type LookupResult, type Page, type Preferences, type TopicCreateRequest, type TopicCreateResponse, type TopicInfo, type TopicSuggestion, type TopicSuggestionRequest, type TopicSuggestionResponse } from '../shared/protocol.js';
-import { bytesMatchCid, bytesMatchManifest, CID_MISMATCH } from '../shared/content.js';
-import { RemoteError, type Transport } from '../shared/remote.js';
-import { BLOOM_INLINE_MAX_BYTES, type BloomFilterData } from '../shared/bloom.js';
-import { signData } from '../shared/crypto.js';
-import { DEFAULT_CHUNK_SIZE, chunkIdOf, contentIdOf, signManifest, type Manifest, type ManifestMeta } from '../shared/content.js';
-import { assembleVvshWebm, DEFAULT_VVSH_BUILD, buildVvsh as encodeVvsh, decodeVvshChunk, decodeVvshFrames, exportVvshStream, type VvshBuildConfig } from '../shared/vvsh-encode.js';
-import { parseVvshNode, pathToChunk, type VvshConvertQuote, type VvshFile, type VvshFrameStats } from '../shared/vvsh.js';
+import type {
+  AccountFilterState,
+  AccountLinkProposal,
+  AccountLinkResponse,
+  BloomStorageState,
+  ContentItem,
+  CreatorContentResponse,
+  CreatorContentSuggestion,
+  CreatorIconResponse,
+  CreatorIconSuggestion,
+  CreatorInfo,
+  GroupSuggestion,
+  GroupSuggestionRequest,
+  GroupSuggestionResponse,
+  TopicCreateRequest,
+  TopicCreateResponse,
+  TopicInfo,
+  TopicSuggestion,
+  TopicSuggestionRequest,
+  TopicSuggestionResponse,
+} from '../shared/protocol.js';
+import type { ClientState } from '../shared/clientapi.js';
 import type { CreatorKind } from '../shared/taxonomy.js';
-import { conflictsWithDisregard } from '../shared/taxonomy.js';
-import { sourceKeyOf } from '../algorithm/sources.js';
-import { commentRemovePayload, commentSigningPayload } from '../shared/comments.js';
-import { embedFor, formatSource, isNativeId, parseContentId, parseSource, platformOf, sourceFromUrl, withSources, baseId } from '../shared/sources.js';
-import { FetchError, Fetcher } from './fetcher.js';
-import { BloomBook, SCOPES_OF_EVENT, type BloomScope } from './bloom.js';
-import type { ChunkStore, ClientStoreLike, ProfilePayload, ProfileRecord, UploadStore } from './model.js';
-import { emptySavedState, prepareClientSave } from './model.js';
-import { errorText, NodeManager } from './nodes.js';
+import { SOFTWARE } from '../shared/protocol.js';
+import type { Manifest, ManifestMeta } from '../shared/content.js';
+import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
+import type { VvshConvertQuote, VvshFile, VvshFrameStats } from '../shared/vvsh.js';
+import type { Transport } from '../shared/remote.js';
+import { parseNodeRef } from '../shared/noderef.js';
+import { Fetcher } from './fetcher.js';
+import { BloomBook } from './bloom.js';
+import type { ChunkStore, ClientStoreLike, UploadStore } from './model.js';
+import { prepareClientSave } from './model.js';
+import { NodeManager } from './nodes.js';
 import { Publisher } from './publisher.js';
-import { rememberPublished } from './published.js';
 import { NO_TRACES, type TraceLog } from './trace.js';
+import { Content } from './content.js';
+import { Credits } from './credits.js';
+import { Feeds, type FeedKind } from './feeds.js';
+import { Profiles } from './profile.js';
+import { Publishing } from './publish.js';
 
-export type FeedKind = 'feed' | 'search' | 'latest';
-
-export function encodeCursor(value: Record<string, string | null>): string {
-  return base64url(new TextEncoder().encode(JSON.stringify(value)));
-}
-
-export function decodeCursor(text: string | undefined): Record<string, string | null> | null {
-  if (!text) return null;
-  try {
-    return JSON.parse(new TextDecoder().decode(fromBase64url(text))) as Record<string, string | null>;
-  } catch {
-    return null;
-  }
-}
-
-/** A timer that never holds a process open (unref'd where the runtime knows the trick). */
-function later(ms: number, fn: () => void): ReturnType<typeof setTimeout> {
-  const timer = setTimeout(fn, ms);
-  (timer as { unref?: () => void }).unref?.();
-  return timer;
-}
+export { encodeCursor, decodeCursor, type FeedKind } from './feeds.js';
 
 export interface ClientCoreOptions {
   store: ClientStoreLike;
@@ -125,6 +113,13 @@ export class ClientCore {
   /** The daemon's trace log (a no-op without one). */
   readonly traces: TraceLog;
 
+  /** The seams of the client's logic, one module each (see the imports above). */
+  private readonly feeds: Feeds;
+  private readonly contents: Content;
+  private readonly credits: Credits;
+  private readonly publishing: Publishing;
+  private readonly profiles: Profiles;
+
   constructor(readonly options: ClientCoreOptions) {
     this.store = options.store;
     this.cache = options.cache;
@@ -134,15 +129,20 @@ export class ClientCore {
     this.fetcher = new Fetcher(this.nodes, this.cache, this.traces);
     this.publisher = new Publisher(this.store, this.nodes, options.uploads, this.traces);
     this.blooms = new BloomBook(this.store, this.traces);
+    this.feeds = new Feeds(this);
+    this.contents = new Content(this);
+    this.credits = new Credits(this);
+    this.publishing = new Publishing(this);
+    this.profiles = new Profiles(this);
     // Hidden profiles are encrypted at rest: what is written out is the sealed form.
     this.store.data.prepare = prepareClientSave;
     const storeChanged = this.store.changed.bind(this.store);
     this.store.changed = () => {
       storeChanged();
-      this.scheduleSeal();
+      this.profiles.scheduleSeal();
     };
     // The account filter's resubmission job (a no-op while the setting is off).
-    this.scheduleBloomJob();
+    this.feeds.scheduleBloomJob();
   }
 
   get settings(): Settings {
@@ -156,375 +156,35 @@ export class ClientCore {
       nodes: this.nodes.list(),
       settings: this.settings,
       subscriptions: this.store.data.data.subscriptions,
-      profiles: this.profileSummaries(),
+      profiles: this.profiles.profileSummaries(),
       activeProfile: this.store.data.data.activeProfile ?? 'main',
-      locked: this.isLocked(),
+      locked: this.profiles.isLocked(),
     };
   }
 
   feedItem(node: NodeEntry, item: ContentItem): FeedItem {
-    // Thumbnails the algorithm node stores come through the client; those of discovered content are on the platform.
-    const remote = item.thumbnail && /^https?:\/\//.test(item.thumbnail) ? item.thumbnail : undefined;
-    const key = !remote ? item.thumbnail?.split('/').pop() : undefined;
-    // The images of a list-of-images content: an image published on VibeShare is named by
-    // its content id and plays through this client like any other native content.
-    const gallery = item.gallery?.map((media) => {
-      const parsed = parseContentId(media.url);
-      return parsed?.native ? { ...media, url: this.options.streamUrl(parsed.base, false) } : media;
-    });
-    return {
-      ...item,
-      gallery,
-      via: node.id,
-      viaName: node.name,
-      thumbnailUrl: remote ?? (key ? this.options.thumbnailUrl(node, key) : undefined),
-    };
-  }
-
-  private algorithmsFor(kind: FeedKind): NodeEntry[] {
-    const priceKind = kind === 'search' ? 'search' : 'feed';
-    return this.nodes.active('algorithm').filter((node) => this.nodes.affordable(node, this.nodes.algorithmPrice(node, priceKind)));
-  }
-
-  /**
-   * The seen-content filter carried inside a request to an algorithm node — the search
-   * filter: only when the user sends one at all, and only while it is small enough for
-   * that node to accept. The account's much larger filter never travels this way: the node
-   * keeps it and applies it while searching.
-   */
-  private bloomPayload(node: NodeEntry): { bloom?: BloomFilterData } {
-    const settings = this.settings.searchBloom;
-    if (!settings.enabled) return {};
-    const limit = (node.info as AlgorithmInfo | undefined)?.bloom?.inlineMaxBits ?? BLOOM_INLINE_MAX_BYTES * 8;
-    const payload = this.blooms.payload('search', limit);
-    return payload ? { bloom: payload } : {};
-  }
-
-  /**
-   * The local seen-content filters applied to a page: what the user has opened and the
-   * previews they have seen both count as seen. Depending on the seen-content mode, seen
-   * content is either eliminated from the results completely, or kept with an altered
-   * ranking — pushed down below everything the user has not seen. The "*watched" mark
-   * only goes to content actually opened before (the selected filter): a preview is not
-   * a watch, so the first open of previewed content is never marked watched.
-   */
-  private applySeenFilters(items: FeedItem[]): FeedItem[] {
-    const rank = this.settings.seenContentMode === 'rank';
-    const shown: FeedItem[] = [];
-    const demoted: FeedItem[] = [];
-    for (const item of items) {
-      // Only the algorithm node's small leading native group is seen-exempt. Other
-      // native items still follow the user's ordinary seen-content preference.
-      if (item.nativeSuggestion) {
-        const identity = { id: item.id, contentId: item.contentId, link: item.link };
-        shown.push(this.blooms.sees('selected', identity) ? { ...item, seen: true } : item);
-        continue;
-      }
-      const identity = { id: item.id, contentId: item.contentId, link: item.link };
-      const seen = this.blooms.sees('selected', identity) || this.blooms.sees('preview', identity);
-      if (!seen) {
-        shown.push(item);
-        continue;
-      }
-      const marked = this.blooms.sees('selected', identity) ? { ...item, seen: true } : item;
-      if (rank) demoted.push(marked);
-    }
-    return [...shown, ...demoted];
-  }
-
-  /** Native content stays ahead of external results after blending or local ranking. */
-  private nativeFirst(items: FeedItem[]): FeedItem[] {
-    return [...items.filter((item) => item.id.startsWith('vs1')), ...items.filter((item) => !item.id.startsWith('vs1'))];
+    return this.feeds.feedItem(node, item);
   }
 
   /**
    * Asks the algorithm nodes for a page. "blend" mixes every enabled node by priority
    * (round robin, without duplicates); "primary" uses the first node that answers.
    */
-  async collect(kind: FeedKind, body: Record<string, unknown>, cursor?: string): Promise<FeedResponse> {
-    if (kind === 'search') this.rememberSearch(String(body.query ?? ''));
-    const nodes = this.algorithmsFor(kind);
-    // Entry and result of the feed/search flow: which page was asked of how many nodes,
-    // and what came back (counts and statuses only — never the items themselves).
-    const component = kind === 'latest' ? 'core.subscriptions' : `core.${kind}`;
-    this.traces.trace('basic', component, `${kind} page`, {
-      message: kind === 'search' ? String(body.query ?? '').slice(0, 120) : undefined,
-      data: { nodes: nodes.length, cursor: Boolean(cursor) },
-    });
-    const errors: FeedResponse['errors'] = [];
-    if (!nodes.length) return { items: [], errors: [{ node: '', name: 'Client', error: 'No algorithm node is enabled' }] };
-    const cursors = decodeCursor(cursor) ?? {};
-    const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
-    const priceKind = kind === 'search' ? 'search' : 'feed';
-    // The subscriptions feed ("latest") leads with native suggestions and otherwise lists
-    // the newest followed content: seen-content filters do not touch it. No filter travels along,
-    // and nothing is hidden, demoted or marked locally — it lists what is recent, seen
-    // or not. Every other feed and search results are filtered as the user chose.
-    const seenContent = kind !== 'latest';
-    // Nodes filter by language too; this covers nodes that do not, and content they pass on.
-    const languages = ((body.preferences ?? body.filters) as Preferences | undefined)?.languages ?? this.settings.preferences.languages;
-    const wanted = (item: ContentItem) => matchesLanguages(item, languages);
-    const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
-      const price = this.nodes.algorithmPrice(node, priceKind);
-      // (Paid answers carry the new balance; nothing else is asked — except when the node
-      // keeps the user's seen-content filter, which it only applies to the account.)
-      const identify = price > 0 || (seenContent && (this.settings.searchBloom.enabled || this.settings.accountBloom.enabled));
-      return this.askJson<Page<ContentItem>>(
-        node,
-        path,
-        {
-          ...body,
-          previews: this.settings.showContentPreviews,
-          ...(seenContent ? this.bloomPayload(node) : {}),
-          limit,
-          cursor: cursors[node.id] ?? undefined,
-        },
-        identify
-      );
-    };
-
-    if (this.settings.feedMode === 'primary') {
-      const started = Object.keys(cursors);
-      const candidates = started.length ? nodes.filter((node) => started.includes(node.id)) : nodes;
-      for (const node of candidates) {
-        try {
-          const page = await ask(node, 24);
-          const shown = this.nativeFirst(
-            seenContent
-              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
-              : page.items.filter(wanted).map((item) => this.feedItem(node, item))
-          );
-          this.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
-          return {
-            items: shown,
-            cursor: page.cursor ? encodeCursor({ [node.id]: page.cursor }) : undefined,
-            errors,
-          };
-        } catch (error) {
-          errors.push({ node: node.id, name: node.name, error: errorText(error) });
-        }
-      }
-      this.traces.trace('basic', component, `${kind} page → failed`, { data: { errors: errors.length }, error: errors[0]?.error });
-      return { items: [], errors };
-    }
-
-    const live = nodes.filter((node) => !(node.id in cursors) || cursors[node.id] !== null);
-    const per = Math.max(8, Math.ceil(24 / Math.max(1, live.length)));
-    const pages = await Promise.all(
-      live.map(async (node) => {
-        try {
-          return { node, page: await ask(node, per) };
-        } catch (error) {
-          errors.push({ node: node.id, name: node.name, error: errorText(error) });
-          return { node, page: null };
-        }
-      })
-    );
-    const seen = new Set<string>();
-    const items: FeedItem[] = [];
-    const longest = Math.max(0, ...pages.map(({ page }) => page?.items.length ?? 0));
-    for (let i = 0; i < longest; i++) {
-      for (const { node, page } of pages) {
-        const item = page?.items[i];
-        if (!item || !wanted(item)) continue;
-        const base = item.id.split('~')[0];
-        if (seen.has(base)) continue;
-        seen.add(base);
-        items.push(this.feedItem(node, item));
-      }
-    }
-    const next: Record<string, string | null> = { ...cursors };
-    for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
-    const more = Object.values(next).some((value) => value !== null);
-    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items) : items);
-    this.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
-    return {
-      items: shown,
-      cursor: more ? encodeCursor(next) : undefined,
-      errors,
-    };
+  collect(kind: FeedKind, body: Record<string, unknown>, cursor?: string): Promise<FeedResponse> {
+    return this.feeds.collect(kind, body, cursor);
   }
 
   /** One endpoint for every page: its source, query and filters, within the user's preferences. */
-  async browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
-    this.traces.trace('basic', 'core.browse', `browse ${body.source ?? 'feed'}`, {
-      message: body.query ? String(body.query).slice(0, 120) : undefined,
-      data: { sort: body.sort, cursor: Boolean(body.cursor) },
-    });
-    const preferences = pagePreferences(this.settings.preferences, body.filters);
-    // The creators the user subscribes to join the page's creator picks (on unless the page
-    // turned its "Subscribed creators" button off) — sent at the creators slider's level.
-    if (body.filters?.subscribedCreators !== false && preferences.creatorLevel && preferences.creatorLevel !== 'ignore') {
-      const subscribed = this.store.data.data.subscriptions.filter((entry) => entry.kind !== 'topic').map((entry) => entry.id);
-      if (subscribed.length) {
-        preferences.preferredCreators = [...new Set([...(preferences.preferredCreators ?? []), ...subscribed])];
-        if (preferences.onlyCreators) preferences.creatorIds = [...new Set([...(preferences.creatorIds ?? []), ...subscribed])];
-      }
-    }
-    // On top of whatever the nodes filtered, the client itself drops any item whose
-    // metadata conflicts with the content types this page disregards.
-    const platformPicks = new Set(preferences.preferredPlatforms ?? []);
-    const platformBlocked = new Set(preferences.blockedPlatforms ?? []);
-    const keep = (response: FeedResponse): FeedResponse => ({
-      ...response,
-      items: response.items.filter((item) => {
-        if (conflictsWithDisregard(item, preferences.disregard ?? [])) return false;
-        // The platforms a page whitelists and blacklists are enforced here as well, so the
-        // choice works even before every algorithm node weighs them.
-        const source = sourceKeyOf({ id: item.id });
-        if (platformBlocked.has(source)) return false;
-        if (preferences.platformLevel === 'only' && platformPicks.size && !platformPicks.has(source)) return false;
-        return true;
-      }),
-    });
-    if (body.source === 'search') {
-      const sort = body.sort ?? body.filters?.sort;
-      return this.collect('search', { query: String(body.query ?? ''), filters: preferences, sort }, body.cursor).then(keep);
-    }
-    if (body.source === 'subscriptions') {
-      const creators = this.store.data.data.subscriptions.map((s) => s.id);
-      if (!creators.length) return Promise.resolve({ items: [], errors: [] });
-      return this.collect('latest', { creators, preferences }, body.cursor).then((response) => {
-        // The carousel can order by the newest posting: remember when each creator last posted.
-        for (const item of response.items) {
-          const entry = this.store.data.data.subscriptions.find((s) => s.id === item.creator?.id);
-          if (entry && item.publishedAt && (!entry.lastPostAt || Date.parse(item.publishedAt) > Date.parse(entry.lastPostAt))) {
-            entry.lastPostAt = item.publishedAt;
-            this.store.changed();
-          }
-        }
-        return keep(response);
-      });
-    }
-    return this.collect('feed', { preferences, seed: body.seed }, body.cursor).then(keep);
+  browse(body: { source?: PageSource; query?: string; filters?: Partial<PageFilters>; sort?: string; cursor?: string; seed?: string }): Promise<FeedResponse> {
+    return this.feeds.browse(body);
   }
 
-  async content(id: string): Promise<ContentView> {
-    const parsed = parseContentId(id);
-    if (!parsed) throw badRequest('Not a content id');
-    this.traces.trace('basic', 'core.lookup', 'content lookup', { message: parsed.base });
-    const view: ContentView = {
-      id: parsed.full,
-      base: parsed.base,
-      native: parsed.native,
-      status: 'unknown',
-      embeds: [],
-      suggestedProviders: [],
-      providerErrors: [],
-    };
-    for (const node of this.nodes.active('algorithm')) {
-      const price = this.nodes.algorithmPrice(node, 'lookup');
-      if (!this.nodes.affordable(node, price)) continue;
-      try {
-        const result = await this.askJson<LookupResult>(
-          node,
-          `/v1/content/${encodeURIComponent(parsed.full)}`,
-          undefined,
-          price > 0,
-          8000
-        );
-        if (result.status === 'unknown') continue;
-        view.status = result.status;
-        view.decidedBy = { id: node.id, name: node.name };
-        if (result.status === 'listed') view.item = this.feedItem(node, result);
-        else view.reason = result.reason;
-        break;
-      } catch (error) {
-        log.debug(`Lookup on ${node.name}: ${errorText(error)}`);
-      }
-    }
-    const extra = view.item ? (parseContentId(view.item.id)?.sources ?? []) : [];
-    view.id = withSources(parsed.full, extra);
-    const sources = parseContentId(view.id)?.sources ?? [];
-    const known = new Set(this.nodes.list('provider').map((node) => node.id));
-    view.suggestedProviders = (view.item?.providers ?? []).filter((ref) => {
-      const parsedRef = parseNodeRef(ref);
-      return parsedRef && !(parsedRef.id && known.has(parsedRef.id));
-    });
-    if (parsed.native) {
-      try {
-        const hit = await this.fetcher.manifest(parsed.base);
-        const manifest = hit.manifest;
-        view.manifest = {
-          name: manifest.name,
-          mime: manifest.mime,
-          size: manifest.size,
-          chunks: manifest.chunks.length,
-          chunkSize: manifest.chunkSize,
-          createdAt: manifest.createdAt,
-          creator: manifest.creator ? { id: manifest.creator.id, name: manifest.creator.name, kind: manifest.creator.kind } : undefined,
-          meta: manifest.meta as Record<string, unknown> | undefined,
-          vvsh: manifest.vvsh,
-        };
-        view.provider = {
-          id: hit.provider.id,
-          name: hit.provider.name,
-          perMiB: this.nodes.providerPrice(hit.provider),
-          estimate: this.fetcher.estimate(manifest, hit.provider),
-        };
-        view.streamUrl = this.options.streamUrl(parsed.base, false);
-        view.downloadUrl = this.options.streamUrl(parsed.base, true);
-        if (!view.item && manifest.sources) {
-          view.id = withSources(view.id, manifest.sources.map(parseSource).filter((source) => source !== null));
-        }
-      } catch (error) {
-        if (error instanceof FetchError) view.providerErrors = error.attempts;
-        else view.providerErrors = [{ node: '', name: 'Client', error: errorText(error) }];
-      }
-    }
-    const all = parseContentId(view.id)?.sources ?? sources;
-    view.embeds = all.map((source) => ({
-      ...embedFor(source, { ipfsGateway: this.settings.ipfsGateway, parentHost: this.options.embedHost() }),
-      source,
-    }));
-    // Media the platform serves directly (an image, an mp4) beats an embedded player.
-    const media = view.item?.media;
-    if (media && all[0] && /^https?:\/\//.test(media.url)) {
-      view.embeds.unshift({ kind: media.type, src: media.url, page: view.item?.pageUrl ?? view.embeds[0]?.page ?? media.url, label: platformOf(view.id).name, source: all[0] });
-    }
-    // The user disabled every external embed: only cid content and its metadata show,
-    // with a placeholder standing in for the platform's picture or player.
-    if (this.settings.blockExternalEmbeds) {
-      view.embeds = [];
-      view.embedsDisabled = true;
-    }
-    // Whether this content was watched before is the selected filter's guess (the filter
-    // of what the user opened). A preview is not a watch: content only seen on screen shows
-    // no "*watched" on its first open — from the second open on it does.
-    const identity = { id: view.id, contentId: view.item?.contentId, link: view.item?.link };
-    if (this.blooms.sees('selected', identity)) view.seen = true;
-    this.traces.trace('basic', 'core.lookup', `content lookup → ${view.status}`, {
-      data: { native: view.native, embeds: view.embeds.length, providerErrors: view.providerErrors.length, seen: Boolean(view.seen) },
-    });
-    return view;
+  content(id: string): Promise<ContentView> {
+    return this.contents.content(id);
   }
 
-  async creator(id: string): Promise<CreatorView> {
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const result = await this.nodes
-          .client(node)
-          .json<{ creator: CreatorInfo; items: ContentItem[] }>(`/v1/creators/${encodeURIComponent(id)}`, { auth: false });
-        return { creator: result.creator, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
-      } catch (error) {
-        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Creator on ${node.name}: ${errorText(error)}`);
-      }
-    }
-    // A group is a creator of kind `group` with its own page: a link to /creator/<group id>
-    // (an old bookmark, a related account) still opens it, members and content included.
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const result = await this.nodes
-          .client(node)
-          .json<{ group: CreatorInfo; members: CreatorInfo[]; items: ContentItem[] }>(`/v1/groups/${encodeURIComponent(id)}`, { auth: false });
-        return { creator: result.group, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
-      } catch (error) {
-        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Group on ${node.name}: ${errorText(error)}`);
-      }
-    }
-    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
-    const subKind = subscription?.kind === 'topic' ? 'unknown' : (subscription?.kind ?? 'unknown');
-    return { creator: { id, name: subscription?.name ?? id.slice(0, 16), kind: subKind }, items: [] };
+  creator(id: string): Promise<CreatorView> {
+    return this.contents.creator(id);
   }
 
   /**
@@ -532,123 +192,53 @@ export class ClientCore {
    * content in one list. A group is a creator everywhere else, so subscribing to one is
    * the same as subscribing to a creator.
    */
-  async group(id: string): Promise<GroupView> {
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const result = await this.nodes.client(node).json<{ group: GroupInfo; members: CreatorInfo[]; items: ContentItem[] }>(
-          `/v1/groups/${encodeURIComponent(id)}`,
-          { auth: false }
-        );
-        return {
-          group: result.group,
-          members: result.members ?? [],
-          items: result.items.map((item) => this.feedItem(node, item)),
-          via: node.id,
-        };
-      } catch (error) {
-        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Group on ${node.name}: ${errorText(error)}`);
-      }
-    }
-    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
-    if (!subscription) throw notFound('No algorithm node knows this group');
-    return { group: { id, name: subscription.name, kind: 'group', members: [] }, members: [], items: [] };
+  group(id: string): Promise<GroupView> {
+    return this.contents.group(id);
   }
 
   /** A topic page: the topic and every content filed under its exact topic id. */
-  async topic(id: string): Promise<TopicView> {
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const result = await this.nodes
-          .client(node)
-          .json<{ topic: TopicInfo; items: ContentItem[] }>(`/v1/topics/${encodeURIComponent(id)}`, { auth: false });
-        return { topic: result.topic, items: result.items.map((item) => this.feedItem(node, item)), via: node.id };
-      } catch (error) {
-        if (!(error instanceof RemoteError && error.status === 404)) log.debug(`Topic on ${node.name}: ${errorText(error)}`);
-      }
-    }
-    const subscription = this.store.data.data.subscriptions.find((s) => s.id === id);
-    if (!subscription) throw notFound('No algorithm node knows this topic');
-    return { topic: { id, name: subscription.name, icon: subscription.icon }, items: [] };
+  topic(id: string): Promise<TopicView> {
+    return this.contents.topic(id);
   }
 
   /** Topics matching a name or id, across the enabled algorithm nodes (Explore). */
-  async searchTopics(query: string): Promise<{ topics: TopicInfo[] }> {
-    const q = String(query ?? '').trim().slice(0, 100);
-    const found = new Map<string, TopicInfo>();
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const result = await this.nodes.client(node).json<{ topics: TopicInfo[] }>(`/v1/topics?q=${encodeURIComponent(q)}`, {
-          auth: false,
-          timeoutMs: 8000,
-        });
-        for (const topic of result.topics ?? []) if (!found.has(topic.id)) found.set(topic.id, topic);
-      } catch (error) {
-        log.debug(`Topics on ${node.name}: ${errorText(error)}`);
-      }
-      if (found.size >= 24) break;
-    }
-    return { topics: [...found.values()].slice(0, 24) };
+  searchTopics(query: string): Promise<{ topics: TopicInfo[] }> {
+    return this.contents.searchTopics(query);
   }
 
   /** Groups matching a name or id (a group is a creator of kind `group`). */
-  async searchGroups(query: string): Promise<{ groups: CreatorInfo[] }> {
-    const { creators } = await this.searchCreators(String(query ?? ''), 'group');
-    return { groups: creators.filter((creator) => creator.kind === 'group') };
+  searchGroups(query: string): Promise<{ groups: CreatorInfo[] }> {
+    return this.contents.searchGroups(query);
   }
 
   /** A client brings a topic: the node keeps it under the hash of the name. */
   createTopic(node: NodeEntry, body: TopicCreateRequest): Promise<TopicCreateResponse> {
-    if (!String(body.name ?? '').trim()) throw badRequest('A topic needs a name');
-    return this.nodes.client(node).json<TopicCreateResponse>('/v1/topics', { body: { name: body.name, description: body.description } });
+    return this.contents.createTopic(node, body);
   }
 
   /** Suggesting changes to a group: members to add or drop, a name, a description, links, an icon. */
   suggestGroup(node: NodeEntry, group: string, body: GroupSuggestionRequest): Promise<GroupSuggestionResponse> {
-    return this.nodes.client(node).json<GroupSuggestionResponse>(`/v1/groups/${encodeURIComponent(group)}/suggestion`, { body });
+    return this.contents.suggestGroup(node, group, body);
   }
 
   /** Suggesting what a topic's description or icon should say. */
   suggestTopic(node: NodeEntry, topic: string, body: TopicSuggestionRequest): Promise<TopicSuggestionResponse> {
-    return this.nodes.client(node).json<TopicSuggestionResponse>(`/v1/topics/${encodeURIComponent(topic)}/suggestion`, { body });
+    return this.contents.suggestTopic(node, topic, body);
   }
 
   /** The group changes the user asked for on a node, with their status. */
   myGroupSuggestions(node: NodeEntry): Promise<{ suggestions: GroupSuggestion[] }> {
-    return this.nodes.client(node).json<{ suggestions: GroupSuggestion[] }>('/v1/group-suggestions/mine');
+    return this.contents.myGroupSuggestions(node);
   }
 
   /** The topic suggestions the user made on a node, with their status. */
   myTopicSuggestions(node: NodeEntry): Promise<{ suggestions: TopicSuggestion[] }> {
-    return this.nodes.client(node).json<{ suggestions: TopicSuggestion[] }>('/v1/topic-suggestions/mine');
+    return this.contents.myTopicSuggestions(node);
   }
 
   /** Creators matching a name or id, across the enabled algorithm nodes (Explore). */
-  async searchCreators(query: string, kind?: CreatorKind | 'group'): Promise<{ creators: CreatorInfo[] }> {
-    const q = String(query ?? '').trim().slice(0, 100);
-    const found = new Map<string, CreatorInfo>();
-    for (const node of this.nodes.active('algorithm')) {
-      try {
-        const suffix = kind ? `&kind=${encodeURIComponent(kind)}` : '';
-        const result = await this.nodes.client(node).json<{ creators: CreatorInfo[] }>(`/v1/creators?q=${encodeURIComponent(q)}${suffix}`, {
-          auth: false,
-          timeoutMs: 8000,
-        });
-        for (const creator of result.creators ?? []) if (!found.has(creator.id)) found.set(creator.id, creator);
-      } catch (error) {
-        log.debug(`Creators on ${node.name}: ${errorText(error)}`);
-      }
-      if (found.size >= 24) break;
-    }
-    return { creators: [...found.values()].slice(0, 24) };
-  }
-
-  // -------------------------------------------------------------------------
-  // Comments: one hash-chained log per content page, hosted by the first enabled
-  // algorithm node. The user's key signs every comment, so only they may edit or remove
-  // it; anonymous ones carry no key and can never be changed.
-
-  private commentNode(): NodeEntry | undefined {
-    return this.nodes.active('algorithm')[0];
+  searchCreators(query: string, kind?: CreatorKind | 'group'): Promise<{ creators: CreatorInfo[] }> {
+    return this.contents.searchCreators(query, kind);
   }
 
   /**
@@ -656,57 +246,23 @@ export class ClientCore {
    * suggests an order and how far the reader has scrolled; the node decides the order and
    * sends all the block headers, with the comment data of the first loaded comments only.
    */
-  async comments(id: string, options: { order?: string; offset?: number; limit?: number } = {}): Promise<CommentsResponse> {
-    const node = this.commentNode();
-    if (!node) throw new Error('No algorithm node is enabled');
-    const query = new URLSearchParams();
-    if (options.order) query.set('order', options.order);
-    if (options.offset) query.set('offset', String(Math.max(0, Math.trunc(options.offset))));
-    if (options.limit) query.set('limit', String(Math.max(1, Math.trunc(options.limit))));
-    const suffix = query.toString();
-    const data = await this.nodes.client(node).json<Omit<CommentsResponse, 'you'>>(
-      `/v1/comments/${encodeURIComponent(id)}${suffix ? `?${suffix}` : ''}`,
-      { timeoutMs: 8000 }
-    );
-    return { ...data, you: this.store.identity.id };
+  comments(id: string, options: { order?: string; offset?: number; limit?: number } = {}): Promise<CommentsResponse> {
+    return this.contents.comments(id, options);
   }
 
   /** Writes a comment, a reply, or an edit of one's own (signed by the user's key). */
-  async comment(id: string, body: CommentPostRequest): Promise<unknown> {
-    const node = this.commentNode();
-    if (!node) throw new Error('No algorithm node is enabled');
-    const identity = this.store.identity;
-    // A first level comment replies to the page's root: its cid, or its first link. The
-    // text is signed exactly as it is sent, so the chain hashes the same bytes.
-    const replyFrom = !body.replyFrom || body.replyFrom === '0' ? baseId(id) : body.replyFrom;
-    const signed = body.anonymous
-      ? {}
-      : { key: identity.id, sig: signData(identity, commentSigningPayload({ key: identity.id, replyFrom, text: body.text })) };
-    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}`, {
-      method: 'POST',
-      body: { ...body, replyFrom, ...signed },
-    });
+  comment(id: string, body: CommentPostRequest): Promise<unknown> {
+    return this.contents.comment(id, body);
   }
 
   /** Votes on a comment: 1 like, -1 dislike, 0 takes the vote back. */
-  async voteComment(id: string, comment: string, vote: 1 | -1 | 0): Promise<unknown> {
-    const node = this.commentNode();
-    if (!node) throw new Error('No algorithm node is enabled');
-    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}/${encodeURIComponent(comment)}/vote`, {
-      method: 'POST',
-      body: { vote },
-    });
+  voteComment(id: string, comment: string, vote: 1 | -1 | 0): Promise<unknown> {
+    return this.contents.voteComment(id, comment, vote);
   }
 
   /** Asks for one's own comment to be removed (the node keeps its block header). */
-  async removeComment(id: string, comment: string): Promise<unknown> {
-    const node = this.commentNode();
-    if (!node) throw new Error('No algorithm node is enabled');
-    const identity = this.store.identity;
-    return this.nodes.client(node).json(`/v1/comments/${encodeURIComponent(id)}/${encodeURIComponent(comment)}/remove`, {
-      method: 'POST',
-      body: { key: identity.id, sig: signData(identity, commentRemovePayload(comment)) },
-    });
+  removeComment(id: string, comment: string): Promise<unknown> {
+    return this.contents.removeComment(id, comment);
   }
 
   /**
@@ -715,7 +271,7 @@ export class ClientCore {
    * once; unsigned, they must be external links to the creator and the node's operator
    * decides whether to link them (its account limit applies either way).
    */
-  async linkCreatorAccounts(
+  linkCreatorAccounts(
     node: NodeEntry,
     body: {
       creator?: string;
@@ -728,22 +284,12 @@ export class ClientCore {
       symmetric?: boolean;
     }
   ): Promise<AccountLinkResponse> {
-    const creator = String(body.creator ?? '').trim();
-    if (!creator) throw badRequest('creator is required');
-    let proof: { key: string; ts: number; sig: string } | undefined;
-    if (body.sign !== false) {
-      const ts = Date.now();
-      proof = { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(node.id, creator, ts)) };
-    }
-    return this.nodes.client(node).json<AccountLinkResponse>('/v1/creators/accounts', {
-      method: 'PUT',
-      body: { creator, accounts: body.accounts ?? [], name: body.name, kind: body.kind, proof, symmetric: body.symmetric },
-    });
+    return this.contents.linkCreatorAccounts(node, body);
   }
 
   /** The account links the user proposed without the creator's key, with their status. */
   myAccountLinks(node: NodeEntry): Promise<{ proposals: AccountLinkProposal[] }> {
-    return this.nodes.client(node).json<{ proposals: AccountLinkProposal[] }>('/v1/account-links/mine');
+    return this.contents.myAccountLinks(node);
   }
 
   /** Content the user suggests as related to a creator, with an optional message. */
@@ -752,429 +298,55 @@ export class ClientCore {
     creator: string,
     body: { id?: string; message?: string; title?: string; platform?: string; metrics?: Record<string, number> }
   ): Promise<CreatorContentResponse> {
-    if (!String(body.id ?? '').trim()) throw badRequest('id is required');
-    return this.nodes.client(node).json<CreatorContentResponse>(`/v1/creators/${encodeURIComponent(creator)}/suggestions`, {
-      body: { id: body.id, message: body.message, title: body.title, platform: body.platform, metrics: body.metrics },
-    });
+    return this.contents.suggestCreatorContent(node, creator, body);
   }
 
   /** An icon the user suggests for a creator (a small image, as a data: URL). */
   suggestCreatorIcon(node: NodeEntry, creator: string, icon: string): Promise<CreatorIconResponse> {
-    return this.nodes.client(node).json<CreatorIconResponse>(`/v1/creators/${encodeURIComponent(creator)}/icon-suggestion`, {
-      body: { icon },
-    });
+    return this.contents.suggestCreatorIcon(node, creator, icon);
   }
 
   /** The icons the user suggested for creators, with their status. */
   myIconSuggestions(node: NodeEntry): Promise<{ suggestions: CreatorIconSuggestion[] }> {
-    return this.nodes.client(node).json<{ suggestions: CreatorIconSuggestion[] }>('/v1/creator-icons/mine');
+    return this.contents.myIconSuggestions(node);
   }
 
   /** The user's own creator-content suggestions on a node, with their status. */
   myCreatorSuggestions(node: NodeEntry): Promise<{ suggestions: CreatorContentSuggestion[] }> {
-    return this.nodes.client(node).json<{ suggestions: CreatorContentSuggestion[] }>('/v1/creator-suggestions/mine');
+    return this.contents.myCreatorSuggestions(node);
   }
 
   updateSettings(patch: Partial<Settings>): Settings {
-    const current = this.settings;
-    let next: Settings;
-    try {
-      next = applySettingsPatch(current, patch);
-    } catch (error) {
-      throw badRequest((error as Error).message);
-    }
-    this.store.data.data.settings = next;
-    this.store.changed();
-    this.options.onSettings?.(current, next);
-    this.scheduleBloomJob();
-    return next;
-  }
-
-  // -------------------------------------------------------------------------
-  // Profiles: several users of one client, each with their own nodes, settings,
-  // history and client id (key). Public profiles open for anyone; others need
-  // their username and password.
-
-  /** Makes sure the current data has a profile record (the implicit single profile). */
-  private ensureProfiles(): void {
-    const data = this.store.data.data;
-    data.profiles ??= [];
-    data.activeProfile ??= 'main';
-    if (data.profiles.length) return;
-    data.profiles.push({
-      id: data.activeProfile || 'main',
-      name: this.settings.profile.name || 'Main',
-      access: { mode: 'public' },
-      identitySeed: encodeProfileSeed(this.store.identity.seed),
-      nodes: data.nodes,
-      settings: data.settings,
-      subscriptions: data.subscriptions,
-      library: data.library,
-      history: data.history,
-      saved: data.saved ?? emptySavedState(),
-      searchHistory: data.searchHistory ?? [],
-      toasts: data.toasts ?? [],
-      blooms: data.blooms ?? {},
-    });
-  }
-
-  /** Saves the live data and client id into the active profile's slot. */
-  private async snapshotProfile(): Promise<void> {
-    const data = this.store.data.data;
-    this.ensureProfiles();
-    const record = data.profiles.find((profile) => profile.id === data.activeProfile);
-    if (!record) return;
-    const payload: ProfilePayload = {
-      name: record.name,
-      identitySeed: encodeProfileSeed(this.store.identity.seed),
-      nodes: data.nodes,
-      settings: data.settings,
-      subscriptions: data.subscriptions,
-      library: data.library,
-      history: data.history,
-      saved: data.saved ?? emptySavedState(),
-      searchHistory: data.searchHistory ?? [],
-      toasts: data.toasts ?? [],
-      blooms: data.blooms ?? {},
-    };
-    if (record.hidden) {
-      // A hidden profile is only ever stored sealed; the plaintext fields are emptied.
-      const key = this.sealKeys.get(record.id);
-      if (key) record.sealed = await sealProfile(payload, key);
-      record.name = '';
-      record.identitySeed = '';
-      record.nodes = [];
-      record.settings = defaultSettings();
-      record.subscriptions = [];
-      record.library = [];
-      record.history = [];
-      record.saved = emptySavedState();
-      record.searchHistory = [];
-      record.toasts = [];
-      record.blooms = {};
-      void this.store.hideIdentity?.();
-    } else {
-      record.identitySeed = payload.identitySeed;
-      record.nodes = payload.nodes;
-      record.settings = payload.settings;
-      record.subscriptions = payload.subscriptions;
-      record.library = payload.library;
-      record.history = payload.history;
-      record.saved = payload.saved;
-      record.searchHistory = payload.searchHistory;
-      record.toasts = payload.toasts ?? [];
-      record.blooms = payload.blooms;
-    }
-  }
-
-  /** The payload of a profile: from its fields, or from its sealed blob when hidden. */
-  private payloadOf(record: ProfileRecord): ProfilePayload {
-    return {
-      name: record.name,
-      identitySeed: record.identitySeed,
-      nodes: record.nodes,
-      settings: record.settings,
-      subscriptions: record.subscriptions,
-      library: record.library,
-      history: record.history,
-      saved: record.saved ?? emptySavedState(),
-      searchHistory: record.searchHistory ?? [],
-      toasts: record.toasts ?? [],
-      blooms: record.blooms ?? {},
-    };
-  }
-
-  /** Loads a profile's payload into the live fields and takes its client id. */
-  private loadProfile(record: ProfileRecord, payload: ProfilePayload, previousSettings: Settings): void {
-    const data = this.store.data.data;
-    record.name = payload.name;
-    record.identitySeed = payload.identitySeed;
-    record.nodes = payload.nodes;
-    record.settings = payload.settings;
-    record.subscriptions = payload.subscriptions;
-    record.library = payload.library;
-    record.history = payload.history;
-    record.saved = payload.saved ?? emptySavedState();
-    record.searchHistory = payload.searchHistory ?? [];
-    record.toasts = payload.toasts ?? [];
-    record.blooms = payload.blooms ?? {};
-    data.nodes = payload.nodes;
-    data.settings = normalizeSettings(payload.settings);
-    data.subscriptions = payload.subscriptions;
-    data.library = payload.library;
-    data.history = payload.history;
-    data.saved = payload.saved ?? emptySavedState();
-    data.searchHistory = payload.searchHistory ?? [];
-    data.toasts = payload.toasts ?? [];
-    data.blooms = payload.blooms ?? {};
-    data.activeProfile = record.id;
-    this.blooms.reloaded();
-    this.store.replaceIdentity(decodeProfileSeed(payload.identitySeed));
-    this.store.changed();
-    this.options.onSettings?.(previousSettings, data.settings);
-    void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
-  }
-
-  /** Keys of hidden profiles opened in this session (kept in memory only). */
-  private sealKeys = new Map<string, SealKey>();
-  private sealTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Keeps the sealed blob of an active hidden profile current on every change. */
-  private scheduleSeal(): void {
-    const data = this.store.data.data;
-    const record = data.profiles?.find((profile) => profile.id === data.activeProfile && profile.hidden);
-    if (!record || !this.sealKeys.has(record.id) || this.sealTimer) return;
-    this.sealTimer = setTimeout(() => {
-      this.sealTimer = null;
-      void this.sealActive(record).catch((error) => log.debug(`Could not seal the hidden profile: ${errorText(error)}`));
-    }, 25);
-  }
-
-  private async sealActive(record: ProfileRecord): Promise<void> {
-    const key = this.sealKeys.get(record.id);
-    if (!key) return;
-    const data = this.store.data.data;
-    record.sealed = await sealProfile(
-      {
-        name: record.name,
-        identitySeed: encodeProfileSeed(this.store.identity.seed),
-        nodes: data.nodes,
-        settings: data.settings,
-        subscriptions: data.subscriptions,
-        library: data.library,
-        history: data.history,
-        saved: data.saved ?? emptySavedState(),
-        searchHistory: data.searchHistory ?? [],
-        toasts: data.toasts ?? [],
-        blooms: data.blooms ?? {},
-      },
-      key
-    );
-    void this.store.hideIdentity?.();
-  }
-
-  /** True while a hidden profile is active but still sealed (locked). */
-  private isLocked(): boolean {
-    const data = this.store.data.data;
-    const record = (data.profiles ?? []).find((profile) => profile.id === data.activeProfile && profile.hidden);
-    return Boolean(record && (record.sealed || record.hidden) && !this.sealKeys.has(record.id));
+    return this.profiles.updateSettings(patch);
   }
 
   profileSummaries(): ProfileSummary[] {
-    const data = this.store.data.data;
-    const profiles = data.profiles ?? [];
-    if (!profiles.length) {
-      return [{ id: data.activeProfile || 'main', name: this.settings.profile.name || 'Main', access: 'public', active: true }];
-    }
-    const out: ProfileSummary[] = [];
-    for (const profile of profiles) {
-      const active = profile.id === data.activeProfile;
-      if (profile.hidden) {
-        // Hidden profiles do not appear in the list at all. When one is active the
-        // client shows only that it is inside one, never its name.
-        if (active) out.push({ id: profile.id, name: 'Hidden profile', access: 'protected', hidden: true, active: true });
-        continue;
-      }
-      out.push({
-        id: profile.id,
-        name: profile.name,
-        access: profile.access.mode === 'password' ? 'protected' : 'public',
-        username: profile.access.mode === 'password' ? profile.access.username : undefined,
-        active,
-      });
-    }
-    return out;
+    return this.profiles.profileSummaries();
   }
 
   /** Creates a fresh profile (default settings, no nodes, its own client id). */
-  async createProfile(body: { name?: string; username?: string; password?: string; hidden?: boolean }): Promise<ProfileSummary[]> {
-    const data = this.store.data.data;
-    await this.snapshotProfile();
-    const name = String(body.name ?? '').trim().slice(0, 60);
-    if (!name) throw badRequest('A profile name is required');
-    const hidden = Boolean(body.hidden);
-    const username = String(body.username ?? '').trim().slice(0, 60);
-    const password = String(body.password ?? '');
-    if (hidden && (!username || !password)) throw badRequest('A hidden profile needs a username and a password');
-    if (!hidden && data.profiles.some((profile) => !profile.hidden && profile.name.toLowerCase() === name.toLowerCase())) {
-      throw badRequest('There is already a profile with that name');
-    }
-    let access: ProfileAccess = { mode: 'public' };
-    if (password) {
-      if (!username) throw badRequest('A username is needed with a password');
-      const salt = randomProfileSalt();
-      access = { mode: 'password', username, salt, hash: await hashProfilePassword(password, salt, username) };
-    }
-    const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const payload: ProfilePayload = {
-      name,
-      identitySeed: encodeProfileSeed(newProfileSeed()),
-      nodes: [],
-      settings: defaultSettings(),
-      subscriptions: [],
-      library: [],
-      history: [],
-      saved: emptySavedState(),
-      searchHistory: [],
-      toasts: [],
-      blooms: {},
-    };
-    if (hidden) {
-      // A hidden profile is created sealed: its name, client id and data are encrypted
-      // with a key derived from the password, and it never appears in the profile list.
-      const keySalt = randomProfileSalt();
-      const key = await profileSealKey(password, keySalt);
-      (access as { keySalt?: string }).keySalt = keySalt;
-      data.profiles.push({
-        id,
-        name: '',
-        access,
-        hidden: true,
-        sealed: await sealProfile(payload, key),
-        identitySeed: '',
-        nodes: [],
-        settings: defaultSettings(),
-        subscriptions: [],
-        library: [],
-        history: [],
-        saved: emptySavedState(),
-        searchHistory: [],
-        toasts: [],
-        blooms: {},
-      });
-    } else {
-      data.profiles.push({ ...payload, id, name, access });
-    }
-    this.store.changed();
-    return this.profileSummaries();
+  createProfile(body: { name?: string; username?: string; password?: string; hidden?: boolean }): Promise<ProfileSummary[]> {
+    return this.profiles.createProfile(body);
   }
 
   /** Switches to another profile: its data, its client id, its node accounts. */
-  async switchProfile(body: { id?: string; username?: string; password?: string }): Promise<ClientState> {
-    const data = this.store.data.data;
-    this.ensureProfiles();
-    const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
-    if (!target) throw notFound('No such profile');
-    // A hidden profile that is active but still sealed is opened in place.
-    if (target.id !== data.activeProfile || (target.hidden && !this.sealKeys.has(target.id))) {
-      const password = String(body.password ?? '');
-      if (target.access.mode === 'password') {
-        const ok = await verifyProfilePassword(target.access, String(body.username ?? ''), password);
-        if (!ok) throw badRequest('Wrong username or password for this profile');
-      }
-      let payload: ProfilePayload;
-      if (target.hidden) {
-        // A hidden profile opens only with its username and password: the key derived
-        // from the password decrypts its data (nothing else can read it).
-        if (target.access.mode !== 'password' || !target.sealed) throw badRequest('This hidden profile cannot be opened');
-        const key = await profileSealKey(password, target.access.keySalt ?? target.access.salt);
-        try {
-          payload = await unsealProfile<ProfilePayload>(target.sealed, key);
-        } catch {
-          throw badRequest('Wrong username or password for this profile');
-        }
-        await this.snapshotProfile();
-        this.sealKeys.set(target.id, key);
-      } else {
-        await this.snapshotProfile();
-        payload = this.payloadOf(target);
-      }
-      for (const id of [...this.sealKeys.keys()]) if (id !== target.id) this.sealKeys.delete(id);
-      this.loadProfile(target, payload, data.settings);
-    }
-    return this.state();
+  switchProfile(body: { id?: string; username?: string; password?: string }): Promise<ClientState> {
+    return this.profiles.switchProfile(body);
   }
 
   /** Opens a hidden profile: the only way in is its username and password. */
-  async unlockHidden(body: { username?: string; password?: string }): Promise<ClientState> {
-    const data = this.store.data.data;
-    const username = String(body.username ?? '');
-    const target = (data.profiles ?? []).find(
-      (profile) => profile.hidden && profile.access.mode === 'password' && profile.access.username === username
-    );
-    if (!target) throw badRequest('Wrong username or password for a hidden profile');
-    return this.switchProfile({ id: target.id, username, password: String(body.password ?? '') });
+  unlockHidden(body: { username?: string; password?: string }): Promise<ClientState> {
+    return this.profiles.unlockHidden(body);
   }
 
   /** Renames a profile and changes or clears its username/password protection. */
-  async updateProfile(body: { id?: string; name?: string; username?: string; password?: string; makePublic?: boolean }): Promise<ProfileSummary[]> {
-    const data = this.store.data.data;
-    this.ensureProfiles();
-    const target = data.profiles.find((profile) => profile.id === String(body.id ?? ''));
-    if (!target) throw notFound('No such profile');
-    if (target.hidden) throw badRequest('A hidden profile is managed only through its unlock dialog');
-    if (body.name !== undefined) {
-      const name = String(body.name).trim().slice(0, 60);
-      if (!name) throw badRequest('A profile name is required');
-      target.name = name;
-    }
-    if (body.makePublic) target.access = { mode: 'public' };
-    if (body.password) {
-      const username = String(body.username ?? (target.access.mode === 'password' ? target.access.username : '')).trim().slice(0, 60);
-      if (!username) throw badRequest('A username is needed with a password');
-      const salt = randomProfileSalt();
-      target.access = { mode: 'password', username, salt, hash: await hashProfilePassword(String(body.password), salt, username) };
-    }
-    this.store.changed();
-    return this.profileSummaries();
+  updateProfile(body: { id?: string; name?: string; username?: string; password?: string; makePublic?: boolean }): Promise<ProfileSummary[]> {
+    return this.profiles.updateProfile(body);
   }
 
   /** Deletes a profile, but only with its username and password (typed confirmation for a public profile). */
-  async deleteProfile(id: string, credentials: { username?: string; password?: string }): Promise<ProfileSummary[]> {
-    const data = this.store.data.data;
-    this.ensureProfiles();
-    const target = data.profiles.find((profile) => profile.id === id);
-    if (!target) throw notFound('No such profile');
-    const username = String(credentials.username ?? '');
-    const password = String(credentials.password ?? '');
-    if (!username || !password) throw badRequest('Enter the profile username and password to delete it');
-    if (target.access.mode === 'password') {
-      // A protected (or hidden) profile is deleted only with its own username and password.
-      const ok = await verifyProfilePassword(target.access, username, password);
-      if (!ok) throw badRequest('Wrong username or password for this profile');
-    } else if (username !== target.name) {
-      // A public profile has no password of its own: its name is typed as the username
-      // and the password field confirms the intent to delete.
-      throw badRequest('Type the profile name as the username to confirm deletion');
-    }
-    if (id === data.activeProfile) {
-      // Deleting the active profile (an anonymous account is deleted this way): switch to
-      // another one first. When it is the only profile, wipe it and start clean instead of
-      // leaving the client with none.
-      const other = data.profiles.find((profile) => profile.id !== id && !profile.hidden);
-      if (other) {
-        this.loadProfile(other, this.payloadOf(other), data.settings);
-      } else {
-        const previousSettings = data.settings;
-        const freshSettings = defaultSettings();
-        const fresh: ProfilePayload = {
-          name: freshSettings.profile.name || 'Main',
-          identitySeed: encodeProfileSeed(newProfileSeed()),
-          nodes: [],
-          settings: freshSettings,
-          subscriptions: [],
-          library: [],
-          history: [],
-          saved: emptySavedState(),
-          searchHistory: [],
-          toasts: [],
-          blooms: {},
-        };
-        // The fresh start is an ordinary public profile (drop any hidden/locked state).
-        target.hidden = undefined;
-        target.access = { mode: 'public' };
-        target.sealed = undefined;
-        this.sealKeys.delete(target.id);
-        this.loadProfile(target, fresh, previousSettings);
-        return this.profileSummaries();
-      }
-    }
-    const before = data.profiles.length;
-    data.profiles = data.profiles.filter((profile) => profile.id !== id);
-    if (data.profiles.length === before) throw notFound('No such profile');
-    this.sealKeys.delete(id);
-    this.store.changed();
-    return this.profileSummaries();
+  deleteProfile(id: string, credentials: { username?: string; password?: string }): Promise<ProfileSummary[]> {
+    return this.profiles.deleteProfile(id, credentials);
   }
 
   async removeNode(id: string, release: boolean): Promise<void> {
@@ -1183,74 +355,12 @@ export class ClientCore {
   }
 
   /**
-   * Asks a node on the account only when it charges for the answer. When the node says
-   * "this node charges …" to an anonymous request, its cached price was stale: the
-   * question is asked again with the account and the node's info is refreshed in the
-   * background, so the next question carries the account right away.
-   */
-  private async askJson<T>(node: NodeEntry, path: string, body: unknown, auth: boolean, timeoutMs?: number): Promise<T> {
-    const client = this.nodes.client(node);
-    // One dependency line per request, with where it went and how long it took: the
-    // pieces are collected here and only built into an event when tracing would record.
-    const call = (extra: Record<string, unknown>, error?: string) => {
-      if (!this.traces.recorder.shouldLog(error ? 'error' : 'dependency')) return;
-      this.traces.trace('dependency', 'core', `ask ${path}`, {
-        message: node.name,
-        data: this.traces.summarize({ node: node.id, url: `${client.url}${path}`, method: 'POST', auth, ...extra }),
-        error,
-      });
-    };
-    try {
-      const started = Date.now();
-      const result = await client.json<T>(path, { body, auth, timeoutMs });
-      call({ ms: Date.now() - started });
-      return result;
-    } catch (error) {
-      if (auth || !(error instanceof RemoteError) || error.status !== 401) {
-        call({ status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
-        throw error;
-      }
-      void this.nodes.refresh(node);
-      try {
-        const started = Date.now();
-        const result = await client.json<T>(path, { body, auth: true, timeoutMs });
-        call({ ms: Date.now() - started, auth: true });
-        return result;
-      } catch (error) {
-        call({ auth: true, status: error instanceof RemoteError ? error.status : undefined }, errorText(error));
-        throw error;
-      }
-    }
-  }
-
-  /**
    * Reports a content id or link the client played from outside the network to every
    * node that rewards such reports (algorithm nodes and content providers). Nodes that
    * already had the content keep it and pay nothing.
    */
-  async report(id: string): Promise<{ nodes: { node: string; name: string; known?: boolean; credited?: number; error?: string }[] }> {
-    const results = await Promise.all(
-      [...this.nodes.active('algorithm'), ...this.nodes.active('provider')].map(async (entry) => {
-        const client = this.nodes.client(entry);
-        const started = Date.now();
-        try {
-          const result = await client.json<{ known: boolean; credited: number }>('/v1/reports', { body: { id } });
-          this.traces.trace('dependency', 'core', 'POST /v1/reports', {
-            message: entry.name,
-            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/reports`, method: 'POST', ms: Date.now() - started, credited: result.credited }),
-          });
-          return { node: entry.id, name: entry.name, ...result };
-        } catch (error) {
-          this.traces.trace('dependency', 'core', 'POST /v1/reports', {
-            message: entry.name,
-            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/reports`, method: 'POST', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
-            error: errorText(error),
-          });
-          return { node: entry.id, name: entry.name, error: errorText(error) };
-        }
-      })
-    );
-    return { nodes: results };
+  report(id: string): Promise<{ nodes: { node: string; name: string; known?: boolean; credited?: number; error?: string }[] }> {
+    return this.credits.report(id);
   }
 
   /**
@@ -1258,39 +368,22 @@ export class ClientCore {
    * client saw for the content to every algorithm node; each pays for the numbers it
    * did not already have, times its per-source credit multipliers.
    */
-  async claim(
+  claim(
     id: string,
     metrics: Record<string, number>,
     source?: string,
     publishedAt?: string
   ): Promise<{ nodes: { node: string; name: string; newInfo?: boolean; credited?: number; multiplier?: number; updated?: string[]; error?: string }[] }> {
-    const results = await Promise.all(
-      this.nodes.active('algorithm').map(async (entry) => {
-        const client = this.nodes.client(entry);
-        const started = Date.now();
-        try {
-          const result = await client.json<ClaimResponse>('/v1/claims', { body: { id, metrics, source, publishedAt } });
-          this.traces.trace('dependency', 'core', 'POST /v1/claims', {
-            message: entry.name,
-            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/claims`, method: 'POST', ms: Date.now() - started, credited: result.credited, multiplier: result.multiplier }),
-          });
-          return { node: entry.id, name: entry.name, ...result };
-        } catch (error) {
-          this.traces.trace('dependency', 'core', 'POST /v1/claims', {
-            message: entry.name,
-            data: this.traces.summarize({ node: entry.id, url: `${client.url}/v1/claims`, method: 'POST', ms: Date.now() - started, status: error instanceof RemoteError ? error.status : undefined }),
-            error: errorText(error),
-          });
-          return { node: entry.id, name: entry.name, error: errorText(error) };
-        }
-      })
-    );
-    return { nodes: results };
+    return this.credits.claim(id, metrics, source, publishedAt);
+  }
+
+  contributions() {
+    return this.credits.contributions();
   }
 
   /** The content id an upload will have, computed on this client before publishing. */
-  async previewPublish(request: PublishRequest): Promise<PublishPreview> {
-    return this.publisher.preview(request);
+  previewPublish(request: PublishRequest): Promise<PublishPreview> {
+    return this.publishing.previewPublish(request);
   }
 
   /**
@@ -1298,23 +391,8 @@ export class ClientCore {
    * suggesting missing content: the content id is then computed here and the bytes are
    * uploaded from this device.
    */
-  async uploadFromUrl(rawUrl: string): Promise<{ fileId: string; size: number; name: string; mime: string }> {
-    let url: URL;
-    try {
-      url = new URL(String(rawUrl ?? ''));
-    } catch {
-      throw badRequest('Not a URL');
-    }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw badRequest('Only http(s) URLs can be pulled');
-    const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(300_000) });
-    if (!response.ok) throw badRequest(`The URL answered ${response.status}`);
-    const mime = (response.headers.get('content-type') ?? '').split(';')[0].trim() || 'application/octet-stream';
-    const name = (decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() ?? '') || 'file').slice(0, 255);
-    const stream = response.body;
-    const stored = stream && this.uploads.putStream
-      ? await this.uploads.putStream(stream)
-      : await this.uploads.put(new Uint8Array(await response.arrayBuffer()));
-    return { ...stored, name, mime };
+  uploadFromUrl(rawUrl: string): Promise<{ fileId: string; size: number; name: string; mime: string }> {
+    return this.publishing.uploadFromUrl(rawUrl);
   }
 
   /**
@@ -1326,266 +404,84 @@ export class ClientCore {
    * Otherwise the answer says the downloaded content from the node/link does not match
    * the expected cid.
    */
-  async fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number; error?: string }> {
-    let data: Uint8Array;
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) return { ok: false, size: 0, error: `The link answered ${response.status}` };
-      data = new Uint8Array(await response.arrayBuffer());
-    } catch {
-      return { ok: false, size: 0, error: 'The link could not be reached' };
-    }
-    if (bytesMatchCid(data, cid)) return { ok: true, size: data.length };
-    // A native content id is the hash of its manifest, so the file itself never hashes to
-    // it: the manifest's chunk hashes prove the bytes. The manifest comes from the cache
-    // when it was just fetched, otherwise from the providers holding that content.
-    if (isNativeId(cid)) {
-      try {
-        const { manifest } = await this.fetcher.manifest(cid);
-        if (bytesMatchManifest(data, manifest)) return { ok: true, size: data.length };
-        // Say how the bytes differ, so a wrong file at the URL is easy to spot.
-        return {
-          ok: false,
-          size: 0,
-          error: `${CID_MISMATCH} (the link served ${data.length} bytes; this content is ${manifest.size} bytes and its chunks do not match)`,
-        };
-      } catch {
-        // No manifest could be read: nothing proves these bytes are that content.
-      }
-    }
-    return { ok: false, size: 0, error: CID_MISMATCH }; // only an exact match is accepted
-  }
-
-  async contributions() {
-    const results = await Promise.all(
-      this.nodes.list('algorithm').map(async (entry) => {
-        try {
-          const client = this.nodes.client(entry);
-          const [suggestions, submissions] = await Promise.all([
-            client.json<{ suggestions: unknown[] }>('/v1/suggestions/mine'),
-            client.json<{ submissions: unknown[] }>('/v1/submissions/mine'),
-          ]);
-          return { node: entry.id, name: entry.name, ...suggestions, ...submissions };
-        } catch (error) {
-          return { node: entry.id, name: entry.name, suggestions: [], submissions: [], error: errorText(error) };
-        }
-      })
-    );
-    return { nodes: results };
+  fetchContentLink(url: string, cid: string): Promise<{ ok: boolean; size: number; error?: string }> {
+    return this.publishing.fetchContentLink(url, cid);
   }
 
   subscribe(body: { id?: string; name?: string; kind?: string; icon?: string }) {
-    if (!body.id) throw badRequest('id is required');
-    const list = this.store.data.data.subscriptions;
-    if (!list.some((s) => s.id === body.id)) {
-      list.push({
-        id: body.id,
-        name: String(body.name ?? body.id).slice(0, 120),
-        // A creator kind — a group subscribes like a creator — or `topic` for a topic.
-        kind: (body.kind as Subscription['kind']) || undefined,
-        icon: body.icon ? String(body.icon) : undefined,
-        addedAt: new Date().toISOString(),
-      });
-      this.store.changed();
-    }
-    return { subscriptions: list };
+    return this.contents.subscribe(body);
   }
 
   unsubscribe(id: string) {
-    this.store.data.data.subscriptions = this.store.data.data.subscriptions.filter((s) => s.id !== id);
-    this.store.changed();
-    return { subscriptions: this.store.data.data.subscriptions };
+    return this.contents.unsubscribe(id);
   }
 
   remember(body: { id?: string; title?: string; contentId?: string; link?: string }) {
-    if (!body.id) throw badRequest('id is required');
-    // History paused: what the user views now leaves no trace in the history or the
-    // bloom filters — both stand still until the pause is lifted.
-    if (this.settings.pauseHistory) return { ok: true, paused: true };
-    // Watching is written to the local history log only when the user turned that on.
-    if (this.settings.watchHistory) {
-      const history = this.store.data.data.history.filter((h) => h.id !== body.id && this.keptInHistory(h.at));
-      history.unshift({ id: body.id, title: String(body.title ?? body.id).slice(0, 300), at: new Date().toISOString() });
-      this.store.data.data.history = history.slice(0, 200);
-    }
-    // Selected content: its cid and each link go into the bloom filters that remember
-    // what the user has seen (locally, and the copy sent to search algorithm nodes).
-    this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.selected);
-    this.store.changed();
-    return { ok: true };
+    return this.contents.remember(body);
   }
 
   forgetHistory() {
-    this.store.data.data.history = [];
-    this.store.changed();
-    return { ok: true };
+    return this.contents.forgetHistory();
   }
 
   /** The queries the user searched for, most recent first (the search bar suggests from these). */
   searchHistoryItems(): SearchHistoryItem[] {
-    this.store.data.data.searchHistory ??= [];
-    return this.store.data.data.searchHistory.filter((item) => this.keptInHistory(item.at));
-  }
-
-  /** Whether a history entry is still inside the clearing window the user set (0 = forever). */
-  private keptInHistory(at: string): boolean {
-    const days = this.settings.historyClearDays;
-    if (!days) return true;
-    return Date.now() - Date.parse(at) < days * 86_400_000;
-  }
-
-  /** Remembers one search — only while the user keeps a search history (and it is not paused). */
-  private rememberSearch(query: string): void {
-    const text = String(query ?? '').trim().slice(0, 200);
-    if (!text || !this.settings.searchHistory || this.settings.pauseHistory) return;
-    const items = this.searchHistoryItems().filter((item) => item.query !== text);
-    items.unshift({ query: text, at: new Date().toISOString() });
-    this.store.data.data.searchHistory = items.slice(0, 200);
-    this.store.changed();
+    return this.contents.searchHistoryItems();
   }
 
   /** Clears the search history — all of it, or just the entries of one query. */
   clearSearchHistory(query?: string): { items: SearchHistoryItem[] } {
-    const data = this.store.data.data;
-    data.searchHistory = query ? (data.searchHistory ?? []).filter((item) => item.query !== query) : [];
-    this.store.changed();
-    return { items: data.searchHistory };
+    return this.contents.clearSearchHistory(query);
   }
-
-  // -------------------------------------------------------------------------
-  // Toast messages: the same log as the nodes' consoles keep, on the client —
-  // kept only when the user turns that on (off by default).
 
   /** The saved toast messages, newest first, matching the words searched for. */
   toastsItems(query?: string): { items: ToastMessage[]; saved: boolean } {
-    const saved = this.settings.toastHistory;
-    const needle = (query ?? '').trim().toLowerCase();
-    const items = (this.store.data.data.toasts ?? [])
-      .filter((item) => this.keptInHistory(item.at))
-      .filter((item) => !needle || item.text.toLowerCase().includes(needle));
-    return { items, saved };
+    return this.contents.toastsItems(query);
   }
 
   /** Remembers one toast message — only while the user keeps them (and history is not paused). */
   rememberToast(body: { text?: string; kind?: string; at?: string }): { items: ToastMessage[]; saved: boolean } {
-    const text = String(body.text ?? '').trim().slice(0, 500);
-    if (text && this.settings.toastHistory && !this.settings.pauseHistory) {
-      const kind: ToastMessage['kind'] = body.kind === 'error' || body.kind === 'success' ? body.kind : 'info';
-      const items = (this.store.data.data.toasts ?? []).filter((item) => this.keptInHistory(item.at));
-      items.unshift({ id: String(Date.now().toString(36) + Math.random().toString(36).slice(2, 8)), at: body.at ?? new Date().toISOString(), text, kind });
-      this.store.data.data.toasts = items.slice(0, 200);
-      this.store.changed();
-    }
-    return this.toastsItems();
+    return this.contents.rememberToast(body);
   }
 
   /** Drops saved toast messages — all of them, or just the one with this id. */
   forgetToasts(id?: string): { items: ToastMessage[]; saved: boolean } {
-    const data = this.store.data.data;
-    data.toasts = id ? (data.toasts ?? []).filter((item) => item.id !== id) : [];
-    this.store.changed();
-    return this.toastsItems();
+    return this.contents.forgetToasts(id);
   }
-
-  // -------------------------------------------------------------------------
-  // Saved cids: the user saves any cid and sorts it into their own collections
-  // (one saved cid may sit in several collections at once).
 
   /** The saved cids and their collections (the saved screen). */
   savedState(): SavedState {
-    const data = this.store.data.data;
-    data.saved ??= emptySavedState();
-    data.saved.collections ??= [];
-    data.saved.items ??= [];
-    return data.saved;
-  }
-
-  /**
-   * Resolves collection names-or-ids to ids, making the named ones as needed —
-   * saving into a collection that does not exist yet simply creates it.
-   */
-  private collectionsFor(entries: unknown, saved: SavedState): string[] {
-    const ids: string[] = [];
-    for (const entry of Array.isArray(entries) ? entries.slice(0, 32) : []) {
-      const text = String(entry ?? '').trim().slice(0, 60);
-      if (!text) continue;
-      const found = saved.collections.find((c) => c.id === text || c.name.toLowerCase() === text.toLowerCase());
-      const collection = found ?? { id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, name: text, addedAt: new Date().toISOString() };
-      if (!found) saved.collections.push(collection);
-      if (!ids.includes(collection.id)) ids.push(collection.id);
-    }
-    return ids;
+    return this.contents.savedState();
   }
 
   /** Saves a cid into the saved list, assigning it to the given collections. */
   saveCid(body: { id?: string; title?: string; collections?: unknown }): SavedState {
-    const id = String(body.id ?? '').trim().slice(0, 4096);
-    if (!id) throw badRequest('id is required');
-    const saved = this.savedState();
-    const title = String(body.title ?? '').trim().slice(0, 300) || id;
-    const existing = saved.items.find((item) => item.id === id);
-    if (existing) {
-      existing.title = title;
-      if (body.collections !== undefined) existing.collections = this.collectionsFor(body.collections, saved);
-    } else {
-      saved.items.unshift({ id, title, addedAt: new Date().toISOString(), collections: this.collectionsFor(body.collections, saved) });
-    }
-    this.store.changed();
-    return saved;
+    return this.contents.saveCid(body);
   }
 
   /** Assigns a saved cid to different cid collections (or takes it out of some). */
   assignSavedCid(id: string, body: { title?: string; collections?: unknown }): SavedState {
-    const saved = this.savedState();
-    const item = saved.items.find((entry) => entry.id === id);
-    if (!item) throw notFound('No such saved cid');
-    if (body.title !== undefined) item.title = String(body.title ?? '').trim().slice(0, 300) || item.title;
-    if (body.collections !== undefined) item.collections = this.collectionsFor(body.collections, saved);
-    this.store.changed();
-    return saved;
+    return this.contents.assignSavedCid(id, body);
   }
 
   /** Takes a cid out of the saved list; it leaves every collection with it. */
   unsaveCid(id: string): SavedState {
-    const saved = this.savedState();
-    saved.items = saved.items.filter((item) => item.id !== id);
-    this.store.changed();
-    return saved;
+    return this.contents.unsaveCid(id);
   }
 
   /** Makes a cid collection of the user's own (saving into a name makes it too). */
   addCidCollection(body: { name?: string }): SavedState {
-    const saved = this.savedState();
-    const name = String(body.name ?? '').trim().slice(0, 60);
-    if (!name) throw badRequest('A collection name is required');
-    if (saved.collections.some((c) => c.name.toLowerCase() === name.toLowerCase())) throw badRequest('There is already a collection with that name');
-    saved.collections.push({ id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, name, addedAt: new Date().toISOString() });
-    this.store.changed();
-    return saved;
+    return this.contents.addCidCollection(body);
   }
 
   /** Renames one of the user's cid collections. */
   renameCidCollection(id: string, body: { name?: string }): SavedState {
-    const saved = this.savedState();
-    const collection = saved.collections.find((c) => c.id === id);
-    if (!collection) throw notFound('No such collection');
-    const name = String(body.name ?? '').trim().slice(0, 60);
-    if (!name) throw badRequest('A collection name is required');
-    if (saved.collections.some((c) => c.id !== id && c.name.toLowerCase() === name.toLowerCase())) {
-      throw badRequest('There is already a collection with that name');
-    }
-    collection.name = name;
-    this.store.changed();
-    return saved;
+    return this.contents.renameCidCollection(id, body);
   }
 
   /** Removes a collection; the cids saved in it stay saved (they just leave it). */
   removeCidCollection(id: string): SavedState {
-    const saved = this.savedState();
-    saved.collections = saved.collections.filter((c) => c.id !== id);
-    for (const item of saved.items) item.collections = item.collections.filter((c) => c !== id);
-    this.store.changed();
-    return saved;
+    return this.contents.removeCidCollection(id);
   }
 
   /**
@@ -1593,88 +489,56 @@ export class ClientCore {
    * search nodes) as content the user has seen without selecting it.
    */
   markPreviewed(body: { id?: string; contentId?: string; link?: string }): { added: number } {
-    if (!body.id) throw badRequest('id is required');
-    return { added: this.blooms.mark({ id: body.id, contentId: body.contentId, link: body.link }, SCOPES_OF_EVENT.preview) };
+    return this.feeds.markPreviewed(body);
   }
 
   /** The state of the four seen-content filters (what the settings screen shows). */
   bloomStatus(): BloomStatus {
-    return this.blooms.status();
+    return this.feeds.bloomStatus();
   }
 
   /** Forgets one filter; the user is warned about this before it is called. */
   resetBloom(scope: string): BloomStatus {
-    if (scope !== 'selected' && scope !== 'preview' && scope !== 'search' && scope !== 'account') {
-      throw badRequest('scope is selected, preview, search or account');
-    }
-    this.blooms.reset(scope);
-    return this.blooms.status();
+    return this.feeds.resetBloom(scope);
   }
 
   /** The storage a search node offers for seen-content filters, and the user's own there. */
   bloomOffers(node: NodeEntry): Promise<BloomStorageState> {
-    return this.nodes.client(node).json<BloomStorageState>('/v1/bloom');
+    return this.feeds.bloomOffers(node);
   }
 
   /** Pays a search node (its own price and duration) to keep a copy of the search filter a while. */
-  async buyBloomStorage(node: NodeEntry, tier: string): Promise<BloomStorageState> {
-    if (!tier) throw badRequest('tier is required');
-    const filter = this.blooms.filter('search').toJSON();
-    const state = await this.nodes.client(node).json<BloomStorageState>('/v1/bloom', { method: 'PUT', body: { tier, filter } });
-    void this.nodes.refreshBalance(node);
-    return state;
+  buyBloomStorage(node: NodeEntry, tier: string): Promise<BloomStorageState> {
+    return this.feeds.buyBloomStorage(node, tier);
   }
 
   /** Stops the search node from keeping the user's filter (it is deleted there). */
-  async dropBloomStorage(node: NodeEntry): Promise<BloomStorageState> {
-    const state = await this.nodes.client(node).json<BloomStorageState>('/v1/bloom', { method: 'DELETE' });
-    void this.nodes.refreshBalance(node);
-    return state;
+  dropBloomStorage(node: NodeEntry): Promise<BloomStorageState> {
+    return this.feeds.dropBloomStorage(node);
   }
-
-  // -------------------------------------------------------------------------
-  // The account filter: the much larger copy of what the user has seen, kept long term
-  // on search nodes (never sent along with requests). The settings button submits it at
-  // any time; the resubmission job redoes that every `resubmitHours` hours (0 = by hand).
 
   /** The account filter one search node keeps for the user, and how big it may be. */
   accountFilterState(node: NodeEntry): Promise<AccountFilterState> {
-    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter');
+    return this.feeds.accountFilterState(node);
   }
 
   /** Sends this user's account filter to one search node (it replaces what is kept there). */
   submitAccountFilter(node: NodeEntry): Promise<AccountFilterState> {
-    const filter = this.blooms.filter('account').toJSON();
-    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter', { method: 'PUT', body: { filter } });
+    return this.feeds.submitAccountFilter(node);
   }
 
   /** Stops one search node from keeping the account filter. */
   dropAccountFilter(node: NodeEntry): Promise<AccountFilterState> {
-    return this.nodes.client(node).json<AccountFilterState>('/v1/account-filter', { method: 'DELETE' });
+    return this.feeds.dropAccountFilter(node);
   }
 
   /**
    * The button: submits the account filter to every enabled search node at once. Each
    * node answers (or fails) on its own; the summary says which is which.
    */
-  async submitAccountFilters(): Promise<{ node: string; name: string; ok: boolean; error?: string; updatedAt?: string }[]> {
-    const nodes = this.nodes.active('algorithm');
-    return Promise.all(
-      nodes.map(async (node) => {
-        try {
-          const state = await this.submitAccountFilter(node);
-          return { node: node.id, name: node.name, ok: true, updatedAt: state.updatedAt };
-        } catch (error) {
-          return { node: node.id, name: node.name, ok: false, error: errorText(error) };
-        }
-      })
-    );
+  submitAccountFilters(): Promise<{ node: string; name: string; ok: boolean; error?: string; updatedAt?: string }[]> {
+    return this.feeds.submitAccountFilters();
   }
-
-  /** The resubmission job's timer (null while the job is switched off). */
-  private bloomJob: ReturnType<typeof setTimeout> | null = null;
-  /** Bumped whenever the job is (re)scheduled, so an old run never schedules again. */
-  private bloomJobRun = 0;
 
   /**
    * Runs the resubmission job on its schedule: right away whenever it is switched on or
@@ -1682,42 +546,20 @@ export class ClientCore {
    * the job off — the settings button still submits at any time.
    */
   scheduleBloomJob(): void {
-    this.stopBloomJob();
-    const { enabled, resubmitHours } = this.settings.accountBloom;
-    if (!enabled || !(resubmitHours > 0)) return;
-    const intervalMs = Math.max(1_000, resubmitHours * 3_600_000);
-    const generation = ++this.bloomJobRun;
-    const run = async () => {
-      try {
-        await this.submitAccountFilters();
-      } catch {
-        // one quiet round: the next run (or the button) tries again
-      }
-      // Switched off or rescheduled while it was submitting: nothing more from this run.
-      if (generation !== this.bloomJobRun) return;
-      this.bloomJob = later(intervalMs, run);
-    };
-    // Right away, so a fresh client (or a setting just switched on) does not wait a day.
-    this.bloomJob = later(250, run);
+    this.feeds.scheduleBloomJob();
   }
 
   /** Stops the resubmission job (its filter stays on the nodes until it is dropped there). */
   stopBloomJob(): void {
-    this.bloomJobRun++;
-    if (this.bloomJob) clearTimeout(this.bloomJob);
-    this.bloomJob = null;
+    this.feeds.stopBloomJob();
   }
-
-  // -------------------------------------------------------------------------
-  // .vvsh verifiable video streams: building one here or on a node, publishing it, and
-  // reading it back chunk by chunk — every record and payload verified against its hash.
 
   /**
    * Builds one video's .vvsh stream and publishes it: every record and payload is uploaded
    * the moment it exists, so a long video is never held twice in memory, then the signed
    * manifest (the metadata and root alone) is committed.
    */
-  async publishVvshStream(
+  publishVvshStream(
     node: NodeEntry,
     source: Uint8Array,
     options: {
@@ -1741,47 +583,12 @@ export class ClientCore {
       createdAt?: string;
     }
   ): Promise<{ cid: string; manifest: Manifest; objects: number; listed: number }> {
-    const client = this.nodes.client(node);
-    this.traces.trace('basic', 'core.publish', 'publish vvsh', { message: options.name, data: { node: node.id, bytes: source.length } });
-    const config = options.config ?? DEFAULT_VVSH_BUILD;
-    const webm = options.encoder === 'ffmpeg' && this.options.transcodeVvsh
-      ? await this.options.transcodeVvsh(source, config, options.totalSeconds)
-      : undefined;
-    const { file, objects } = await encodeVvsh(
-      webm ? new Uint8Array(0) : source,
-      { totalSeconds: options.totalSeconds, config, sourceMime: webm ? 'video/webm' : options.sourceMime, previews: options.previews, webm },
-      async (hash, data) => {
-        await client.json(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
-      }
-    );
-    const manifest: Manifest = {
-      v: 1,
-      name: options.name,
-      mime: 'video/x-vvsh',
-      size: 0,
-      chunkSize: DEFAULT_CHUNK_SIZE,
-      chunks: [],
-      createdAt: options.createdAt ?? new Date().toISOString(),
-      vvsh: file,
-    };
-    if (options.meta && Object.keys(options.meta).length) manifest.meta = options.meta;
-    const sources = this.normalizeVvshSources(options.sources);
-    if (sources?.length) manifest.sources = sources;
-    const signed = options.sign === false ? manifest : signManifest(manifest, this.store.identity, this.settings.profile);
-    await client.json('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    const cid = contentIdOf(signed);
-    const listed = await this.submitVvshToAlgorithms(cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
-    rememberPublished(this.store, cid, signed.meta?.title ?? signed.name);
-    this.traces.trace('basic', 'core.publish', 'publish vvsh → done', { data: { cid, objects, listed } });
-    return { cid, manifest: signed, objects, listed };
+    return this.publishing.publishVvshStream(node, source, options);
   }
 
   /** The backend local publishing will use, including the warning the GUI must show. */
   encoderInfo(): Promise<{ backend: 'ffmpeg' | 'mediarecorder'; warning?: string }> {
-    return this.options.encoderInfo?.() ?? Promise.resolve({
-      backend: 'mediarecorder',
-      warning: 'FFmpeg is not available in this browser. Using the slower, realtime MediaRecorder fallback.',
-    });
+    return this.publishing.encoderInfo();
   }
 
   /** What one provider asks to calculate a .vvsh from just the video. */
@@ -1789,7 +596,7 @@ export class ClientCore {
     node: NodeEntry,
     options: { bytes: number; totalSeconds: number; config?: VvshBuildConfig }
   ): Promise<{ quote: VvshConvertQuote }> {
-    return this.nodes.client(node).json<{ quote: VvshConvertQuote }>('/v1/vvsh/quote', { method: 'POST', body: options });
+    return this.publishing.quoteVvshConvert(node, options);
   }
 
   /**
@@ -1797,7 +604,7 @@ export class ClientCore {
    * long one never overflows anything: the quote first, then the pieces, then the work
    * (charged before it runs), then the signed manifest is committed there.
    */
-  async convertVvshOn(
+  convertVvshOn(
     node: NodeEntry,
     options: {
       data: Uint8Array;
@@ -1821,121 +628,26 @@ export class ClientCore {
       createdAt?: string;
     }
   ): Promise<{ cid: string; quote: VvshConvertQuote; manifest: Manifest; listed: number; warnings: string[] }> {
-    const client = this.nodes.client(node);
-    this.traces.trace('basic', 'core.publish', 'convert vvsh', { message: options.name, data: { node: node.id, bytes: options.data.length } });
-    const warnings: string[] = [];
-    const retryOnce = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
-      try {
-        return await run();
-      } catch (error) {
-        const transient = !(error instanceof RemoteError) || error.status === 429 || error.status >= 500;
-        if (!transient) throw error;
-        const warning = `${label} failed (${errorText(error)}). Retrying once.`;
-        warnings.push(warning);
-        log.warn(warning);
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        return run();
-      }
-    };
-    const started = await client.json<{ jobId: string; quote: VvshConvertQuote }>('/v1/vvsh/convert', {
-      method: 'POST',
-      body: {
-        name: options.name,
-        bytes: options.data.length,
-        totalSeconds: options.totalSeconds,
-        config: options.config,
-        meta: options.meta,
-        sourceMime: options.sourceMime,
-        previews: options.previews,
-      },
-    });
-    const pieceSize = 2 * 1024 * 1024;
-    for (let at = 0; at < options.data.length; at += pieceSize) {
-      const index = Math.floor(at / pieceSize);
-      await retryOnce(`Uploading video piece ${index + 1}`, () =>
-        client.json(`/v1/vvsh/convert/${started.jobId}/piece?index=${index}`, {
-          method: 'PUT',
-          raw: options.data.subarray(at, at + pieceSize),
-        })
-      );
-    }
-    type ConversionState = {
-      status: 'uploading' | 'running' | 'done' | 'error';
-      progress?: number;
-      manifest?: Manifest;
-      quote: VvshConvertQuote;
-      error?: string;
-      warnings?: string[];
-    };
-    let converted = await retryOnce('Starting provider conversion', () =>
-      client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}/finish`, { method: 'POST', body: {}, timeoutMs: 10_000 })
-    );
-    options.onProgress?.(converted.progress ?? 0);
-    const deadline = Date.now() + 24 * 60 * 60 * 1000;
-    while (converted.status !== 'done' && converted.status !== 'error') {
-      if (Date.now() >= deadline) throw new Error('Provider conversion did not finish within 24 hours');
-      // Spaced polling: the provider works for minutes on a large video — asking it every
-      // few seconds is enough to notice progress without hammering it.
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      converted = await retryOnce('Polling provider conversion', () =>
-        client.json<ConversionState>(`/v1/vvsh/convert/${started.jobId}`, { timeoutMs: 10_000 })
-      );
-      options.onProgress?.(converted.progress ?? 0);
-    }
-    warnings.push(...(converted.warnings ?? []));
-    if (converted.status === 'error' || !converted.manifest) {
-      const why = converted.error || 'Provider conversion failed';
-      this.traces.trace('error', 'core.publish', 'convert vvsh failed', { message: node.name, error: why });
-      throw new Error(why);
-    }
-    // The caller's stamp and fallback links go in before signing: the same video on two
-    // providers then lands on the same content id.
-    const base: Manifest = { ...converted.manifest, ...(options.createdAt ? { createdAt: options.createdAt } : {}) };
-    const sources = this.normalizeVvshSources(options.sources);
-    if (sources?.length) base.sources = sources;
-    const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
-    const manifestStarted = Date.now();
-    const committed = await client.json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    this.traces.trace('dependency', 'core', 'PUT /v1/vvsh/manifest', {
-      message: node.name,
-      data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/vvsh/manifest`, method: 'PUT', ms: Date.now() - manifestStarted, cid: committed.cid }),
-    });
-    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
-    rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
-    this.traces.trace('basic', 'core.publish', 'convert vvsh → done', { data: { cid: committed.cid, listed, warnings: warnings.length } });
-    return { cid: committed.cid, quote: converted.quote, manifest: signed, listed, warnings };
+    return this.publishing.convertVvshOn(node, options);
   }
 
   /** One object (a tree record or a payload) given its hash, checked against that hash. */
-  async vvshObject(node: NodeEntry, hash: string): Promise<Uint8Array> {
-    const response = await this.nodes.client(node).fetch(`/v1/vvsh/objects/${encodeURIComponent(hash)}`);
-    const data = new Uint8Array(await response.arrayBuffer());
-    // Objects are named by their hash, not a content id: what does not hash to the name
-    // it came under is never parsed, played or passed on.
-    if (chunkIdOf(data) !== hash) throw new Error('The vvsh object sent does not match the hash naming it');
-    return data;
+  vvshObject(node: NodeEntry, hash: string): Promise<Uint8Array> {
+    return this.publishing.vvshObject(node, hash);
   }
 
   /** Uploads one already-built .vvsh object (a record or a payload) to a provider. */
-  async storeVvshObject(node: NodeEntry, hash: string, data: Uint8Array): Promise<void> {
-    await this.nodes.client(node).json(`/v1/vvsh/objects/${encodeURIComponent(hash)}`, { method: 'PUT', raw: data });
+  storeVvshObject(node: NodeEntry, hash: string, data: Uint8Array): Promise<void> {
+    return this.publishing.storeVvshObject(node, hash, data);
   }
 
   /** Commits an already-uploaded .vvsh stream (its objects are on the node) and lists it. */
-  async commitVvshStream(
+  commitVvshStream(
     node: NodeEntry,
     manifest: Manifest,
     options: { algorithms?: string[]; sign?: boolean; thumbnail?: string; sources?: string[] } = {}
   ): Promise<{ cid: string; listed: number }> {
-    const base: Manifest = { ...manifest };
-    const sources = this.normalizeVvshSources(options.sources ?? manifest.sources);
-    if (sources?.length) base.sources = sources;
-    const signed = options.sign === false ? base : signManifest(base, this.store.identity, this.settings.profile);
-    const committed = await this.nodes.client(node).json<{ cid: string }>('/v1/vvsh/manifest', { method: 'PUT', body: { manifest: signed } });
-    const listed = await this.submitVvshToAlgorithms(committed.cid, signed, node, { algorithms: options.algorithms, sign: options.sign, thumbnail: options.thumbnail });
-    rememberPublished(this.store, committed.cid, signed.meta?.title ?? signed.name);
-    this.traces.trace('basic', 'core.publish', 'commit vvsh', { data: { cid: committed.cid, listed, node: node.id } });
-    return { cid: committed.cid, listed };
+    return this.publishing.commitVvshStream(node, manifest, options);
   }
 
   /**
@@ -1944,92 +656,23 @@ export class ClientCore {
    * encoding — and the walk down (single path, every step checked against its parent)
    * fetches only the records it needs, answering with the path it took and the leaf.
    */
-  async vvshChunk(
+  vvshChunk(
     node: NodeEntry,
     ref: { root: string; chunkCount: number; from?: { hash: string; depth: number } },
     index: number,
     rendition: string
   ): Promise<{ data: Uint8Array; frames: VvshFrameStats; path: string[]; pathDepth: number }> {
-    const fetchRecord = async (hash: string): Promise<Uint8Array | null> => {
-      try {
-        return await this.vvshObject(node, hash);
-      } catch {
-        return null;
-      }
-    };
-    const steps = pathToChunk(ref.chunkCount, index);
-    // A starting branch the caller already checked: only the rest of the path is walked.
-    const fromDepth = ref.from && ref.from.depth >= 0 && ref.from.depth < steps.length ? ref.from.depth : 0;
-    const path: string[] = [];
-    let hash = ref.from && fromDepth ? ref.from.hash : ref.root;
-    for (const side of steps.slice(fromDepth)) {
-      const bytes = await fetchRecord(hash);
-      const record = bytes ? parseVvshNode(bytes, hash) : null;
-      if (!record || record.kind !== 'branch') throw new Error('The node did not give a verifiable path to that chunk');
-      path.push(hash);
-      hash = record[side];
-    }
-    const bytes = await fetchRecord(hash);
-    const chunkNode = bytes ? parseVvshNode(bytes, hash) : null;
-    if (!chunkNode || chunkNode.kind !== 'chunk') throw new Error('The node did not give a verifiable path to that chunk');
-    path.push(hash);
-    const leaf = chunkNode.renditions.find((entry) => entry.id === rendition);
-    if (!leaf) throw new Error('This stream has no such bitrate encoding');
-    const data = await this.vvshObject(node, leaf.hash);
-    path.push(leaf.hash);
-    // `path` starts wherever the walk started: `pathDepth` says which depth that is, so
-    // a caller reusing a branch knows exactly which hash sits at which depth.
-    return { data, frames: leaf.frames, path, pathDepth: fromDepth };
+    return this.publishing.vvshChunk(node, ref, index, rendition);
   }
 
   /** A byte range of one decoded stream by node id — what the /stream/vvsh routes call. */
-  async vvshStreamRange(spec: { n: string; r: string; c: number; q: string; d: number }, start: number, end: number): Promise<Uint8Array> {
-    return this.vvshRange(this.nodes.require(spec.n), { root: spec.r, chunkCount: spec.c }, spec.q, spec.d, start, end);
+  vvshStreamRange(spec: { n: string; r: string; c: number; q: string; d: number }, start: number, end: number): Promise<Uint8Array> {
+    return this.publishing.vvshStreamRange(spec, start, end);
   }
 
   /** Every chunk of one bitrate, reassembled into the full video file to save. */
-  async exportVvsh(
-    node: NodeEntry,
-    file: VvshFile,
-    rendition: string
-  ): Promise<Uint8Array> {
-    const chunks: Uint8Array[] = [];
-    for (let index = 0; index < file.meta.chunkCount; index++) {
-      chunks.push((await this.vvshChunk(node, { root: file.root, chunkCount: file.meta.chunkCount }, index, rendition)).data);
-    }
-    if (file.meta.codec === 'vvsh-webm/1') {
-      const selected = file.meta.bitrates.find((entry) => entry.id === rendition);
-      if (!selected?.initHash) throw new Error('This stream has no such bitrate encoding');
-      const init = await this.vvshObject(node, selected.initHash);
-      return assembleVvshWebm(init, chunks, { chunkSeconds: file.meta.chunkSeconds });
-    }
-    return exportVvshStream(chunks);
-  }
-
-  /** Decoded chunks kept briefly, so repeated byte ranges of one stream are cheap. */
-  private vvshDecoded = new Map<string, Uint8Array>();
-
-  /** One chunk's decoded bytes (its piece of the video), kept for the next range. */
-  private async vvshDecodedChunk(
-    node: NodeEntry,
-    ref: { root: string; chunkCount: number },
-    index: number,
-    rendition: string
-  ): Promise<Uint8Array> {
-    const key = `${ref.root}:${rendition}:${index}`;
-    const cached = this.vvshDecoded.get(key);
-    if (cached) return cached;
-    const chunk = await this.vvshChunk(node, ref, index, rendition);
-    const blocks = decodeVvshFrames(decodeVvshChunk(chunk.data));
-    const out = new Uint8Array(blocks.reduce((size, block) => size + block.length, 0));
-    let at = 0;
-    for (const block of blocks) {
-      out.set(block, at);
-      at += block.length;
-    }
-    if (this.vvshDecoded.size > 64) this.vvshDecoded.delete(this.vvshDecoded.keys().next().value!);
-    this.vvshDecoded.set(key, out);
-    return out;
+  exportVvsh(node: NodeEntry, file: VvshFile, rendition: string): Promise<Uint8Array> {
+    return this.publishing.exportVvsh(node, file, rendition);
   }
 
   /**
@@ -2038,7 +681,7 @@ export class ClientCore {
    * arithmetic (`floor(i · bytes / chunks)` — the same cut the build made), so a seek to
    * any part of the video fetches only the chunk or two it lands on.
    */
-  async vvshRange(
+  vvshRange(
     node: NodeEntry,
     ref: { root: string; chunkCount: number; from?: { hash: string; depth: number } },
     rendition: string,
@@ -2046,113 +689,12 @@ export class ClientCore {
     start: number,
     end: number
   ): Promise<Uint8Array> {
-    const total = Math.max(0, decodedBytes);
-    const from = Math.max(0, Math.min(start, total));
-    const to = Math.max(from, Math.min(end, total));
-    if (to <= from || !total) return new Uint8Array(0);
-    const count = ref.chunkCount;
-    const first = Math.min(count - 1, Math.floor((from * count) / total));
-    const last = Math.min(count - 1, Math.floor(((to - 1) * count) / total));
-    // The chunks that hold the range, fetched together — a range is never bigger than a
-    // couple of them, and repeated ranges hit the cache instead of paying again.
-    const indexes: number[] = [];
-    for (let index = first; index <= last; index++) indexes.push(index);
-    const decoded = await Promise.all(indexes.map((index) => this.vvshDecodedChunk(node, ref, index, rendition)));
-    const pieces: Uint8Array[] = [];
-    for (let i = 0; i < indexes.length; i++) {
-      const chunkStart = Math.floor((indexes[i] * total) / count);
-      const takeStart = Math.max(0, from - chunkStart);
-      const takeEnd = Math.min(decoded[i].length, to - chunkStart);
-      if (takeEnd > takeStart) pieces.push(decoded[i].subarray(takeStart, takeEnd));
-    }
-    const out = new Uint8Array(pieces.reduce((size, piece) => size + piece.length, 0));
-    let at = 0;
-    for (const piece of pieces) {
-      out.set(piece, at);
-      at += piece.length;
-    }
-    return out;
-  }
-
-  /**
-   * Puts a published .vvsh stream in front of the search algorithm nodes as well: the
-   * chosen ones when the caller picked them, every active one otherwise.
-   */
-  private async submitVvshToAlgorithms(
-    cid: string,
-    manifest: Manifest,
-    provider: NodeEntry,
-    options: { algorithms?: string[]; sign?: boolean; thumbnail?: string } = {}
-  ): Promise<number> {
-    const profile = this.settings.profile;
-    const sign = options.sign !== false;
-    const chosen = options.algorithms
-      ? this.nodes.list('algorithm').filter((node) => options.algorithms?.includes(node.id))
-      : this.nodes.active('algorithm');
-    let listed = 0;
-    for (const node of chosen) {
-      const client = this.nodes.client(node);
-      try {
-        const info = node.info ?? (await client.fetchInfo());
-        const ts = Date.now();
-        const submitted = Date.now();
-        await client.json('/v1/submissions', {
-          method: 'POST',
-          timeoutMs: 30000,
-          body: {
-            id: cid,
-            title: manifest.meta?.title ?? manifest.name,
-            description: manifest.meta?.description,
-            format: manifest.meta?.format ?? 'video',
-            rating: manifest.meta?.rating,
-            topics: manifest.meta?.topics,
-            tags: manifest.meta?.tags,
-            language: manifest.meta?.language,
-            durationSeconds: manifest.meta?.durationSeconds,
-            creator: sign ? { id: this.store.identity.id, name: profile.name || undefined, kind: profile.kind } : undefined,
-            thumbnail: options.thumbnail,
-            providers: [provider.ref],
-            publishedAt: manifest.createdAt,
-            creatorProof: sign ? { key: this.store.identity.id, ts, sig: signData(this.store.identity, claimSigningPayload(info.id, cid, ts)) } : undefined,
-          },
-        });
-        this.traces.trace('dependency', 'core', 'POST /v1/submissions', {
-          message: node.name,
-          data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/submissions`, method: 'POST', ms: Date.now() - submitted, cid }),
-        });
-        listed++;
-      } catch (error) {
-        this.traces.trace('dependency', 'core', 'POST /v1/submissions', {
-          message: node.name,
-          data: this.traces.summarize({ node: node.id, url: `${client.url}/v1/submissions`, method: 'POST', cid }),
-          error: errorText(error),
-        });
-        // The stream is published either way; listing is the algorithm node's call.
-      }
-    }
-    return listed;
-  }
-
-  /** External copies of a .vvsh stream, as the ids (`yt:…`, `ia:…`) clients fall back to. */
-  private normalizeVvshSources(list: string[] | undefined): string[] | undefined {
-    if (!list?.length) return undefined;
-    const sources: string[] = [];
-    for (const text of list) {
-      const trimmed = text.trim();
-      if (!trimmed) continue;
-      const source = parseSource(trimmed) && !/^https?:/.test(trimmed) ? parseSource(trimmed) : sourceFromUrl(trimmed);
-      if (!source) throw badRequest(`Not a link or source: ${trimmed}`);
-      sources.push(formatSource(source));
-    }
-    return sources.length ? sources : undefined;
+    return this.publishing.vvshRange(node, ref, rendition, decodedBytes, start, end);
   }
 
   /** Replaces the identity (restoring a backup); sessions are re-opened with the new keys. */
   restoreIdentity(seed: Uint8Array): { id: string } {
-    this.store.replaceIdentity(seed);
-    this.nodes.resetSessions();
-    void Promise.all(this.nodes.list().map((entry) => this.nodes.refreshBalance(entry)));
-    return { id: this.store.identity.id };
+    return this.profiles.restoreIdentity(seed);
   }
 
   /**

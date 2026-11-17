@@ -2,6 +2,7 @@ import { Check, Copy, Download, ExternalLink, Link2, Mail, QrCode, Share2 } from
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { shareBase, shareLink } from '../../../src/shared/clientdefaults';
+import { formatShareUri } from '../../../src/shared/share';
 import { parseContentId } from '../../../src/shared/sources';
 import { downloadBlob, qrSvg, svgToPng } from '../qr';
 import { useApp } from '../state';
@@ -113,6 +114,7 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
   const { state, providers } = useApp();
   const [mode, setMode] = useState<Mode>('link');
   const [copied, setCopied] = useState(false);
+  const [uriCopied, setUriCopied] = useState(false);
   // The link defaults to the sharing address set in Settings — a hosted copy of the web
   // client — with the content id appended; when that address is empty it is the copy of
   // the client this page is open in. The
@@ -140,6 +142,15 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
     setTimeout(() => setCopied(false), 1600);
   };
 
+  // The host-agnostic form: the content id itself, openable by any VibeShare app —
+  // kept beside the web link, never in place of it (the web link is what opens today).
+  const appUri = formatShareUri(target.id);
+  const copyUri = async () => {
+    await copyText(appUri);
+    setUriCopied(true);
+    setTimeout(() => setUriCopied(false), 1600);
+  };
+
   return (
     <Modal title="Share" onClose={onClose}>
       <p className="small muted share-title" title={title}>
@@ -160,6 +171,17 @@ function ShareModal({ target, onClose }: { target: ShareTarget; onClose: () => v
           {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? 'Copied' : 'Copy link'}
         </button>
       </div>
+
+      <div className="share-link">
+        <input type="text" value={appUri} readOnly onFocus={(e) => e.target.select()} aria-label="App link" />
+        <button onClick={copyUri} title="Opens the content in any VibeShare app">
+          {uriCopied ? <Check size={15} /> : <Copy size={15} />} {uriCopied ? 'Copied' : 'Copy app link'}
+        </button>
+      </div>
+      <p className="hint">
+        The <code>vs://</code> link names the content itself, so any VibeShare app can open it; the web link above opens one hosted copy of the
+        web client and is the default everywhere.
+      </p>
 
       {mode === 'link' && (
         <div className="share-targets">

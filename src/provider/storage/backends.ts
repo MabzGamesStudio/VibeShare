@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import { request, RemoteError } from '../../shared/http.js';
-import type { TraceStore } from '../../shared/tracing-node.js';
+import { request, RemoteError } from '../../shared/node/http.js';
+import type { TraceStore } from '../../shared/node/tracing-node.js';
 import { signS3Request } from './s3sign.js';
 
 /**

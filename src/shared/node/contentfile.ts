@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { buildManifest, DEFAULT_CHUNK_SIZE, type BuildOptions, type Manifest } from './content.js';
+import { buildManifest, DEFAULT_CHUNK_SIZE, type BuildOptions, type Manifest } from '../content.js';
 
 /** Builds the manifest of a file on disk, reading it once. */
 export async function buildManifestFromFile(

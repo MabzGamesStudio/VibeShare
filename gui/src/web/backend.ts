@@ -4,6 +4,7 @@
 import { clientRoutes, type ApiRequest, type ApiRoute } from '../../../src/client/api';
 import { ClientCore } from '../../../src/client/core';
 import { FetchError } from '../../../src/client/fetcher';
+import { apiVersionHeaders } from '../../../src/shared/api-version';
 import type { ServiceStatus } from '../../../src/shared/clientapi';
 import { MiB } from '../../../src/shared/content';
 import { fromBase64url } from '../../../src/shared/encoding';
@@ -49,7 +50,9 @@ const UNAVAILABLE_SERVICE: ServiceStatus & { unavailable: string } = {
 };
 
 function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+  // The same version marker the daemon stamps its replies with — one contract, both
+  // implementations (see src/shared/api-version.ts).
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...apiVersionHeaders() } });
 }
 
 function errorResponse(error: unknown): Response {
@@ -209,7 +212,7 @@ export async function createBackend(options: BackendOptions): Promise<Backend> {
         },
       };
       const result = await found.route.handler(apiRequest);
-      return result === undefined ? new Response(null, { status: 204 }) : json(200, result);
+      return result === undefined ? new Response(null, { status: 204, headers: apiVersionHeaders() }) : json(200, result);
     } catch (error) {
       return errorResponse(error);
     }

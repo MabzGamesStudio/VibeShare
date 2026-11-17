@@ -1,0 +1,175 @@
+// Profiles: several users of one client, each with their own nodes, settings, history
+// and client id. Public profiles switch freely; protected ones need username + password.
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { after, describe, it } from 'node:test';
+import type { ClientState, ProfileSummary } from '../../src/shared/clientapi.js';
+import { startClient, tempDir } from '../helpers.js';
+
+describe('client profiles', async () => {
+  const { dir, cleanup } = tempDir();
+  const { api, client } = await startClient(dir);
+  after(async () => {
+    await client.stop();
+    cleanup();
+  });
+
+  it('keeps each profile apart and protects it with a password', async () => {
+    const initial = await api<ClientState>('/api/state');
+    assert.equal(initial.profiles.length, 1, 'one implicit profile to start with');
+    assert.equal(initial.profiles[0].access, 'public');
+    const mainId = initial.activeProfile;
+
+    await api('/api/profiles', { body: { name: 'Work', username: 'ann', password: 's3cret' } });
+    const listed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.equal(listed.profiles.length, 2);
+    const work = listed.profiles.find((profile) => profile.name === 'Work')!;
+    assert.equal(work.access, 'protected');
+    assert.equal(work.username, 'ann');
+    assert.equal(work.active, false);
+
+    // A protected profile does not open without its username and password.
+    await assert.rejects(api(`/api/profiles/${work.id}/switch`, { method: 'POST', body: {} }), /Wrong username or password/);
+    await assert.rejects(
+      api(`/api/profiles/${work.id}/switch`, { method: 'POST', body: { username: 'ann', password: 'wrong' } }),
+      /Wrong username or password/
+    );
+
+    const asWork = await api<ClientState>(`/api/profiles/${work.id}/switch`, {
+      method: 'POST',
+      body: { username: 'ann', password: 's3cret' },
+    });
+    assert.equal(asWork.activeProfile, work.id);
+    assert.notEqual(asWork.identity.id, initial.identity.id, 'every profile has its own client id');
+
+    // Work's own settings and history.
+    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark', watchHistory: true } });
+    await api('/api/history', { body: { id: 'yt:some-video', title: 'Watched at work' } });
+
+    // Back to the public profile: its data is untouched.
+    const asMain = await api<ClientState>(`/api/profiles/${mainId}/switch`, { method: 'POST', body: {} });
+    assert.equal(asMain.identity.id, initial.identity.id, 'switching back restores the profile’s client id');
+    assert.equal(asMain.settings.theme, 'system');
+    const mainLibrary = await api<{ history: { id: string }[] }>('/api/library');
+    assert.equal(mainLibrary.history.length, 0, 'history is kept per profile');
+
+    // And Work's data comes back when it is unlocked again.
+    const backToWork = await api<ClientState>(`/api/profiles/${work.id}/switch`, {
+      method: 'POST',
+      body: { username: 'ann', password: 's3cret' },
+    });
+    assert.equal(backToWork.settings.theme, 'dark');
+    const workLibrary = await api<{ history: { id: string }[] }>('/api/library');
+    assert.deepEqual(workLibrary.history.map((item) => item.id), ['yt:some-video']);
+    assert.equal(backToWork.identity.id, asWork.identity.id);
+  });
+
+  it('renames, protects and deletes profiles', async () => {
+    const listed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    const work = listed.profiles.find((profile) => profile.name === 'Work')!;
+
+    await api(`/api/profiles/${work.id}`, { method: 'PATCH', body: { name: 'Office' } });
+    await api(`/api/profiles/${work.id}`, { method: 'PATCH', body: { makePublic: true } });
+    const renamed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    const office = renamed.profiles.find((profile) => profile.id === work.id)!;
+    assert.equal(office.name, 'Office');
+    assert.equal(office.access, 'public');
+
+    await api('/api/profiles', { body: { name: 'Temp' } });
+    const withTemp = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    const temp = withTemp.profiles.find((profile) => profile.name === 'Temp')!;
+    // Deleting a profile now requires its username and password (a public profile is
+    // confirmed by typing its name as the username).
+    await assert.rejects(api(`/api/profiles/${temp.id}`, { method: 'DELETE' }), /username and password/);
+    await assert.rejects(api(`/api/profiles/${temp.id}`, { method: 'DELETE', body: { username: 'Wrong', password: 'x' } }), /Type the profile name/);
+    await api(`/api/profiles/${temp.id}`, { method: 'DELETE', body: { username: 'Temp', password: 'confirm' } });
+    const afterDelete = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.equal(afterDelete.profiles.length, 2);
+
+    // Deleting the active (anonymous) account switches to the other profile first.
+    await api(`/api/profiles/${office.id}`, { method: 'DELETE', body: { username: 'Office', password: 'confirm' } });
+    const afterMain = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.equal(afterMain.profiles.length, 1);
+    assert.equal(afterMain.profiles[0].name, 'Main');
+    assert.equal(afterMain.profiles[0].active, true);
+
+    // Deleting the only remaining account wipes it and starts clean.
+    const beforeReset = await api<{ identity: { id: string } }>('/api/state');
+    await api(`/api/profiles/${afterMain.profiles[0].id}`, { method: 'DELETE', body: { username: 'Main', password: 'confirm' } });
+    const afterReset = await api<{ profiles: ProfileSummary[]; identity: { id: string } }>('/api/state');
+    assert.equal(afterReset.profiles.length, 1, 'a fresh profile remains');
+    assert.equal(afterReset.profiles[0].active, true);
+    assert.notEqual(afterReset.identity.id, beforeReset.identity.id, 'the anonymous account was wiped and a new identity issued');
+  });
+});
+
+describe('hidden profiles', async () => {
+  const { dir, cleanup } = tempDir();
+  let started = await startClient(dir);
+  after(async () => {
+    await started.client.stop();
+    cleanup();
+  });
+
+  it('does not appear anywhere and keeps its data encrypted', async () => {
+    let { api } = started;
+    await assert.rejects(api('/api/profiles', { body: { name: 'No name', hidden: true } }), /username and a password/);
+    await api('/api/profiles', { body: { name: 'Secret', username: 'kim', password: 'pw123', hidden: true } });
+    const listed = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.deepEqual(listed.profiles.map((profile) => profile.name), ['Main'], 'the hidden profile does not even appear to exist');
+
+    // Its username and password are the only way in.
+    await assert.rejects(api('/api/profiles/unlock', { body: { username: 'kim', password: 'wrong' } }), /Wrong username or password/);
+    await assert.rejects(api('/api/profiles/unlock', { body: { username: 'kim', password: '' } }), /Wrong username or password/);
+    const opened = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    assert.equal(opened.locked, false);
+    const open = opened.profiles.find((profile) => profile.hidden)!;
+    assert.equal(open.hidden, true, 'while it is open, only a generic label shows');
+    assert.equal(open.name, 'Hidden profile');
+    assert.equal(open.active, true);
+
+    await api('/api/settings', { method: 'PATCH', body: { theme: 'dark', watchHistory: true } });
+    await api('/api/history', { body: { id: 'yt:watched-in-secret', title: 'Watched in secret' } });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await started.client.stop();
+
+    // On disk there is no trace of its name or its data — only the sealed blob.
+    const saved = await readFile(join(dir, 'client.json'), 'utf8');
+    assert.ok(!saved.includes('Secret'), 'the profile name is encrypted');
+    assert.ok(!saved.includes('Watched in secret'), 'its history is encrypted');
+    assert.ok(!saved.includes('yt:watched-in-secret'));
+    assert.ok(saved.includes('"hidden":true'));
+
+    // After a restart the client is locked until the profile opens again.
+    started = await startClient(dir);
+    api = started.api;
+    const locked = await api<ClientState>('/api/state');
+    assert.equal(locked.locked, true);
+    assert.equal(locked.settings.theme, 'system', 'the live data is not readable while locked');
+    const emptyHistory = await api<{ history: { id: string }[] }>('/api/library');
+    assert.equal(emptyHistory.history.length, 0);
+
+    const again = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    assert.equal(again.locked, false);
+    assert.equal(again.settings.theme, 'dark', 'its data comes back with its password');
+    const back = await api<{ history: { id: string }[] }>('/api/library');
+    assert.deepEqual(back.history.map((item) => item.id), ['yt:watched-in-secret']);
+
+    // Switching to the visible profile hides the hidden one again.
+    const main = await api<ClientState>('/api/profiles/main/switch', { method: 'POST', body: {} });
+    assert.deepEqual(main.profiles.map((profile) => profile.name), ['Main']);
+  });
+
+  it('deletes a hidden profile with its username and password', async () => {
+    const { api } = started;
+    // A hidden profile only appears while it is unlocked; the delete button is there too.
+    const opened = await api<ClientState>('/api/profiles/unlock', { body: { username: 'kim', password: 'pw123' } });
+    const hidden = opened.profiles.find((profile) => profile.hidden)!;
+    assert.equal(hidden.active, true, 'the hidden profile is open');
+    await api(`/api/profiles/${hidden.id}`, { method: 'DELETE', body: { username: 'kim', password: 'pw123' } });
+    const after = await api<{ profiles: ProfileSummary[] }>('/api/profiles');
+    assert.ok(!after.profiles.some((profile) => profile.hidden), 'the hidden profile is gone');
+    assert.equal(after.profiles.length, 1);
+  });
+});

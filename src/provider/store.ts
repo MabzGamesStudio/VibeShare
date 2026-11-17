@@ -1,7 +1,7 @@
 import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../shared/content.js';
-import { log } from '../shared/log.js';
-import { JsonFile } from '../shared/store.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import { log } from '../shared/node/log.js';
+import { JsonFile } from '../shared/node/store.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 import type { BlobBackend } from './storage/backends.js';
 
 export interface ChunkRecord {

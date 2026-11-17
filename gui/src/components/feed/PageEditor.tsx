@@ -34,7 +34,7 @@ import {
   type SuggestLevel,
 } from '../../../../src/shared/taxonomy';
 import { SOURCE_CATALOG } from '../../../../src/algorithm/sources';
-import { SOURCE_LABELS as PLATFORM_LABELS } from '../../../../src/shared/sources';
+import { sourceSchemeLabel } from '../../../../src/shared/sources';
 import { useApp } from '../../state';
 import { api } from '../../api';
 import { gradientFor } from '../../util';
@@ -440,7 +440,7 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
     (draft.filters.platforms ?? []).includes(id) ? 'on' : (draft.filters.blockedPlatforms ?? []).includes(id) ? 'block' : 'off';
   const platformEntries: PickEntry[] = SOURCE_CATALOG.map((source) => ({
     id: source.key,
-    label: (PLATFORM_LABELS as Record<string, string>)[source.key] ?? source.key,
+    label: sourceSchemeLabel(source.key) ?? source.key,
     state: platformState(source.key),
   }));
   const cyclePlatform = (id: string) => {

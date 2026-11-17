@@ -3,7 +3,7 @@ import { builtinContent, type BuiltinContent } from '../shared/builtin-content.j
 import type { ContentLink } from '../shared/protocol.js';
 import type { NodeEntry } from '../shared/clientapi.js';
 import { RemoteError } from '../shared/remote.js';
-import { log } from '../shared/log.js';
+import { log } from '../shared/node/log.js';
 import type { ChunkStore } from './model.js';
 import { errorText, type NodeManager } from './nodes.js';
 import { NO_TRACES, type TraceLog } from './trace.js';

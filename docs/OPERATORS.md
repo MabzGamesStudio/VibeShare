@@ -1,5 +1,7 @@
 # Running provider and algorithm nodes
 
+This is the operator's reference: every configuration key and subsystem in detail. New here? [QUICKSTART.md](QUICKSTART.md) installs it, [NODES.md](NODES.md) orients you (admin console, storage, peering, payments at a glance), [PROTOCOL.md](PROTOCOL.md) is the wire contract and [EXTENDING.md](EXTENDING.md) covers writing extensions.
+
 Both server node types work the same way:
 
 ```bash
@@ -312,3 +314,7 @@ The *Sources* tab lists every source of content — VibeShare (content published
 - Turn on `powBits` and `perIpPerHour` if you hand out signup credits.
 - Use read-only backends (`write: false`) for storage you do not control.
 - Back up the data directory: the ledger is your users' money.
+
+## See also
+
+[QUICKSTART.md](QUICKSTART.md) · [NODES.md](NODES.md) · [CLIENT.md](CLIENT.md) · [PROTOCOL.md](PROTOCOL.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [EXTENDING.md](EXTENDING.md) · [INDEX.md](INDEX.md)

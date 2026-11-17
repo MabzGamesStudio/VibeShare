@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EMBEDDED_GUI } from './gui-embedded.js';
+import { EMBEDDED_GUI } from '../gui-embedded.js';
 import type { Ctx } from './http.js';
 
 const TYPES: Record<string, string> = {

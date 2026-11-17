@@ -5,9 +5,9 @@
 // tier; users pay credits to raise a content's tier or extend its lifecycle, and expired
 // assignments downgrade (or are forgotten) on the node's schedule. URL backups never come
 // from the same domain twice unless there is no other choice or the operator overrides it.
-import { JsonFile } from '../shared/store.js';
-import type { TraceStore } from '../shared/tracing-node.js';
-import type { Ledger } from '../commerce/ledger.js';
+import { JsonFile } from '../shared/node/store.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
+import type { Ledger } from '../node/ledger.js';
 
 /** One storage medium a tier can place copies on; `backends` are the store's backend ids. */
 export interface TierMedium {

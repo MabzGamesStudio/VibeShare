@@ -4,6 +4,7 @@
 // an algorithm node or the client daemon the same way.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { NodeType } from '../noderef.js';
 import { readJson, type Ctx, type Router } from './http.js';
 import { AppendLog, ensureDir } from './store.js';
 import {
@@ -16,7 +17,7 @@ import {
   type TraceFilter,
   type TraceSettings,
   type TraceTimeline,
-} from './tracing.js';
+} from '../tracing.js';
 import { runWithTrace, currentTraceId } from './tracecontext.js';
 
 export interface TraceQuery {
@@ -35,7 +36,8 @@ export class TraceStore {
   private readonly file: AppendLog;
 
   constructor(
-    private readonly source: 'client' | 'provider' | 'algorithm',
+    /** 'client', or any registered node kind ('provider', 'algorithm', or a fork's). */
+    private readonly source: 'client' | NodeType,
     private readonly dir: string | null,
     private readonly settings: () => TraceSettings,
     private readonly saveSettings?: (settings: TraceSettings) => void | Promise<void>

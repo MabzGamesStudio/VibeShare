@@ -5,7 +5,7 @@
 // to 1× as the post gets older. Any metric can be switched off; the overall multiplier
 // is never less than 1.
 import { SOURCE_CATALOG } from './sources.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 
 export interface ClaimMetricDef {
   /** The key clients send in `ClaimRequest.metrics`. */

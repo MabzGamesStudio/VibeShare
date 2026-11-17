@@ -1,7 +1,7 @@
 // Where content comes from ("source origin types"): VibeShare itself or another platform.
 // Operators choose which sources the crawler may use and how strongly each is favoured.
 import { parseContentId } from '../shared/sources.js';
-import type { TraceStore } from '../shared/tracing-node.js';
+import type { TraceStore } from '../shared/node/tracing-node.js';
 
 export interface SourceInfo {
   key: string;

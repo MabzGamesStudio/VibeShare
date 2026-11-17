@@ -1,11 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { badRequest, HttpError, notFound } from './errors.js';
+import { badRequest, HttpError, notFound } from '../errors.js';
 import { log } from './log.js';
 import { runWithTrace } from './tracecontext.js';
 
-export * from './errors.js';
-export * from './remote.js';
+export * from '../errors.js';
+export * from '../remote.js';
 
 export interface Ctx {
   req: IncomingMessage;
@@ -21,6 +21,8 @@ export type Handler = (ctx: Ctx) => unknown | Promise<unknown>;
 
 interface Route {
   method: string;
+  /** The path as registered, kept for the manifest (docs and tests read it). */
+  path: string;
   parts: string[];
   handler: Handler;
 }
@@ -29,8 +31,14 @@ export class Router {
   private routes: Route[] = [];
 
   on(method: string, path: string, handler: Handler): this {
-    this.routes.push({ method, parts: path.split('/').filter(Boolean), handler });
+    this.routes.push({ method, path, parts: path.split('/').filter(Boolean), handler });
     return this;
+  }
+
+  /** Every route this server registered, as `{ method, path }` — the same shape the
+   * shared route tables produce, so a node can be checked against the protocol docs. */
+  manifest(): { method: string; path: string }[] {
+    return this.routes.map((route) => ({ method: route.method, path: route.path }));
   }
   get(path: string, handler: Handler) {
     return this.on('GET', path, handler);
@@ -119,6 +127,41 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
   res.end(text);
 }
 
+/**
+ * Cache headers for a read whose bytes are addressed by `id`. Content ids and chunk
+ * ids hash the exact bytes — the same id is always the same bytes — so the strong
+ * ETag is honest and caches may keep the answer forever. `weak` is for keys that only
+ * name a slot (a thumbnail can be re-uploaded under its key): a hint of sameness
+ * rather than a promise of byte-exactness.
+ */
+export function immutableHeaders(id: string, options: { scope?: 'public' | 'private'; weak?: boolean } = {}): Record<string, string> {
+  return {
+    etag: `${options.weak ? 'W/' : ''}"${id}"`,
+    // 'private' keeps paid or account-scoped bytes out of shared caches — the id is
+    // immutable either way, only who may hold a copy changes.
+    'cache-control': `${options.scope === 'private' ? 'private' : 'public'}, max-age=31536000, immutable`,
+  };
+}
+
+/**
+ * Answers 304 (no body) when the client already holds this exact id, instead of
+ * sending — and charging for — bytes it did not receive. Both ETag spellings match
+ * (RFC 9110 compares If-None-Match weakly), so a cautious client sending W/"<id>"
+ * for a strong tag still gets its 304.
+ */
+export function notModified(ctx: Ctx, id: string, options: { weak?: boolean } = {}): boolean {
+  const header = ctx.req.headers['if-none-match'];
+  const tag = `${options.weak ? 'W/' : ''}"${id}"`;
+  const strong = `"${id}"`;
+  const match = String(Array.isArray(header) ? header.join(',') : (header ?? ''))
+    .split(',')
+    .map((part) => part.trim())
+    .some((part) => part === '*' || part === tag || part === `W/${strong}` || part === strong);
+  if (!match) return false;
+  ctx.res.writeHead(304, { etag: tag }).end();
+  return true;
+}
+
 export function clientIp(req: IncomingMessage, trustProxy = false): string {
   if (trustProxy) {
     const forwarded = req.headers['x-forwarded-for'];
@@ -134,6 +177,8 @@ export interface ServeOptions {
   cors?: boolean;
   trustProxy?: boolean;
   name: string;
+  /** Headers every reply of this server carries (e.g. the local API's version marker). */
+  responseHeaders?: Record<string, string>;
   /** Called when no route matches (static files, …). Return false for a 404. */
   fallback?: (ctx: Ctx) => Promise<boolean> | boolean;
   /** Runs before routing; throw an HttpError to reject the request. */
@@ -165,6 +210,9 @@ export function createHttpServer(options: ServeOptions): Server {
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const ctx: Ctx = { req, res, url, params: {}, query: url.searchParams, ip: clientIp(req, options.trustProxy) };
+    // Set before any routing or error handling, so every reply carries them — whatever
+    // path the response takes out (JSON, raw bytes, an error, a hand-written reply).
+    if (options.responseHeaders) for (const [name, value] of Object.entries(options.responseHeaders)) res.setHeader(name, value);
     if (options.cors) {
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('access-control-expose-headers', 'x-vs-charged, x-vs-balance, content-range, accept-ranges');

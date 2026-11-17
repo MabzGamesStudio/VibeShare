@@ -1,11 +1,13 @@
 // The client's local API (what the GUI calls), as a table of routes on top of
 // ClientCore. The daemon mounts it on its HTTP server; the web client answers the same
 // routes in a service worker. Browser-safe.
+import { API_VERSION } from '../shared/api-version.js';
 import type { CommentPostRequest, ExternalPublishRequest, NodeEntry, PublishRequest, Settings } from '../shared/clientapi.js';
 import { MiB, type Manifest, type ManifestMeta } from '../shared/content.js';
-import { isDevBuild } from '../shared/devbuild.js';
+import { isDevBuild } from '../shared/node/devbuild.js';
 import { base64url, fromBase64url } from '../shared/encoding.js';
 import { badRequest, notFound } from '../shared/errors.js';
+import type { RouteEntry } from '../shared/node/routes.js';
 import type { Invoice, PaymentReceipt, Preferences } from '../shared/protocol.js';
 import type { CreatorKind } from '../shared/taxonomy.js';
 import type { VvshBuildConfig } from '../shared/vvsh-encode.js';
@@ -22,11 +24,9 @@ export interface ApiRequest {
   json<T = Record<string, unknown>>(limit?: number): Promise<T>;
 }
 
-export interface ApiRoute {
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  path: string;
-  handler: (request: ApiRequest) => unknown;
-}
+// The client's routes use the same declarative shape as every other server's table;
+// only the request type differs (the daemon and the web backend adapt it to the Router).
+export type ApiRoute = RouteEntry<ApiRequest>;
 
 /** A finished upload's background work: what the GUI polls `/api/vvsh/session/:id` for. */
 interface VvshJobState {
@@ -66,6 +66,10 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
       // A node that does not sign receipts (an older build) simply has none to keep.
     }
   };
+
+  // The contract version of this API: both implementations answer it from the one
+  // shared constant, so the daemon and the web backend can never disagree.
+  on('GET', '/api/version', () => ({ version: API_VERSION }));
 
   on('GET', '/api/state', () => core.state());
 
@@ -727,4 +731,21 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   });
 
   return routes;
+}
+
+/** One route of the client API as plain data: its method and its literal path. */
+export interface RoutePath {
+  method: ApiRoute['method'];
+  path: string;
+}
+
+/**
+ * The whole route table as data ({method, path}), for tooling and drift tests that must
+ * not build a ClientCore. Routes touch the core only inside their handlers, so a stub
+ * stands in while the table is built — a route that ever wires to the core eagerly
+ * throws here, loudly, instead of silently listing the wrong thing.
+ */
+export function clientRoutePaths(): RoutePath[] {
+  const stub: unknown = new Proxy(() => undefined, { get: () => stub, apply: () => stub });
+  return clientRoutes(stub as ClientCore).map(({ method, path }) => ({ method, path }));
 }

@@ -1,7 +1,8 @@
-import { log } from '../../shared/log.js';
-import { JsonFile } from '../../shared/store.js';
-import { currentTraceId } from '../../shared/tracecontext.js';
-import type { TraceStore } from '../../shared/tracing-node.js';
+import { pathToFileURL } from 'node:url';
+import { log } from '../../shared/node/log.js';
+import { JsonFile } from '../../shared/node/store.js';
+import { currentTraceId } from '../../shared/node/tracecontext.js';
+import type { TraceStore } from '../../shared/node/tracing-node.js';
 import { TOPICS, type Rating } from '../../shared/taxonomy.js';
 import { flickr, openverse, wikimedia, type FlickrConfig, type OpenverseConfig, type WikimediaConfig } from './adapters/images.js';
 import { bluesky, lemmy, mastodon, type BlueskyConfig, type LemmyConfig, type MastodonConfig } from './adapters/social.js';
@@ -24,7 +25,7 @@ import {
   unsplash,
   vimeo,
   x,
-} from './adapters/apis.js';
+} from './adapters/apis/index.js';
 import { crawlPage, webDefaults, type WebConfig } from './adapters/web.js';
 import { FetchFailed, PoliteFetcher, RobotsDisallowed, SiteBlocked } from './fetcher.js';
 import { identifyLink } from './oembed.js';
@@ -66,6 +67,12 @@ export interface CrawlerConfig {
   blockedSources: string[];
   /** Websites (domains, subdomains included): never fetch `block`; with `allow` set, crawl only those sites' pages. */
   sites: { allow: string[]; block: string[] };
+  /**
+   * Extra adapter modules of the operator's own (ES module paths, like the custom
+   * ranking module): each exports an Adapter (default, or an `adapters` list). They
+   * join the built-ins after they load, and win on id collisions.
+   */
+  modules: string[];
   adapters: {
     youtube: YouTubeConfig;
     peertube: PeerTubeConfig;
@@ -99,7 +106,8 @@ export interface CrawlerConfig {
 
 type AdapterId = keyof CrawlerConfig['adapters'];
 
-const PLATFORM_ADAPTERS = [youtube, peertube, dailymotion, archive, wikimedia, openverse, flickr, mastodon, bluesky, lemmy, ...API_ADAPTERS] as unknown as Adapter[];
+/** The adapters VibeShare ships. Exported so the conformance tests can walk them. */
+export const PLATFORM_ADAPTERS = [youtube, peertube, dailymotion, archive, wikimedia, openverse, flickr, mastodon, bluesky, lemmy, ...API_ADAPTERS] as unknown as Adapter[];
 
 type Purpose = 'crawl' | 'search';
 
@@ -136,6 +144,7 @@ export function crawlerDefaults(): CrawlerConfig {
     apiDelayMs: 250,
     blockedSources: [],
     sites: { allow: [], block: [] },
+    modules: [],
     adapters: {
       youtube: youtube.defaults as YouTubeConfig,
       peertube: peertube.defaults as PeerTubeConfig,
@@ -220,6 +229,9 @@ export class Crawler {
   private searching = new Map<string, Promise<number>>();
   private readonly ctx: CrawlContext;
   private tokens = new Map<string, { token: string; expires: number; credentials: string }>();
+  /** The operator's own adapter modules (crawler.modules), loaded once and cached. */
+  private external: Adapter[] | null = null;
+  private loading: Promise<Adapter[]> | null = null;
 
   constructor(
     private readonly config: () => CrawlerConfig,
@@ -258,6 +270,7 @@ export class Crawler {
   }
 
   start(): void {
+    void this.loadModules();
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), 1000);
     this.timer.unref();
@@ -388,10 +401,46 @@ export class Crawler {
     };
   }
 
+  /**
+   * Loads the operator's adapter modules (crawler.modules): the same dynamic import
+   * the custom ranking module uses. Failures are logged and skipped — one broken
+   * module must not stop the built-ins — and the result is cached.
+   */
+  async loadModules(): Promise<Adapter[]> {
+    if (this.external) return this.external;
+    this.loading ??= (async () => {
+      const out: Adapter[] = [];
+      for (const path of this.config().modules ?? []) {
+        try {
+          const module = (await import(pathToFileURL(String(path)).href)) as { default?: Adapter | Adapter[]; adapters?: Adapter[] };
+          const found = [...(Array.isArray(module.default) ? module.default : module.default ? [module.default] : []), ...(module.adapters ?? [])];
+          for (const adapter of found) {
+            if (!adapter || typeof adapter.id !== 'string' || typeof adapter.label !== 'string' || typeof adapter.defaults !== 'object') {
+              throw new Error('the module does not export an Adapter');
+            }
+            out.push(adapter);
+          }
+        } catch (error) {
+          log.error(`Crawler module ${path}: ${(error as Error).message}`);
+        }
+      }
+      this.external = out;
+      return out;
+    })();
+    return this.loading;
+  }
+
+  /** Every adapter: the built-ins, with the operator's modules winning on id collisions. */
+  private adapters(): Adapter[] {
+    const external = this.external ?? [];
+    const ids = new Set(external.map((adapter) => adapter.id));
+    return [...PLATFORM_ADAPTERS.filter((adapter) => !ids.has(adapter.id)), ...external];
+  }
+
   /** Adapters that may work now: switched on, source not blocked, credentials present. */
   private enabledAdapters(): Adapter[] {
     const adapters = this.config().adapters as unknown as Record<string, { enabled?: boolean }>;
-    return PLATFORM_ADAPTERS.filter(
+    return this.adapters().filter(
       (adapter) => adapters[adapter.id]?.enabled !== false && !this.sourceBlocked(adapter.id) && (adapter.api?.optional || this.configured(adapter))
     );
   }
@@ -445,6 +494,7 @@ export class Crawler {
 
   /** Runs one unit of work: the next in rotation, or a given adapter/target. */
   async runOnce(adapterId?: string, target?: string): Promise<{ adapter: string; target?: string; found: number; added: number }> {
+    await this.loadModules();
     const lanes = this.lanes();
     if (!lanes.length) return { adapter: 'none', found: 0, added: 0 };
     const lane = adapterId ?? lanes[(this.state.cursors._lane = ((this.state.cursors._lane ?? -1) + 1) % lanes.length)];
@@ -488,7 +538,7 @@ export class Crawler {
         found = item ? 1 : 0;
         added = item ? this.take([item], lane) : 0;
       } else {
-        const adapter = PLATFORM_ADAPTERS.find((candidate) => candidate.id === lane);
+        const adapter = this.adapters().find((candidate) => candidate.id === lane);
         if (!adapter?.discover || !adapter.targets) return { adapter: lane, found: 0, added: 0 };
         const config = this.adapterConfig(adapter.id);
         const targets = adapter.targets(config, this.queries());
@@ -534,6 +584,7 @@ export class Crawler {
    * Results that arrive later are still kept for the next searches.
    */
   async search(query: string): Promise<number> {
+    await this.loadModules();
     const config = this.config();
     const key = query.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 100);
     if (!config.enabled || !config.searchPlatforms || key.length < 2) return 0;
@@ -648,7 +699,7 @@ export class Crawler {
       blockedSources: config.blockedSources,
       sites: config.sites,
       adapters: [
-        ...PLATFORM_ADAPTERS.map(describe),
+        ...this.adapters().map(describe),
         {
           id: 'web',
           label: 'Web pages',

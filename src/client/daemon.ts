@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { join } from 'node:path';
-import { serveStatic, hasGui } from '../shared/assets.js';
+import { serveStatic, hasGui } from '../shared/node/assets.js';
+import { apiVersionHeaders } from '../shared/api-version.js';
 import type { NodeEntry, Settings } from '../shared/clientapi.js';
 import { randomToken, safeEqual } from '../shared/crypto.js';
 import { MiB } from '../shared/content.js';
@@ -15,15 +16,15 @@ import {
   Router,
   sendJson,
   type Ctx,
-} from '../shared/http.js';
+} from '../shared/node/http.js';
 import { fromBase64url } from '../shared/encoding.js';
-import { log } from '../shared/log.js';
+import { log } from '../shared/node/log.js';
 import type { Transport } from '../shared/remote.js';
-import { isOnionUrl, torFetch, TorRouter } from '../shared/tor.js';
+import { isOnionUrl, torFetch, TorRouter } from '../shared/node/tor.js';
 import { parseContentId } from '../shared/sources.js';
-import { ensureDir } from '../shared/store.js';
+import { ensureDir } from '../shared/node/store.js';
 import { TRACE_LEVELS, normalizeTraceSettings, type TraceLevel } from '../shared/tracing.js';
-import { TraceStore, tracingRoutes } from '../shared/tracing-node.js';
+import { TraceStore, tracingRoutes } from '../shared/node/tracing-node.js';
 import { clientRoutes } from './api.js';
 import { ChunkCache } from './cache.js';
 import { ClientCore } from './core.js';
@@ -454,6 +455,9 @@ export class ClientNode {
     this.server = createHttpServer({
       router: this.router,
       name: 'client',
+      // Every reply is stamped with the local API's contract version, so the GUI can
+      // check what it is talking to before anything else fails.
+      responseHeaders: apiVersionHeaders(),
       guard: (ctx) => this.guard(ctx),
       // Local tracing (off by default): one timeline per API request, joined by the
       // user action that made it when the GUI sends `x-vs-trace` (see pendingTrace).
