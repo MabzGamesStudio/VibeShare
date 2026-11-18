@@ -325,7 +325,7 @@ export async function startDemo(options: DemoOptions) {
   provider.flush();
   algorithm.flush();
 
-  const client = new ClientNode({ dataDir: join(dataDir, 'client'), port: basePort, guiDir });
+  const client = new ClientNode({ dataDir: join(dataDir, 'client'), port: basePort, guiDir, quietStorageNotes: true });
   await client.start();
   if (!client.nodes.list().length) await client.nodes.add(`${algorithm.reference()}\n${provider.reference()}`);
   const vouchers = provider.payments.createVouchers(500, 2, 'demo');

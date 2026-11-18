@@ -52,6 +52,8 @@ export interface ClientOptions {
   refreshIntervalMs?: number;
   /** Called with the settings at start and after every change (the desktop app follows the Tor setting). */
   onSettings?: (settings: Settings) => void;
+  /** Keeps the storage service's notes out of the console (the demo prints its own script). */
+  quietStorageNotes?: boolean;
 }
 
 const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -128,7 +130,7 @@ export class ClientNode {
     this.nodes = this.core.nodes;
     this.fetcher = this.core.fetcher;
     this.publisher = this.core.publisher;
-    this.worker = new StorageWorker(this.store, this.nodes, dir, options.serviceIntervalMs, this.traces);
+    this.worker = new StorageWorker(this.store, this.nodes, dir, options.serviceIntervalMs, this.traces, options.quietStorageNotes ?? false);
     this.routes();
   }
 

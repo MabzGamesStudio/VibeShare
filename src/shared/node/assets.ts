@@ -22,7 +22,12 @@ export function findGuiDir(): string | null {
   if (process.env.VIBESHARE_GUI_DIR) candidates.push(process.env.VIBESHARE_GUI_DIR);
   candidates.push(join(dirname(process.execPath), 'gui'));
   try {
+    // This module lives at src/shared/node/ in the source tree and dist/shared/node/ when
+    // built, so the repository root is three levels up in both layouts. The two-level
+    // entries keep working for older layouts and fork bundles that copy the file into
+    // shared/ instead.
     const here = dirname(fileURLToPath(import.meta.url));
+    candidates.push(resolve(here, '../../../gui/dist'), resolve(here, '../../../gui'));
     candidates.push(resolve(here, '../../gui/dist'), resolve(here, '../gui'));
   } catch {
     // not a file URL (bundled executable)

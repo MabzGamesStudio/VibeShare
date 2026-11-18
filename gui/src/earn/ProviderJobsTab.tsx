@@ -432,7 +432,7 @@ export function ProviderJobsTab() {
     ) : null;
 
   /**
-   * The "Check URLs" button of the site card: probes `<base>/index.html` under both
+   * The "Check URLs" button of the site card: probes the SITE-ROOT index under both
    * address shapes and keeps whichever answered selected in the URL type dropdown.
    */
   const [urlCheck, setUrlCheck] = useState<CheckResult | null>(null);

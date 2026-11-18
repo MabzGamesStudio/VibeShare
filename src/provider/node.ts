@@ -226,6 +226,10 @@ interface JobTestResult {
   account?: string;
   endpoint?: string;
   chunks?: { matched: number; total: number };
+  /** Holders whose endpoints served the content, of the holders tested. */
+  holders: { succeeded: number; total: number };
+  /** Endpoint URLs that served the content, of the URLs tried. */
+  urls: { served: number; checked: number };
   checked: number;
   total: number;
   error?: string;
@@ -282,8 +286,11 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         if (job?.cid) {
           void this.fetchContentUrl(job.cid, accountId)
             .then((ok) => {
-              // No endpoint worked and no holder is left: the job has nowhere to get its data.
-              if (!ok && this.service.holdersOf(job.cid!) === 0) this.service.failJob(job.id);
+              // The job is really failed only when its data is unavailable everywhere:
+              // no endpoint worked, no holder is left, and this node keeps no copy.
+              if (!ok && this.service.holdersOf(job.cid!) === 0 && !job.chunkIds.some((id) => this.store.hasChunk(id))) {
+                this.service.failJob(job.id);
+              }
             })
             .catch((error) => {
               // Tolerated: the pull is a recovery attempt, the job keeps its other sources.
@@ -652,7 +659,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       });
       return false;
     }
-    if (!bytesMatchCid(data, cid)) {
+    // A native content id names its manifest, so a URL job hosts the whole file: the
+    // manifest's chunk hashes prove it (exactly what verifyEndpoint accepts). A cid that
+    // names a downloadable copy is proven by the bytes themselves.
+    const manifest = this.store.getManifest(cid);
+    const matches = bytesMatchCid(data, cid) || Boolean(manifest && bytesMatchManifest(data, manifest));
+    if (!matches) {
       this.traces.trace('dependency', 'provider.node', 'content url pull failed', {
         message: 'the bytes do not match the content id',
         data: this.traces.summarize({ cid: cid.slice(0, 16), url, method: 'GET', ms: Date.now() - started, status: 200, bytes: data.length }),
@@ -672,6 +684,27 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     this.contentUrls.changed();
     this.downloads.changed();
     return true;
+  }
+
+  /**
+   * One chunk sliced out of the full copy pulled from a client's URL (the URL jobs flow).
+   * The slice is only handed out when it hashes to the chunk id, so a stale or wrong copy
+   * can never be served as content.
+   */
+  private chunkFromDownloadedCopy(cid: string, chunkId: string): Buffer | null {
+    const item = this.downloads.data.items[cid];
+    const manifest = this.store.getManifest(cid);
+    if (!item || !manifest) return null;
+    const data = Buffer.from(item.data, 'base64');
+    let at = 0;
+    for (const chunk of manifest.chunks) {
+      if (chunk.id === chunkId) {
+        const slice = data.subarray(at, at + chunk.size);
+        return chunkIdOf(slice) === chunkId ? Buffer.from(slice) : null;
+      }
+      at += chunk.size;
+    }
+    return null;
   }
 
   /** Tries every accepted link for a cid, keeping the first whose content matches. */
@@ -818,6 +851,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   async testStorageJob(jobId: string, onlyAccount?: string): Promise<JobTestResult> {
     const job = this.service.jobs().find((entry) => entry.id === jobId);
     if (!job) throw notFound('No such job');
+    this.service.markEndpointTested([jobId]);
     // One summary per test run — the endpoint checks themselves trace one line each.
     const report = (result: JobTestResult): JobTestResult => {
       this.traces.trace('basic', 'provider.node', 'storage job test', {
@@ -825,6 +859,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
           job: jobId,
           account: result.account?.slice(0, 16),
           ok: result.ok,
+          holders: result.holders.succeeded,
+          holdersTotal: result.holders.total,
           checked: result.checked,
           total: result.total,
           matched: result.chunks?.matched,
@@ -834,23 +870,29 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       });
       return result;
     };
+    const empty: JobTestResult = { ok: false, holders: { succeeded: 0, total: 0 }, urls: { served: 0, checked: 0 }, checked: 0, total: 0 };
     const cid = job.cid;
-    if (!cid) return report({ ok: false, checked: 0, total: 0, error: 'This job has no content id — there is nothing to fetch from its endpoints' });
+    if (!cid) return report({ ...empty, error: 'This job has no content id — there is nothing to fetch from its endpoints' });
+    // Removed holders are tested too: a check that passes brings one back, healing rows
+    // the old one-strike behaviour dropped.
     const holders = this.service
       .assignmentsForAdmin()
       .filter(
         (assignment) =>
           assignment.jobId === job.id &&
-          (assignment.status === 'active' || assignment.status === 'downloading') &&
+          (assignment.status === 'active' || assignment.status === 'downloading' || assignment.status === 'removed') &&
           (!onlyAccount || assignment.accountId === onlyAccount)
       );
     if (!holders.length) {
-      return report({ ok: false, checked: 0, total: 0, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' });
+      return report({ ...empty, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' });
     }
-    const threshold = job.failedRequestsBeforeFailure ?? 3;
+    // A holder leaves the job only after this many consecutive failed checks — one
+    // transient failure never destroys a holder.
+    const threshold = Math.max(1, job.failedRequestsBeforeFailure ?? 3);
     let checked = 0;
     let total = 0;
-    let servedCount = 0;
+    let servedUrls = 0;
+    let succeeded = 0;
     for (const holder of holders) {
       const records = Object.values(this.contentUrls.data.items)
         .filter((record) => record.account === holder.accountId && Boolean(record.url ?? record.baseUrl))
@@ -862,9 +904,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         const target = record.url ?? `${String(record.baseUrl).replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
         const verify = await this.verifyEndpoint(cid, target, job.maxLatencyMs ?? 30_000);
         if (verify.ok) {
-          record.fails = 0;
           record.lastOkAt = Date.now();
-          this.contentUrls.changed();
           served = { url: verify.url, chunks: verify.chunks };
           break;
         }
@@ -872,24 +912,44 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         this.contentUrls.changed();
       }
       if (served) {
-        servedCount++;
-        // A passed check pays the upfront reward if it was still owed (the endpoint was
-        // not live at acceptance).
+        succeeded++;
+        servedUrls++;
+        // A success wipes the whole row's failure state — the stale `fails` of the
+        // other endpoints must not keep it looking failed after a success.
+        for (const record of records) record.fails = 0;
+        this.contentUrls.changed();
+        // The holder counts again (streak reset, a lost row restored) and the upfront
+        // reward is paid if it was still owed.
         this.service.endpointLive(holder.id);
-        if (onlyAccount) return report({ ok: true, account: holder.accountId, endpoint: served.url, chunks: served.chunks, checked, total });
+        if (onlyAccount) {
+          return report({
+            ok: true,
+            account: holder.accountId,
+            endpoint: served.url,
+            chunks: served.chunks,
+            holders: { succeeded: 1, total: 1 },
+            urls: { served: 1, checked },
+            checked,
+            total,
+          });
+        }
         continue;
       }
-      // No endpoint of this user served the content: red failed for the user.
-      if (records.length) {
+      // No endpoint served the content: a strike. The holder is removed only after
+      // `threshold` strikes pile up with no success in between.
+      if (records.length && this.service.noteFailedCheck(holder.id) >= threshold) {
         this.service.failHolder(holder.id);
       }
-      if (onlyAccount) {
-        return report({ ok: false, account: holder.accountId, checked, total, error: `No endpoint of ${holder.accountId} served the content (${records.length} tried)` });
-      }
     }
-    return report(
-      servedCount ? { ok: true, checked, total } : { ok: false, checked, total, error: 'No endpoint served the content' }
-    );
+    return report({
+      ok: succeeded > 0,
+      holders: { succeeded, total: holders.length },
+      urls: { served: servedUrls, checked },
+      checked,
+      total,
+      // A partial success is a success: only a run where nothing served is an error.
+      error: succeeded > 0 ? undefined : onlyAccount ? `No endpoint of ${onlyAccount} served the content (${checked} tried)` : 'No endpoint served the content',
+    });
   }
 
   /**
@@ -1933,15 +1993,18 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   /**
    * Periodic endpoint tests: each job's users' endpoints are fetched on the job's own
    * schedule ("retrieval test every"). The data is only ever checked at the endpoints —
-   * never by polling a client for it.
+   * never by polling a client for it. `all` runs one round over every job right now
+   * (the startup refresh), ignoring the schedules.
    */
-  private async runEndpointTests(): Promise<void> {
+  private async runEndpointTests(all = false): Promise<void> {
     const now = Date.now();
     for (const job of this.service.jobs()) {
       const every = (job.retrievalIntervalSeconds ?? 0) * 1000;
-      if (every <= 0 || job.status !== 'open') continue;
-      if (now - (job.lastEndpointTestAt ?? Date.parse(job.createdAt)) < every) continue;
-      job.lastEndpointTestAt = now;
+      if (!all && (every <= 0 || job.status !== 'open')) continue;
+      // A job that was never tested is tested at once — waiting a full interval from its
+      // creation is why a fresh job showed "Last endpoint test: never" for an hour.
+      if (!all && job.lastEndpointTestAt !== undefined && now - job.lastEndpointTestAt < every) continue;
+      this.service.markEndpointTested([job.id], now);
       try {
         await this.testStorageJob(job.id);
       } catch (error) {
@@ -1975,8 +2038,30 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       };
     });
     router.get(`${base}/assignments/:id/chunks/:chunkId`, async (ctx) => {
-      const data = await this.service.assignmentChunk(this.auth.require(ctx), ctx.params.id, ctx.params.chunkId);
-      ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length }).end(data);
+      const account = this.auth.require(ctx);
+      try {
+        const data = await this.service.assignmentChunk(account, ctx.params.id, ctx.params.chunkId);
+        ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length }).end(data);
+      } catch (error) {
+        // The job exists but this node no longer holds the bytes (its copies were released,
+        // or the job was opened for content it never stored). The URL jobs a client uploaded
+        // are the fallback: pull the content from them, then serve the chunk from that copy.
+        // Without this a holder can never fill such a job — it sits at 0/N forever, and the
+        // client's storage worker keeps asking for chunks the node cannot answer.
+        if (!(error instanceof HttpError) || error.status !== 404) throw error;
+        const assignment = this.service.assignmentsForAdmin().find((entry) => entry.id === ctx.params.id);
+        const cid = assignment ? this.service.jobs().find((job) => job.id === assignment.jobId)?.cid : undefined;
+        if (!cid) throw error;
+        let data = this.chunkFromDownloadedCopy(cid, ctx.params.chunkId);
+        if (!data) {
+          const offered = Object.values(this.contentUrls.data.items).some(
+            (record) => record.status === 'accepted' && (!record.cid || record.cid === cid) && (record.url ?? record.baseUrl)
+          );
+          if (offered && (await this.fetchContentUrl(cid, account.id))) data = this.chunkFromDownloadedCopy(cid, ctx.params.chunkId);
+        }
+        if (!data) throw error;
+        ctx.res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': data.length }).end(data);
+      }
     });
     router.post(`${base}/assignments/:id/ready`, (ctx) => this.service.ready(this.auth.require(ctx), ctx.params.id));
     router.post(`${base}/assignments/:id/release`, (ctx) => this.service.release(this.auth.require(ctx), ctx.params.id));
@@ -2354,7 +2439,25 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const record = body.linkId ? this.contentUrls.data.items[String(body.linkId)] : undefined;
       if (record) {
         record.fails = verify.ok ? 0 : (record.fails ?? 0) + 1;
+        if (verify.ok) record.lastOkAt = Date.now();
         this.contentUrls.changed();
+        // The URL belongs to a holder of a job for this content, so the check also decides
+        // that user's standing: a pass pays what is owed and restores the holder; a miss is
+        // a strike, and the third one without a success frees the slot.
+        const jobs = this.service.jobs().filter((job) => job.cid === cid);
+        const assignments = this.service.assignmentsForAdmin().filter(
+          (assignment) => assignment.accountId === record.account && jobs.some((job) => job.id === assignment.jobId)
+        );
+        for (const assignment of assignments) {
+          if (verify.ok) {
+            this.service.endpointLive(assignment.id);
+          } else {
+            const strikes = this.service.noteFailedCheck(assignment.id);
+            const threshold = Math.max(1, jobs.find((job) => job.id === assignment.jobId)?.failedRequestsBeforeFailure ?? 3);
+            if (strikes >= threshold) this.service.failHolder(assignment.id);
+          }
+        }
+        if (assignments.length) this.service.markEndpointTested(jobs.map((job) => job.id));
       }
       return { verify };
     });
@@ -2476,6 +2579,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   async start(): Promise<void> {
     await super.start();
     this.startSync();
+    // Refresh every holder's status right away (async — startup never waits for it):
+    // stale rows and old one-strike damage heal without waiting for the next schedule.
+    void this.runEndpointTests(true).catch((error) => log.warn('endpoint tests:', error));
+    // The demo (and any operator seeding content right after start) opens its jobs a moment
+    // after the node is listening, so one follow-up round makes sure they were tested too.
+    const firstRound = setTimeout(() => {
+      void this.runEndpointTests(true).catch((error) => log.warn('endpoint tests:', error));
+    }, 3_000);
+    firstRound.unref();
   }
 
   async stop(): Promise<void> {

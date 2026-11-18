@@ -349,6 +349,8 @@ export interface ContentDetailsData {
       status: string;
       acceptedAt: string;
       earned: number;
+      /** Consecutive failed checks since the last success (per user, not per URL). */
+      failedChecks?: number;
       links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string; fails?: number; location?: string }[];
     }[];
   }[];
@@ -429,7 +431,17 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
 }
 
 /** One endpoint row of a user inside a storage job: status tag, url and its buttons. */
-function EndpointRow({ cid, link, index }: { cid: string; link: NonNullable<ContentDetailsData['jobs']>[number]['holders'][number]['links'][number]; index: number }) {
+function EndpointRow({
+  cid,
+  link,
+  index,
+  reload,
+}: {
+  cid: string;
+  link: NonNullable<ContentDetailsData['jobs']>[number]['holders'][number]['links'][number];
+  index: number;
+  reload: () => void;
+}) {
   const [result, setResult] = useState('');
   const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(cid)}`;
   const bad = (link.fails ?? 0) > 0;
@@ -451,6 +463,10 @@ function EndpointRow({ cid, link, index }: { cid: string; link: NonNullable<Cont
       );
     } catch (e) {
       setResult(`✗ ${message(e)}`);
+    } finally {
+      // The check moved fail counts on the node — refetch at once so the URL row, the
+      // holder's badge and the credits stop showing what was true before it.
+      reload();
     }
   };
   return (
@@ -489,18 +505,41 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
     setJobTests((m) => ({ ...m, [key]: 'Testing each endpoint of this user…' }));
     try {
       const result = await admin<{
-        test: { ok: boolean; account?: string; endpoint?: string; chunks?: { matched: number; total: number }; checked: number; total: number; error?: string };
+        test: {
+          ok: boolean;
+          account?: string;
+          endpoint?: string;
+          chunks?: { matched: number; total: number };
+          checked: number;
+          total: number;
+          error?: string;
+          /** Holder-level outcome (newer nodes): how many holders serve the content. */
+          holders?: { succeeded: number; total: number };
+          /** URL-level outcome (newer nodes): how many endpoints answered. */
+          urls?: { served: number; checked: number };
+        };
       }>(`/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: { account: accountId } });
       const t = result.test;
+      // Holder counts decide the outcome: some holders serving the content is a partial
+      // success and only zero of them is a failure. Older nodes send just the ok flag.
+      const succeeded = t.holders ? t.holders.succeeded : t.ok ? 1 : 0;
+      const total = t.holders ? t.holders.total : 1;
+      const chunks = t.chunks ? `${t.chunks.matched} of ${t.chunks.total} chunks match the content id` : 'hash matches the content id';
       setJobTests((m) => ({
         ...m,
-        [key]: t.ok
-          ? `✓ ${t.endpoint ?? 'endpoint'} serves the content — ${t.chunks ? `${t.chunks.matched} of ${t.chunks.total} chunks match the content id` : 'hash matches the content id'} (${t.checked} of ${t.total} tried) — moved to the top`
-          : `✗ ${t.error ?? 'no endpoint served the content'}`,
+        [key]:
+          succeeded > 0
+            ? `✓ ${succeeded} of ${total} job${total === 1 ? '' : 's'} successful${t.urls ? ` · ${t.urls.served} of ${t.urls.checked} URLs served` : ''}${
+                t.endpoint ? ` — ${t.endpoint} serves the content — ${chunks} (${t.checked} of ${t.total} tried) — moved to the top` : ''
+              }`
+            : `✗ ${t.error ?? 'no endpoint served the content'}`,
       }));
-      reload();
     } catch (e) {
       setJobTests((m) => ({ ...m, [key]: `✗ ${message(e)}` }));
+    } finally {
+      // Win or lose the test changed holder states and credits on the node — refetch so
+      // the badges, the earned credits and the x/N counts stop showing the old world.
+      reload();
     }
   };
 
@@ -515,11 +554,23 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
   return (
     <div className="form-stack jobs-stack" style={{ marginTop: 6 }}>
       {jobs.map((job) => {
-        const slots = Math.max(job.replicas, job.holders.length);
+        // A removed holder failed and was deleted from the job: its row stays visible (the
+        // data keeps it), but its copy is free again — so one more slot needs filling.
+        const freed = job.holders.filter((holder) => holder.status === 'removed' || holder.status === 'failed').length;
+        const slots = Math.max(job.replicas + freed, job.holders.length);
         return (
           <div key={job.id} className="card form-stack" style={{ padding: 12 }}>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>storage job {job.status}</span>
+              {(() => {
+                // The label follows what the holders actually do: a job with working users
+                // is a success (or a partial one), never a grey "failed".
+                const active = job.holders.filter((entry) => entry.status === 'active').length;
+                const wanted = Math.max(job.replicas, job.holders.length);
+                const label =
+                  wanted > 0 && active >= wanted ? 'success' : active > 0 ? 'partial success' : job.status;
+                const tone = active > 0 ? 'ok' : job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : '';
+                return <span className={`badge ${tone}`}>storage job {label}</span>;
+              })()}
               {job.managed ? <span className="badge">automatic</span> : null}
               <span className="tiny faint">
                 {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.completion} end · test the URL every{' '}
@@ -553,8 +604,12 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                   );
                 }
                 const links = [...holder.links].sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0));
-                const allFailed = links.length > 0 && links.every((link) => (link.fails ?? 0) > 0);
-                const failed = holder.status === 'failed' || allFailed;
+                // The badge is the holder's own status from the node. It only reads failed
+                // when the node marked the holder out and none of its URLs serves the
+                // content right now — a link's fail count is history the next good check
+                // clears, so it never condemns the whole holder on its own.
+                const serving = links.some((link) => (link.fails ?? 0) === 0);
+                const failed = (holder.status === 'failed' || holder.status === 'removed') && !serving;
                 return (
                   <div key={holder.id} className="form-stack" style={{ gap: 6 }}>
                     <div className="job-row">
@@ -569,6 +624,14 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                       <span className={`badge ${failed ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}>
                         storage job {failed ? 'failed' : holder.status}
                       </span>
+                      {(holder.failedChecks ?? 0) > 0 ? (
+                        <span
+                          className="badge warn"
+                          title="Failed checks for this user since the last success — the third in a row frees the slot"
+                        >
+                          {holder.failedChecks} failed
+                        </span>
+                      ) : null}
                       <span className="mono tiny">{holder.accountId}</span>
                       <span className="tiny faint">{holder.earned} credits earned</span>
                     </div>
@@ -578,7 +641,7 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                           URL to get the full retrieved data
                         </div>
                         {links.map((link, index) => (
-                          <EndpointRow key={link.id} cid={cid} link={link} index={index} />
+                          <EndpointRow key={link.id} cid={cid} link={link} index={index} reload={reload} />
                         ))}
                       </>
                     ) : (

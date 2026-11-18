@@ -185,18 +185,32 @@ describe('content storage tiers', () => {
           .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0) || (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0));
         assert.equal(links[0].url, goodUrl, 'the working endpoint moved to the top');
 
-        // A user whose every endpoint fails goes red failed and out of the job.
+        // A user whose every endpoint fails collects strikes: the first failed round        // keeps them (one transient failure never destroys a holder), and only the third
+        // consecutive one deletes them from the job.
         const poor = clientFor(provider.url(), 'identity');
         await poor.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
         const poorAssignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id && entry.accountId !== account.id)!;
         await poor.json(`/v1/services/storage/assignments/${poorAssignment.id}/ready`, { method: 'POST' });
         await poor.json('/v1/content-urls', { body: { cid, url: deadUrl } });
+        const firstRound = await admin<{ test: { ok: boolean; holders: { succeeded: number; total: number } } }>(
+          provider.url(),
+          `/v1/admin/storage/jobs/${job.id}/test`,
+          { method: 'POST', body: {} }
+        );
+        assert.equal(firstRound.test.ok, true, 'a partial success counts as success');
+        assert.deepEqual(firstRound.test.holders, { succeeded: 1, total: 2 }, 'one of the two holders serves the content');
+        assert.equal(
+          provider.service.assignmentsForAdmin().find((entry) => entry.id === poorAssignment.id)?.status,
+          'active',
+          'the first failed check only counts a strike — the holder stays'
+        );
+        await admin(provider.url(), `/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: {} });
         const allUsers = await admin<{ test: { ok: boolean } }>(provider.url(), `/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: {} });
         assert.equal(allUsers.test.ok, true, 'the first user still serves the content');
         assert.equal(
           provider.service.assignmentsForAdmin().find((entry) => entry.id === poorAssignment.id)?.status,
           'removed',
-          'a user whose endpoints all fail is deleted from the job'
+          'three consecutive failed checks delete the holder from the job'
         );
         assert.equal(jobsFor()[0].reopened, 1, 'the job reopens for another client');
 

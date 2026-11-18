@@ -552,9 +552,9 @@ function EntryDetails({
             })()}
           </dd>
           <dt>Topics</dt>
-          <dd>{entry.topics.length ? entry.topics.join(', ') : '—'}</dd>
+          <dd>{entry.topics?.length ? entry.topics.join(', ') : '—'}</dd>
           <dt>Tags</dt>
-          <dd>{entry.tags.length ? entry.tags.map((tag) => `#${tag}`).join(' ') : '—'}</dd>
+          <dd>{entry.tags?.length ? entry.tags.map((tag) => `#${tag}`).join(' ') : '—'}</dd>
           <dt>Creator</dt>
           <dd className="mono tiny">{entry.creatorId ?? '—'}</dd>
           <dt>Published</dt>

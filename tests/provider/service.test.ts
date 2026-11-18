@@ -29,6 +29,10 @@ describe('storage service', async () => {
       const status = await api<ServiceStatus>('/api/services');
       return status.providers[0]?.assignments[0]?.status === 'active';
     });
+    // 'active' means the client declared it stored the chunks; the provider also has to
+    // count the holder online (it learns that from the holder's poll) before it can ask it
+    // for a chunk. Waiting here keeps the test from racing that bookkeeping under load.
+    await waitFor(async () => provider.service.stats().onlineHolders > 0);
 
     // The upfront reward is owed but unpaid: this holder never submitted a live endpoint.
     assert.equal(assignment().earned, 0, 'the upfront reward waits for a live endpoint');
@@ -226,5 +230,41 @@ describe('storage service', async () => {
     assert.equal(updated.rewards.perRetrieval, 4);
     assert.equal(updated.rewards.completion, 10, 'untouched reward fields keep their value');
     assert.equal(updated.retrievalIntervalSeconds, 300);
+  });
+
+  it('serves a holder its chunk from a client URL job when the local copy is gone', async () => {
+    // The job exists but the node's own copies are gone (released or never stored): the
+    // URL jobs a client uploaded are the fallback, so the holder can still fill the job
+    // instead of it sitting at 0/N forever.
+    const data = randomBytesOf(2 * MiB, 31);
+    const { cid, manifest } = await provider.importBuffer(data, { name: 'lost.bin' });
+    const job = provider.service.createJob({
+      cid,
+      chunks: manifest.chunks,
+      replicas: 1,
+      durationSeconds: 3600,
+      rewards: { upfront: 0, perRetrieval: 1, completion: 0 },
+    });
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(data.length) }).end(data);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const holder = clientFor(provider.url(), 'identity');
+      await holder.json('/v1/content-urls', { body: { cid, url: `${origin}/files/${cid}` } });
+      const assignment = await holder.json<{ id: string }>(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+
+      // The node loses every copy it had; only the client's URL has the bytes.
+      for (const chunk of manifest.chunks) for (const backend of provider.backends()) await backend.delete(chunk.id);
+      assert.equal(await provider.store.getChunk(manifest.chunks[0].id), null, 'the node really lost the chunk');
+
+      const answer = await holder.fetch(`/v1/services/storage/assignments/${assignment.id}/chunks/${manifest.chunks[0].id}`);
+      assert.equal(answer.status, 200, 'the chunk is served from the URL-job copy');
+      const got = Buffer.from(await answer.arrayBuffer());
+      assert.deepEqual(got, data.subarray(0, manifest.chunks[0].size));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

@@ -57,7 +57,7 @@ export function FieldValue({ item, field }: { item: FeedItem; field: MetadataFie
     case 'rating':
       return <span>{RATING_LABELS[item.rating]}</span>;
     case 'topics':
-      return item.topics.length ? <span>{item.topics.slice(0, 3).join(', ')}</span> : null;
+      return item.topics?.length ? <span>{item.topics.slice(0, 3).join(', ')}</span> : null;
     case 'via':
       return <span>via {item.viaName}</span>;
     default:

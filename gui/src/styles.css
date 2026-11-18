@@ -4299,6 +4299,7 @@ input.invalid {
 .trace-row {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 2px;
   width: 100%;
   padding: 8px 2px;
@@ -4312,6 +4313,14 @@ input.invalid {
   cursor: pointer;
 }
 
+/* Every line of a trace starts at the same left edge — type and time included. */
+.trace-row > span,
+.trace-row .trace-head,
+.trace-row .trace-main,
+.trace-row .trace-sub {
+  text-align: left;
+}
+
 .trace-row:hover {
   background: var(--bg-elev-2);
 }
@@ -4319,8 +4328,8 @@ input.invalid {
 .trace-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-start;
+  gap: 8px;
 }
 
 .trace-time {

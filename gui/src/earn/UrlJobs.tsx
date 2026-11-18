@@ -1,5 +1,5 @@
 import { Download, Pencil, Trash2, Upload, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, errorMessage, streamUrl } from '../api';
 import { useApp } from '../state';
@@ -12,12 +12,57 @@ import { contentUrl, loadHosts, loadUrlJobs, pushHostedContent, recordUrlJobs, s
  * then downloads the full data from the URLs — this client stores nothing. With no URL
  * configured it points at the Provider jobs tab.
  */
+type JobStage = 'queued' | 'downloading' | 'uploading' | 'done' | 'failed' | 'cancelled';
+
+/** One job of a run: its own row, its own bar, its own cancel button. */
+interface JobProgress {
+  cid: string;
+  title?: string;
+  source: string;
+  host?: string;
+  stage: JobStage;
+  /** 0–100; the download fills 0–60, the upload 60–100. */
+  percent: number;
+  bytes: number;
+  total?: number;
+  message?: string;
+}
+
+/** Reads a response body while reporting how many bytes arrived, so the bar moves. */
+async function readWithProgress(response: Response, onBytes: (bytes: number) => void): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array(await response.arrayBuffer());
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      parts.push(value);
+      bytes += value.length;
+      onBytes(bytes);
+    }
+  }
+  const data = new Uint8Array(bytes);
+  let at = 0;
+  for (const part of parts) {
+    data.set(part, at);
+    at += part.length;
+  }
+  return data;
+}
+
 export function UrlJobsCard({ providerId }: { providerId: string }) {
   const { toast } = useApp();
   const [hosts, setHosts] = useState<HostConfig[]>(() => loadHosts());
   const [editing, setEditing] = useState<{ id: string; label: string; baseUrl: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [results, setResults] = useState<{ cid: string; host: string; ok: boolean; message: string }[]>([]);
+  const [progress, setProgress] = useState<JobProgress[]>([]);
+  // Stopping: the run loop reads `stop` between jobs, and every in-flight download has
+  // its own controller so one job can be cancelled without touching the others.
+  const stop = useRef(false);
+  const cancelled = useRef(new Set<string>());
+  const controllers = useRef(new Map<string, AbortController>());
 
   /** Saving an edited URL updates that row in place. */
   const saveEdit = () => {
@@ -40,13 +85,42 @@ export function UrlJobsCard({ providerId }: { providerId: string }) {
     toast('Deleted the URL', 'success');
   };
 
+  /** Updates one job's row. */
+  const patch = (cid: string, next: Partial<JobProgress>) =>
+    setProgress((rows) => rows.map((row) => (row.cid === cid ? { ...row, ...next } : row)));
+
+  /** Cancels one job: its download aborts at once; an upload already in flight is not
+   * re-tried on another URL. */
+  const cancelJob = (cid: string) => {
+    cancelled.current.add(cid);
+    controllers.current.get(cid)?.abort();
+    patch(cid, { stage: 'cancelled', message: 'Cancelled' });
+  };
+
+  /** Stops the whole run: no new job starts and the current download is aborted. */
+  const stopAll = () => {
+    stop.current = true;
+    for (const controller of controllers.current.values()) controller.abort();
+    setProgress((rows) =>
+      rows.map((row) =>
+        row.stage === 'queued' || row.stage === 'downloading' || row.stage === 'uploading'
+          ? { ...row, stage: 'cancelled', message: row.stage === 'queued' ? 'Stopped' : row.message ?? 'Stopped' }
+          : row
+      )
+    );
+  };
+
   /**
-   * Finds this provider's jobs and puts each one on one of the URLs below — a single copy
-   * each, the URLs taking turns, and the remaining ones tried when a push fails.
+   * Finds this provider's jobs and puts each one on one of the URLs below — one row per
+   * job with its own progress bar and cancel button, and a stop-all that ends the run.
    */
   const run = async () => {
+    if (busy) return;
     setBusy(true);
-    setResults([]);
+    setProgress([]);
+    stop.current = false;
+    cancelled.current.clear();
+    controllers.current.clear();
     try {
       const found = await api<{ items: { cid: string; title?: string; source: string }[] }>(`/api/nodes/${providerId}/storage-jobs`);
       const list = found.items ?? [];
@@ -54,50 +128,76 @@ export function UrlJobsCard({ providerId }: { providerId: string }) {
         toast('This provider has no open jobs right now', 'info');
         return;
       }
-      const rows: { cid: string; host: string; ok: boolean; message: string }[] = [];
+      setProgress(list.map((job) => ({ cid: job.cid, title: job.title, source: job.source, stage: 'queued', percent: 0, bytes: 0 })));
       const uploaded: UrlJobEntry[] = [];
       let next = 0;
       for (const job of list) {
-        // A provider's job is only accepted for content an algorithm search node knows.
-        const { known } = await api<{ known: Record<string, boolean> }>('/api/lookup', { body: { ids: [job.cid] } });
-        if (!known[job.cid]) {
-          rows.push({ cid: job.cid, host: '—', ok: false, message: 'Not accepted: no algorithm search node knows this content id' });
+        if (stop.current || cancelled.current.has(job.cid)) {
+          if (stop.current) patch(job.cid, { stage: 'cancelled', message: 'Stopped' });
           continue;
         }
-        const response = await fetch(streamUrl(job.cid, true));
-        if (!response.ok) throw new Error(`Could not download ${job.cid} from the provider`);
-        const data = new Uint8Array(await response.arrayBuffer());
-        // One copy per job: the URLs take turns, and a push that fails moves on to the next
-        // URL until one takes it or every URL has been tried.
-        for (let tried = 0; tried < hosts.length; tried++) {
-          const host = hosts[(next + tried) % hosts.length];
-          const answer = await pushHostedContent(host, job.cid, data);
-          rows.push({ cid: job.cid, host: host.label, ok: answer.ok, message: answer.message });
-          if (answer.ok) {
-            next = (next + tried + 1) % hosts.length;
-            uploaded.push({
-              id: `j-${Math.random().toString(36).slice(2, 10)}`,
-              cid: job.cid,
-              title: job.title,
-              source: job.source,
-              hosts: [host.label],
-              url: answer.url ?? contentUrl(host.baseUrl, job.cid),
-              at: new Date().toISOString(),
-            });
-            break;
+        const controller = new AbortController();
+        controllers.current.set(job.cid, controller);
+        try {
+          // A provider's job is only accepted for content an algorithm search node knows.
+          const { known } = await api<{ known: Record<string, boolean> }>('/api/lookup', { body: { ids: [job.cid] } });
+          if (!known[job.cid]) {
+            patch(job.cid, { stage: 'failed', message: 'Not accepted: no algorithm search node knows this content id' });
+            continue;
           }
+          patch(job.cid, { stage: 'downloading', percent: 2 });
+          const response = await fetch(streamUrl(job.cid, true), { signal: controller.signal });
+          if (!response.ok) throw new Error(`Could not download ${job.cid} from the provider`);
+          const total = Number(response.headers.get('content-length') ?? 0) || undefined;
+          const data = await readWithProgress(response, (bytes) =>
+            patch(job.cid, { bytes, total, percent: total ? Math.min(60, Math.round((bytes / total) * 60)) : 60 })
+          );
+          patch(job.cid, { stage: 'uploading', percent: 65 });
+          let placed = false;
+          let lastMessage = 'No URL took it';
+          for (let tried = 0; tried < hosts.length && !placed; tried++) {
+            if (stop.current || cancelled.current.has(job.cid)) break;
+            const host = hosts[(next + tried) % hosts.length];
+            const answer = await pushHostedContent(host, job.cid, data);
+            lastMessage = answer.message;
+            if (answer.ok) {
+              placed = true;
+              next = (next + tried + 1) % hosts.length;
+              patch(job.cid, { stage: 'done', percent: 100, host: host.label, message: answer.message });
+              uploaded.push({
+                id: `j-${Math.random().toString(36).slice(2, 10)}`,
+                cid: job.cid,
+                title: job.title,
+                source: job.source,
+                hosts: [host.label],
+                url: answer.url ?? contentUrl(host.baseUrl, job.cid),
+                at: new Date().toISOString(),
+              });
+            } else {
+              patch(job.cid, { message: answer.message });
+            }
+          }
+          if (!placed && !stop.current && !cancelled.current.has(job.cid)) {
+            patch(job.cid, { stage: 'failed', message: lastMessage });
+          }
+        } catch (error) {
+          if (controller.signal.aborted || cancelled.current.has(job.cid)) {
+            patch(job.cid, { stage: 'cancelled', message: 'Cancelled' });
+          } else {
+            patch(job.cid, { stage: 'failed', message: errorMessage(error) });
+          }
+        } finally {
+          controllers.current.delete(job.cid);
         }
       }
-      setResults(rows);
       if (uploaded.length) recordUrlJobs(uploaded);
-      const good = rows.filter((row) => row.ok).length;
-      toast(
-        `${uploaded.length} of ${list.length} job${list.length === 1 ? '' : 's'} placed on your URLs (${good} push${good === 1 ? '' : 'es'} worked)`,
-        uploaded.length ? 'success' : 'error'
-      );
+      const good = uploaded.length;
+      if (stop.current) toast(`Stopped — ${good} of ${list.length} job${list.length === 1 ? '' : 's'} placed before stopping`, 'info');
+      else toast(`${good} of ${list.length} job${list.length === 1 ? '' : 's'} placed on your URLs`, good ? 'success' : 'error');
     } catch (error) {
       toast(errorMessage(error), 'error');
     } finally {
+      controllers.current.clear();
       setBusy(false);
     }
   };
@@ -168,25 +268,47 @@ export function UrlJobsCard({ providerId }: { providerId: string }) {
               )
             )}
           </div>
-          <div className="row">
+          <div className="row" style={{ alignItems: 'center' }}>
             <button className="primary small" disabled={busy || !providerId || !hosts.length} onClick={() => void run()}>
               <Download size={14} /> {busy ? 'Finding jobs and uploading…' : 'Find jobs and upload'}
+            </button>
+            {/* Stops the run: no further job starts and the current download is aborted. */}
+            <button className="small danger" disabled={!busy} onClick={stopAll}>
+              <X size={14} /> Stop all storage jobs
             </button>
             <span className="hint">
               One press: find the jobs and put each one on one of your URLs — a single copy each, spread over the URLs in turn, with the
               others tried when one fails.
             </span>
           </div>
-          {results.length > 0 && (
-            <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {results.map((row, index) => (
-                <div key={index} className="row small" style={{ gap: 8 }}>
-                  <span className={`badge ${row.ok ? 'ok' : 'danger'}`}>{row.ok ? 'uploaded' : 'failed'}</span>
-                  <span className="mono tiny">{row.cid.slice(0, 20)}…</span>
-                  <span className="tiny faint">→ {row.host}</span>
-                  <span className="tiny">{row.message}</span>
-                </div>
-              ))}
+          {progress.length > 0 && (
+            <div className="form-stack" style={{ gap: 8 }}>
+              {progress.map((job) => {
+                const live = job.stage === 'queued' || job.stage === 'downloading' || job.stage === 'uploading';
+                const tone = job.stage === 'done' ? 'ok' : job.stage === 'failed' ? 'danger' : '';
+                return (
+                  <div key={job.cid} className="card form-stack" style={{ padding: 10, gap: 6 }}>
+                    <div className="row between" style={{ gap: 8, alignItems: 'center' }}>
+                      <span className="row" style={{ gap: 6, minWidth: 0, alignItems: 'center' }}>
+                        <span className={`badge ${tone}`}>{job.stage}</span>
+                        <span className="mono tiny">{job.cid.slice(0, 20)}…</span>
+                        {job.title ? <span className="tiny faint">{job.title}</span> : null}
+                        {job.host ? <span className="tiny faint">→ {job.host}</span> : null}
+                      </span>
+                      <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+                        <span className="tiny faint">{job.percent}%</span>
+                        <button className="small" disabled={!live} onClick={() => cancelJob(job.cid)}>
+                          <X size={13} /> Cancel
+                        </button>
+                      </span>
+                    </div>
+                    <div className="progress" aria-label={`${job.cid.slice(0, 12)} progress`}>
+                      <div style={{ width: `${job.percent}%` }} />
+                    </div>
+                    {job.message ? <span className="tiny faint">{job.message}</span> : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </>

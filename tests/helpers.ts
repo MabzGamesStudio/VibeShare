@@ -16,10 +16,15 @@ export function tempDir(): { dir: string; cleanup: () => void } {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-export async function startProvider(overrides: DeepPartial<ProviderConfig> = {}, dataDir: string | null = null) {
+export async function startProvider(
+  overrides: DeepPartial<ProviderConfig> = {},
+  dataDir: string | null = null,
+  options: { guiDir?: string | null } = {}
+) {
   const node = new ProviderNode({
     dataDir,
     adminToken: ADMIN,
+    guiDir: options.guiDir,
     overrides: { host: '127.0.0.1', port: 0, ...overrides } as DeepPartial<ProviderConfig>,
   });
   await node.start();

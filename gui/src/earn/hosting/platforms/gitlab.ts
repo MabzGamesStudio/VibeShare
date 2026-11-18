@@ -92,6 +92,21 @@ function parseGitlabUrl(url: string, values: Record<string, string>): Record<str
   return { namespace, urlType: 'project', project: joined };
 }
 
+/**
+ * The site root without the content folder — what the site checks probe: the
+ * repository's public/index.html is served at the root, while the folder only carries
+ * content ids and holds no index of its own.
+ */
+function gitlabSiteRoot(values: Record<string, string>, urlType: string): string {
+  const namespace = (values.namespace ?? '').trim();
+  const project = (values.project ?? '').trim();
+  const uniqueId = (values.uniqueId ?? '').trim();
+  if (!namespace || !project) return '';
+  if (urlType === 'unique') return uniqueId ? buildUrl(`${project}-${uniqueId}.gitlab.io`) : '';
+  if (project.toLowerCase() === `${namespace}.gitlab.io`.toLowerCase()) return buildUrl(`${namespace}.gitlab.io`);
+  return buildUrl(`${namespace}.gitlab.io`, project);
+}
+
 export const gitlab: HostingPlatform = {
     id: 'gitlab',
     name: 'GitLab Pages',
@@ -122,10 +137,10 @@ export const gitlab: HostingPlatform = {
           'Add .gitlab-ci.yml at the repository root with the pipeline below, then commit.',
         ],
         files: [
-          { path: 'public/index.html', language: 'html', text: STARTER_HTML, note: 'The same HTML goes at public/public/index.html too: the base URL ends in the content folder (public) while Pages publishes the public folder as the site root.' },
+          { path: 'public/index.html', language: 'html', text: STARTER_HTML },
           { path: '.gitlab-ci.yml', language: 'yaml', text: 'pages:\n  script:\n    - echo "Publishing public/"\n  artifacts:\n    paths:\n      - public' },
         ],
-        check: 'public/index.html, public/public/index.html and .gitlab-ci.yml are all listed in the project files.',
+        check: 'public/index.html and .gitlab-ci.yml are both listed in the project files.',
       },
       {
         title: 'See your site',
@@ -172,8 +187,8 @@ export const gitlab: HostingPlatform = {
       {
         id: 'folder',
         label: 'Folder for content ids',
-        default: 'public',
-        hint: 'The folder content ids live under, in the address and in the repository: the file lands at public/<folder>/<cid> (one level under the folder Pages publishes) and is served at <folder>/<cid>.',
+        default: 'cid',
+        hint: 'Where the wizard pushes content ids on publish: the file lands at public/<folder>/<cid> in the repository and is served at <folder>/<cid>, at the end of the base URL. cid by default — never create the folder by hand.',
       },
       { id: 'token', label: 'Access token', secret: true, hint: 'Avatar → Edit profile → Access → Personal access tokens, scope api (read-write).' },
     ],
@@ -183,20 +198,19 @@ export const gitlab: HostingPlatform = {
     // folder and hash-verifies. The unique type trades the long project path for the
     // unique domain <project>-<six-digit-id>.gitlab.io — same site, no redirect.
     buildBaseUrl: gitlabBaseUrl,
-    // The step-1 site check probes the site root — without the folder, which only holds
-    // content ids, never an index of its own.
-    // The site check probes the content folder's own index — <base>/index.html — so a
-    // root index that answers while the folder path is broken cannot pass for the site.
-    buildSiteUrl: (values) => gitlabBaseUrl(values),
+    // The site checks probe the SITE ROOT index — public/index.html served at the root —
+    // without the folder, which only carries content ids and has no index of its own.
+    buildSiteUrl: (values) => gitlabSiteRoot(values, values.urlType ?? 'project'),
     // Both shapes are parsed back into the fields — the unique domain one sets the URL
     // type and the six-character id from its host.
     parseBaseUrl: parseGitlabUrl,
     describeUrlShape: 'https://<userid>.gitlab.io/<projectname>/<folderpath>/\nhttps://<project-uniqueId>.gitlab.io/<folderpath>/',
-    // The site check probes both address shapes at the content folder: whichever answers
-    // 200 is the address this site is served under, and its urlType becomes the selected one.
+    // The site check probes the site-root index under both address shapes: whichever
+    // answers 200 is the address this site is served under, and its urlType becomes the
+    // selected one. The folder only affects the base URL content ids are appended to.
     siteUrlCandidates: (values) =>
       (['unique', 'project'] as const)
-        .map((urlType) => ({ url: gitlabBaseUrl({ ...values, urlType }), values: {} }))
+        .map((urlType) => ({ url: gitlabSiteRoot(values, urlType), values: {} }))
         .filter((entry) => /^https?:\/\//.test(entry.url)),
     // Wired: commits each content id with the GitLab files API (POST or PUT
     // /api/v4/projects/<id>/repository/files/<path>, authenticated with PRIVATE-TOKEN).

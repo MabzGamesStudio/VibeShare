@@ -139,11 +139,11 @@ export const PLATFORM_GUIDES: Record<string, PlatformGuide> = {
       {
         title: 'Where content ids go',
         lines: [
-          'The client commits each content id one level under the folder Pages publishes — with the folder below as public, the file lands at public/public/<cid> in the repository.',
+          'The wizard pushes each content id to public/<folder>/<cid> in the repository on publish — with the folder below as cid (the default), that is public/cid/<cid>. You never create that folder by hand.',
           'Pages publishes the public folder as the site root, so the file is served at <folder>/<cid>: the base URL ends in the folder, and every content id is the base URL with the id appended after it.',
         ],
         fields: ['folder'],
-        check: 'The folder field says where the content ids live — public by default — and it is the last part of the base URL.',
+        check: 'The folder field says where the content ids live — cid by default — and it is the last part of the base URL.',
       },
       {
         title: 'The access token',

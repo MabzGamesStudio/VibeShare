@@ -1,10 +1,11 @@
 // The tracing GUI, shared by the client (Settings → Tracing) and the node admin
 // consoles (a standalone Tracing tab): the settings form (on/off, expiration, the
 // selectable levels, how much of a payload to keep) and the log view — keyword
-// search, time span, level filters, and one timeline per user action or API start
+// search, time span, level filters, paging like the other lists have (page by page,
+// or lazy with a "Load more" button), and one timeline per user action or API start
 // holding everything it caused. Rows are divided by hairlines and each row opens a
 // modal with the whole event or timeline, copyable from there.
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { TraceEvent, TraceLevel, TraceSettings, TraceTimeline } from '../../../src/shared/tracing.js';
 import { TRACE_LEVELS } from '../../../src/shared/tracing.js';
 import { CopyButton, Modal } from './ui';
@@ -116,7 +117,10 @@ export function TraceSettingsForm({ settings, onChange }: { settings: TraceSetti
 /** One row in the log list: a hairline under every row, a modal on click. */
 const ROW_DIVIDER: CSSProperties = { borderBottom: '1px solid var(--border)', paddingBottom: 6 };
 
-/** The log view: search, time span, level filters, and events / timelines. */
+/** How the log is read: one page at a time, or a page appended on request (lazy). */
+type ShowAs = 'paged' | 'lazy';
+
+/** The log view: search, time span, level filters, paging, and events / timelines. */
 export function TracingView({ api }: { api: TraceApi }) {
   const [settings, setSettings] = useState<TraceSettings | null>(null);
   const [query, setQuery] = useState('');
@@ -124,18 +128,26 @@ export function TracingView({ api }: { api: TraceApi }) {
   const [to, setTo] = useState('');
   const [levels, setLevels] = useState<TraceLevel[]>([]);
   const [mode, setMode] = useState<'events' | 'timelines'>('events');
+  const [show, setShow] = useState<ShowAs>('paged');
+  const [perPage, setPerPage] = useState(50);
+  const [page, setPage] = useState(0);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [timelines, setTimelines] = useState<TraceTimeline[]>([]);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState<{ kind: 'event'; event: TraceEvent } | { kind: 'timeline'; timeline: TraceTimeline } | null>(null);
+  // Only the newest request may touch what is shown: filter changes fire their own
+  // fetch right away, so a slow older answer must never overwrite a newer one.
+  const asked = useRef(0);
 
   useEffect(() => {
     api.settings().then((answer) => setSettings(answer.settings)).catch(() => undefined);
   }, [api]);
 
-  const load = () => {
+  /** One page of the current filters, from `offset` items in (appended when asked). */
+  const load = (offset: number, append = false) => {
+    const wanted = ++asked.current;
     setLoading(true);
     setError(null);
     const filter: TraceQuery = {
@@ -143,30 +155,48 @@ export function TracingView({ api }: { api: TraceApi }) {
       from: from ? new Date(from).toISOString() : undefined,
       to: to ? new Date(to).toISOString() : undefined,
       levels: levels.length ? levels.join(',') : undefined,
+      limit: perPage,
+      offset,
     };
-    const done = () => setLoading(false);
+    const stale = () => asked.current !== wanted;
     if (mode === 'events') {
       api
         .events(filter)
         .then((answer) => {
-          setEvents(answer.events);
+          if (stale()) return;
+          setEvents((current) => (append ? [...current, ...answer.events] : answer.events));
           setTotal(answer.total);
+          setLoading(false);
         })
-        .catch((e) => setError((e as Error).message))
-        .finally(done);
+        .catch((e) => {
+          if (stale()) return;
+          setError((e as Error).message);
+          setLoading(false);
+        });
     } else {
       api
         .timelines(filter)
         .then((answer) => {
-          setTimelines(answer.timelines);
+          if (stale()) return;
+          setTimelines((current) => (append ? [...current, ...answer.timelines] : answer.timelines));
           setTotal(answer.total);
+          setLoading(false);
         })
-        .catch((e) => setError((e as Error).message))
-        .finally(done);
+        .catch((e) => {
+          if (stale()) return;
+          setError((e as Error).message);
+          setLoading(false);
+        });
     }
   };
 
-  useEffect(load, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Anything that changes what is looked for — the filters, the mode, how much a page
+  // holds, the paging style — starts over at the first page (offset 0).
+  const levelKey = levels.join(',');
+  useEffect(() => {
+    setPage(0);
+    load(0);
+  }, [mode, show, perPage, query, from, to, levelKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveSettings = (patch: Partial<TraceSettings>) => {
     api
@@ -174,6 +204,11 @@ export function TracingView({ api }: { api: TraceApi }) {
       .then((answer) => setSettings(answer.settings))
       .catch((e) => setError((e as Error).message));
   };
+
+  const list = mode === 'events' ? events : timelines;
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  const shown = list.length;
+  const pager = total > 0 && <Pager page={page} perPage={perPage} total={total} loading={loading} go={(next) => { setPage(next); load(next * perPage); }} />;
 
   return (
     <div className="form-stack">
@@ -192,13 +227,45 @@ export function TracingView({ api }: { api: TraceApi }) {
             <option value="events">Events</option>
             <option value="timelines">Timelines</option>
           </select>
-          <button className="primary small" onClick={load} disabled={loading}>
+          <span className="hint">Show as</span>
+          <select value={show} style={{ width: 'auto' }} onChange={(e) => setShow(e.target.value as ShowAs)}>
+            <option value="paged">Pagination</option>
+            <option value="lazy">Lazy load</option>
+          </select>
+          <span className="hint">Items per page</span>
+          <input
+            key={perPage}
+            type="number"
+            min={1}
+            max={500}
+            style={{ maxWidth: 92 }}
+            title="Rows per page (1–500)"
+            defaultValue={perPage}
+            onBlur={(e) => {
+              const wanted = Math.round(Number(e.target.value));
+              if (!e.target.value.trim() || !Number.isFinite(wanted) || wanted === perPage) return;
+              setPerPage(Math.min(500, Math.max(1, wanted)));
+            }}
+          />
+          <button
+            className="primary small"
+            onClick={() => {
+              setPage(0);
+              load(0);
+            }}
+            disabled={loading}
+          >
             {loading ? 'Loading…' : 'Search'}
           </button>
           <button
             className="small danger"
             onClick={() => {
-              if (window.confirm('Delete every stored trace event?')) void api.clear().then(load);
+              if (window.confirm('Delete every stored trace event?')) {
+                void api.clear().then(() => {
+                  setPage(0);
+                  load(0);
+                });
+              }
             }}
           >
             Clear
@@ -221,6 +288,7 @@ export function TracingView({ api }: { api: TraceApi }) {
           </span>
         </div>
         {error && <div className="banner danger small">{error}</div>}
+        {show === 'paged' && pager}
         {mode === 'events' ? (
           <div className="trace-list">
             {events.map((event) => (
@@ -251,6 +319,15 @@ export function TracingView({ api }: { api: TraceApi }) {
             {!timelines.length && !loading && <p className="small muted">No timelines yet — each user action or API call starts one.</p>}
           </div>
         )}
+        {show === 'paged' ? (
+          pager
+        ) : (
+          total > shown && (
+            <button className="small" disabled={loading} onClick={() => load(shown, true)}>
+              Load more ({total - shown} left)
+            </button>
+          )
+        )}
       </div>
       {open?.kind === 'event' && <EventModal event={open.event} onClose={() => setOpen(null)} />}
       {open?.kind === 'timeline' && <TimelineModal timeline={open.timeline} onClose={() => setOpen(null)} />}
@@ -279,6 +356,61 @@ function EventRow({ event, onOpen }: { event: TraceEvent; onOpen: () => void }) 
 
 function LevelBadge({ level }: { level: TraceLevel }) {
   return <span className={`badge ${level === 'error' ? 'danger' : level === 'dependency' ? 'ok' : ''}`}>{level}</span>;
+}
+
+/**
+ * The Previous / Next row of a page-by-page list — the same controls the other lists of
+ * these consoles use — with a skip-to-page jump right-aligned in the same row. Shown
+ * above and below the list so the bottom of a page is as easy to page from as the top.
+ */
+function Pager({ page, perPage, total, loading, go }: { page: number; perPage: number; total: number; loading: boolean; go: (page: number) => void }) {
+  const [wanted, setWanted] = useState('');
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  // Skipping straight to a page: the typed number is clamped to the pages there are and
+  // committed on Go or Enter. Re-sending the wanted page is cheap here, so nothing is
+  // kept between the keystrokes.
+  const skip = () => {
+    const typed = Number(wanted);
+    if (!wanted.trim() || !Number.isFinite(typed)) return;
+    const target = Math.min(pages, Math.max(1, Math.round(typed))) - 1;
+    setWanted('');
+    if (target !== page) go(target);
+  };
+  return (
+    <div className="row">
+      <button className="small" disabled={page === 0 || loading} onClick={() => go(page - 1)}>
+        Previous
+      </button>
+      <span className="small">
+        page {page + 1} of {pages}
+      </span>
+      <button className="small" disabled={(page + 1) * perPage >= total || loading} onClick={() => go(page + 1)}>
+        Next
+      </button>
+      {pages > 1 && (
+        <>
+          <div className="spacer" />
+          <span className="hint">Skip to page</span>
+          <input
+            type="number"
+            min={1}
+            max={pages}
+            placeholder="page"
+            style={{ maxWidth: 72 }}
+            value={wanted}
+            disabled={loading}
+            onChange={(e) => setWanted(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') skip();
+            }}
+          />
+          <button className="small" disabled={loading || !wanted.trim()} onClick={skip}>
+            Go
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** The modal for one event: every field of it, with copy buttons for its data. */

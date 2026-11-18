@@ -38,7 +38,9 @@ export class StorageWorker {
     private readonly nodes: NodeManager,
     dataDir: string | null,
     private readonly intervalMs = 60_000,
-    private readonly traces: TraceLog = NO_TRACES
+    private readonly traces: TraceLog = NO_TRACES,
+    /** The demo sets this: its console output is a product, not a log to scan. */
+    private readonly quiet = false
   ) {
     this.dir = join(dataDir ?? join(tmpdir(), 'vibeshare-client'), 'service');
     mkdirSync(this.dir, { recursive: true });
@@ -61,7 +63,7 @@ export class StorageWorker {
   private note(message: string): void {
     this.messages.unshift({ at: new Date().toISOString(), message });
     this.messages.length = Math.min(this.messages.length, 60);
-    log.info(`[storage service] ${message}`);
+    if (!this.quiet) log.info(`[storage service] ${message}`);
   }
 
   start(): void {

@@ -63,6 +63,8 @@ export interface StorageJob {
 interface Assignment extends StorageAssignment {
   accountId: string;
   upfrontPaid: boolean;
+  /** Consecutive failed endpoint checks — the holder is removed only after enough. */
+  failedChecks?: number;
 }
 
 interface ServiceData {
@@ -268,9 +270,11 @@ export class StorageService {
 
   offers(account: Account): StorageOffer[] {
     if (!this.config().enabled) return [];
+    // A job the account already holds — or lost to failing checks — is never offered to
+    // it again; only the assignments it finished or gave back reopen the offer.
     const mine = new Set(
       Object.values(this.data.assignments)
-        .filter((a) => a.accountId === account.id && LIVE.includes(a.status))
+        .filter((a) => a.accountId === account.id && a.status !== 'released' && a.status !== 'completed')
         .map((a) => a.jobId)
     );
     return Object.values(this.data.jobs)
@@ -354,11 +358,49 @@ export class StorageService {
     this.store.changed();
   }
 
-  /** An endpoint of this holder passed a check: the upfront reward is due if not paid. */
+  /**
+   * An endpoint of this holder passed a check: whatever earlier failures made of it,
+   * the holder counts now. The failure streak resets, a still-downloading holder goes
+   * active, and one removed by a failed check round comes back while the job has room —
+   * the admin's test is an explicit operator action, so it heals the old one-strike
+   * damage at once. A job marked failed says nothing else once the content is
+   * reachable again. The one-time upfront reward is paid here if still owed.
+   */
   endpointLive(assignmentId: string): void {
     const assignment = this.data.assignments[assignmentId];
-    if (!assignment || assignment.upfrontPaid) return;
+    if (!assignment) return;
+    assignment.failedChecks = 0;
+    const job = this.data.jobs[assignment.jobId];
+    if (job && job.status === 'failed') job.status = 'open';
+    const restored =
+      assignment.status === 'downloading' ||
+      (assignment.status === 'removed' && (!job || this.liveAssignments(job.id).length < job.replicas));
+    if (restored) assignment.status = 'active';
+    this.store.changed();
+    if (restored && assignment.status === 'active') {
+      this.traces?.trace('basic', 'provider.service', 'holder restored', {
+        message: 'an endpoint check passed',
+        data: { assignment: assignment.id, job: assignment.jobId, account: assignment.accountId.slice(0, 16) },
+      });
+    }
     this.payUpfront(assignment);
+  }
+
+  /**
+   * One failed endpoint check for a holder: a strike. Nothing else happens until enough
+   * strikes pile up without a success in between — then the caller removes the holder
+   * with failHolder(). Returns the strike count (0 for a holder no longer in the job).
+   */
+  noteFailedCheck(assignmentId: string): number {
+    const assignment = this.data.assignments[assignmentId];
+    if (!assignment || !LIVE.includes(assignment.status)) return 0;
+    assignment.failedChecks = (assignment.failedChecks ?? 0) + 1;
+    this.store.changed();
+    this.traces?.trace('error', 'provider.service', 'holder check failed', {
+      message: `${assignment.failedChecks} consecutive failed check${assignment.failedChecks === 1 ? '' : 's'}`,
+      data: { assignment: assignment.id, job: assignment.jobId, account: assignment.accountId.slice(0, 16), failed: assignment.failedChecks },
+    });
+    return assignment.failedChecks;
   }
 
   private own(account: Account, id: string): Assignment {
@@ -647,6 +689,18 @@ export class StorageService {
       if (job.status === 'open' || this.liveAssignments(job.id).length) for (const id of job.chunkIds) pinned.add(id);
     }
     return pinned;
+  }
+
+  /**
+   * Records when a job's endpoints were last tested. `jobs()` hands out copies, so this
+   * must write the stored record — otherwise the dashboard keeps saying "never".
+   */
+  markEndpointTested(jobIds: string[], at = Date.now()): void {
+    for (const id of jobIds) {
+      const job = this.data.jobs[id];
+      if (job) job.lastEndpointTestAt = at;
+    }
+    this.store.changed();
   }
 
   flush(): void {

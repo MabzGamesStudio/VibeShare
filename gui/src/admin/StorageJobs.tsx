@@ -62,7 +62,6 @@ interface AssignmentRow {
   status: string;
   acceptedAt: string;
   expiresAt: string;
-  challenges: { passed: number; failed: number };
   retrievals: number;
   earned: number;
 }
@@ -189,7 +188,7 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /** Everything one job record carries, in full, with its holders listed underneath. */
-function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
+function JobDetails({ view, onClose, reloadList }: { view: JobView; onClose: () => void; reloadList: () => void }) {
   const { job, tier, x, wanted, paid, holders } = view;
   const cid = job.cid ?? '';
   const [tab, setTab] = useState<'details' | 'jobs'>('details');
@@ -202,6 +201,13 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
       .then(setDetails)
       .catch((e) => setDetailsError(message(e)));
   }, [cid]);
+  // Every test refetches the details and the outer list at once: the URL rows, holder
+  // badges, earned credits and the x/N count follow the test immediately instead of
+  // staying stale until the next poll.
+  const reload = useCallback(() => {
+    loadDetails();
+    reloadList();
+  }, [loadDetails, reloadList]);
   useEffect(() => {
     if (tab === 'jobs' && !details && !detailsError) loadDetails();
   }, [tab, details, detailsError, loadDetails]);
@@ -257,7 +263,11 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                 </span>
               </Fact>
               <Fact label="Status">
-                <span className={`badge ${job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : 'ok'}`}>{job.status}</span>{' '}
+                {(() => {
+                  const label = wanted > 0 && x >= wanted ? 'success' : x > 0 ? 'partial success' : job.status;
+                  const tone = x > 0 ? 'ok' : job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : '';
+                  return <span className={`badge ${tone}`}>{label}</span>;
+                })()}{' '}
                 {job.reopened ? (
                   <span className="badge warn" title="A holder failed and was removed — the job opened again for the freed copy">
                     Reopened {job.reopened} time{job.reopened === 1 ? '' : 's'} after failed holders
@@ -289,7 +299,7 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                   {job.rewards.completion} at the end of the term
                 </span>
                 <div className="tiny faint">plus {job.rewards.perRetrieval} per retrieval</div>
-                <div className="tiny faint">paid to holders so far: {paid} credits</div>
+                <div className="tiny faint">awarded to holders so far: {paid} credits</div>
               </Fact>
               <Fact label="Job start">
                 {date(job.createdAt)}
@@ -311,12 +321,6 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
               <Fact label="Replicas">{job.replicas}</Fact>
               <Fact label="Bytes">{formatBytes(job.bytes)}</Fact>
               <Fact label="Chunks">{job.chunkIds.length}</Fact>
-              <Fact label="Requires identity">
-                {job.requireIdentity ? 'yes — only key accounts may hold data' : 'no — any account may hold data'}
-              </Fact>
-              <Fact label="Challenges">
-                {job.challengeIntervalSeconds ? `every ${Math.round(job.challengeIntervalSeconds / 60)} minutes` : 'the service default'}
-              </Fact>
               <Fact label="Retrieval tests">
                 {job.retrievalIntervalSeconds ? `every ${Math.round(job.retrievalIntervalSeconds / 60)} minutes` : 'only on demand'}
               </Fact>
@@ -345,7 +349,7 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                     <th>Holder</th>
                     <th>Status</th>
                     <th>Earned</th>
-                    <th>Challenges</th>
+                    <th>Retrievals</th>
                     <th>Accepted</th>
                   </tr>
                 </thead>
@@ -363,9 +367,7 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
                         </span>
                       </td>
                       <td className="small">{holder.earned} credits</td>
-                      <td className="small">
-                        {holder.challenges.passed} passed · {holder.challenges.failed} failed · {holder.retrievals} retrievals
-                      </td>
+                      <td className="small">{holder.retrievals} retrievals</td>
                       <td className="tiny faint">
                         {timeAgo(holder.acceptedAt)}
                         <div>{date(holder.expiresAt)}</div>
@@ -391,7 +393,7 @@ function JobDetails({ view, onClose }: { view: JobView; onClose: () => void }) {
             detailsError ? (
               <div className="banner danger small">{detailsError}</div>
             ) : details ? (
-              <StorageJobsTab data={details} cid={cid} reload={loadDetails} />
+              <StorageJobsTab data={details} cid={cid} reload={reload} />
             ) : (
               <Loading />
             )
@@ -415,26 +417,38 @@ export function StorageJobs() {
   const [page, setPage] = useState(0);
   const [shown, setShown] = useState(25);
   const [jump, setJump] = useState('');
-  const [opened, setOpened] = useState<JobView | null>(null);
+  const [openedId, setOpenedId] = useState<string | null>(null);
   const [toast, show] = useToast();
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
-  const load = useCallback(() => {
+  // `quiet` is the background poll: a node that briefly cannot answer must not fill the
+  // panel with toasts every few seconds. A manual Refresh (or the first load) still tells.
+  const load = useCallback((quiet = false) => {
     admin<{ jobs: StorageJobRow[] }>('/v1/admin/storage/jobs')
       .then((r) => setJobs(r.jobs ?? []))
-      .catch((e) => show(message(e)));
+      .catch((e) => !quiet && show(message(e)));
     admin<{ config: { tiers: TierPlan[] }; assignments: TierAssignmentRow[] }>('/v1/admin/tiers')
       .then((r) => {
         setTiers(r.config?.tiers ?? []);
         setTierAssignments(r.assignments ?? []);
       })
-      .catch((e) => show(message(e)));
+      .catch((e) => !quiet && show(message(e)));
     // The holders and the credits paid so far only decorate the rows: when this one does
     // not answer, the counts from the jobs themselves still fill the table.
     admin<{ assignments: AssignmentRow[] }>('/v1/admin/storage/assignments')
-      .then((r) => setAssignments(r.assignments ?? []))
+      .then((r) => {
+        setAssignments(r.assignments ?? []);
+        setUpdatedAt(new Date());
+      })
       .catch(() => undefined);
   }, [show]);
   useEffect(load, [load]);
+  // Jobs are created and holders join while this panel is open: poll so the rows (and the
+  // x/N fulfilment counts) follow without a manual reload. The interval stops with the panel.
+  useEffect(() => {
+    const timer = setInterval(() => load(true), 3000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   // A search matches the tier (id or label), the content id (substring or prefix) or the
   // job's name.
@@ -451,6 +465,10 @@ export function StorageJobs() {
   const pages = Math.max(1, Math.ceil(filtered.length / size));
   const current = Math.min(page, pages - 1);
   const visible = paged ? filtered.slice(current * size, current * size + size) : filtered.slice(0, shown);
+  // The open job is looked up live on every render: a test in its modal (or the poll)
+  // refreshes its x/N count, holders and credits in place instead of freezing them.
+  const opened = views.find((view) => view.job.id === openedId) ?? null;
+  const refreshList = useCallback(() => load(true), [load]);
   // Skipping to a page by number: whatever is typed is clamped to the pages that exist.
   const skipTo = () => {
     const wanted = Math.round(Number(jump));
@@ -480,22 +498,37 @@ export function StorageJobs() {
   return (
     <div className="form-stack">
       {toast && <div className="banner info small">{toast}</div>}
-      {/* Row 1 of the controls: what to look for, how to page and how much at once. */}
-      <div className="row small">
+      {/* The list refreshes itself while it is open (every few seconds) so a job opened
+          by an upload — or a holder joining one — appears without a reload. */}
+      <div className="row between small">
+        <h3 style={{ margin: 0 }}>Storage jobs</h3>
+        <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <span className="tiny faint">{updatedAt ? `updated ${updatedAt.toLocaleTimeString()}` : 'loading…'}</span>
+          <button className="small" onClick={() => load()}>
+            Refresh
+          </button>
+        </span>
+      </div>
+      {/* Row 1 of the controls — one line, never wrapping: the search box flexes, the
+          controls beside it keep their size. */}
+      <div className="row small" style={{ flexWrap: 'nowrap', minWidth: 0, gap: 6 }}>
         <input
           type="search"
           value={search}
           placeholder="Search by tier, content id or job name"
-          style={{ width: 320, maxWidth: '100%' }}
+          style={{ flex: '1 1 auto', minWidth: 0, width: 'auto' }}
           onChange={(e) => {
             setSearch(e.target.value);
             setPage(0);
             setShown(size);
           }}
         />
-        <span className="hint">Show as</span>
+        <span className="hint" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
+          Show as
+        </span>
         <select
           value={paged ? 'paged' : 'lazy'}
+          style={{ flexShrink: 0, width: 120, minWidth: 0 }}
           onChange={(e) => {
             setPaged(e.target.value === 'paged');
             setPage(0);
@@ -505,13 +538,15 @@ export function StorageJobs() {
           <option value="paged">Pagination</option>
           <option value="lazy">Lazy load</option>
         </select>
-        <span className="hint">Items per page</span>
+        <span className="hint" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
+          Items per page
+        </span>
         <input
           key={size}
           type="number"
           min={1}
           max={500}
-          style={{ maxWidth: 92 }}
+          style={{ width: 88, flexShrink: 0 }}
           title="Jobs per page (1–500)"
           defaultValue={size}
           onBlur={(e) => {
@@ -533,15 +568,16 @@ export function StorageJobs() {
         </p>
       ) : (
         <>
-          {/* Row 2 of the controls: the pager, with a skip-to-page at its right end. */}
-          <div className="row between small">
-            <div className="row" style={{ gap: 6 }}>
+          {/* Row 2 of the controls — one line as well: the pager on the left, the
+              skip-to-page pushed to the right end with an auto margin. */}
+          <div className="row small" style={{ flexWrap: 'nowrap', minWidth: 0, gap: 6 }}>
+            <div className="row" style={{ gap: 6, flexShrink: 0, flexWrap: 'nowrap' }}>
               {paged ? (
                 <>
                   <button className="small" disabled={current === 0} onClick={() => setPage(current - 1)}>
                     Previous
                   </button>
-                  <span className="muted">
+                  <span className="muted" style={{ whiteSpace: 'nowrap' }}>
                     page {current + 1} of {pages}
                   </span>
                   <button className="small" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
@@ -549,19 +585,21 @@ export function StorageJobs() {
                   </button>
                 </>
               ) : (
-                <span className="muted">
+                <span className="muted" style={{ whiteSpace: 'nowrap' }}>
                   showing {visible.length} of {filtered.length}
                 </span>
               )}
             </div>
             {paged && (
-              <div className="row" style={{ gap: 6 }}>
-                <span className="hint">Skip to page</span>
+              <div className="row" style={{ gap: 6, marginLeft: 'auto', flexShrink: 0, flexWrap: 'nowrap' }}>
+                <span className="hint" style={{ whiteSpace: 'nowrap' }}>
+                  Skip to page
+                </span>
                 <input
                   type="number"
                   min={1}
                   max={pages}
-                  style={{ maxWidth: 80 }}
+                  style={{ width: 72, flexShrink: 0 }}
                   value={jump}
                   placeholder="1"
                   title={`Page to jump to (1–${pages})`}
@@ -598,7 +636,7 @@ export function StorageJobs() {
                   const { job, tier, x, wanted, paid } = view;
                   const expiration = expirationOf(job);
                   return (
-                    <tr key={job.id} style={{ cursor: 'pointer' }} title="Open the job" onClick={() => setOpened(view)}>
+                    <tr key={job.id} style={{ cursor: 'pointer' }} title="Open the job" onClick={() => setOpenedId(job.id)}>
                       <td className="mono tiny" title={job.cid} style={{ overflowWrap: 'anywhere' }}>
                         {job.cid ?? '—'}
                       </td>
@@ -625,6 +663,9 @@ export function StorageJobs() {
                       </td>
                       <td className="small">
                         {x}/{wanted} jobs fulfilled
+                        <div className="tiny faint">
+                          {x > 0 ? (x >= wanted ? 'success' : 'partial success') : job.status === 'failed' ? 'failed' : 'waiting for holders'}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -647,7 +688,7 @@ export function StorageJobs() {
           </div>
         </>
       )}
-      {opened && <JobDetails view={opened} onClose={() => setOpened(null)} />}
+      {opened && <JobDetails view={opened} onClose={() => setOpenedId(null)} reloadList={refreshList} />}
     </div>
   );
 }
