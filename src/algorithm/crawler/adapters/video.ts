@@ -133,6 +133,8 @@ export const youtube: Adapter<YouTubeConfig> = {
     return { items: parseYouTubeFeed(response.text()) };
   },
   search: youtubeSearch,
+  // A creator is a channel here: its RSS feed carries the newest uploads without a key.
+  creatorTarget: (value) => `channel:${value}`,
 };
 
 // ---------------------------------------------------------------------------

@@ -97,6 +97,12 @@ export interface Adapter<C = Record<string, unknown>> extends SourceAdapter {
   targets?(config: C, queries: string[]): string[];
   discover?(ctx: CrawlContext, config: C, target: string): Promise<AdapterResult>;
   search?(ctx: CrawlContext, config: C, query: string): Promise<Discovered[]>;
+  /**
+   * The discover() target asking about one creator (a channel id), when the adapter
+   * has one — `channel:UC…` for YouTube's keyless channel feeds. Without it the
+   * creator refresh falls back to search().
+   */
+  creatorTarget?(value: string): string | null;
 }
 
 /** URL recognition for an adapter that surfaces one registered source scheme. */

@@ -46,7 +46,8 @@ export function oembedEndpoint(source: ExternalSource, page: string): string | n
   }
 }
 
-const PLATFORM_KEYS: Partial<Record<ExternalSource['scheme'], string>> = {
+/** The crawler platform each source scheme surfaces (`yt` → the youtube adapter). */
+export const PLATFORM_KEYS: Partial<Record<ExternalSource['scheme'], string>> = {
   yt: 'youtube',
   vimeo: 'vimeo',
   dm: 'dailymotion',

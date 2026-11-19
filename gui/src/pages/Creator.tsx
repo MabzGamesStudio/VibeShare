@@ -1,4 +1,4 @@
-import { Coins, ExternalLink } from 'lucide-react';
+import { Coins, ExternalLink, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
@@ -13,6 +13,9 @@ import { CARD_PAGE } from '../components/Feed';
 import { Avatar, CopyButton, Empty, Loading, Modal, Switch } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, groupPath } from '../util';
+
+/** Only VibeShare key ids (vk1…) can receive credits; platform ids cannot. */
+const canReceiveCredits = (id: string) => /^vk1[a-z2-7]{52}$/i.test(id);
 
 /**
  * The creator's related creators and their links elsewhere. Related creators — accounts
@@ -462,6 +465,7 @@ export function CreatorPage() {
   const { state, refresh, toast } = useApp();
   const [view, setView] = useState<CreatorView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
 
   const load = useCallback(() => {
     api<CreatorView>(`/api/creators/${encodeURIComponent(id)}`)
@@ -539,12 +543,20 @@ export function CreatorPage() {
               {subscribed ? 'Subscribed' : 'Subscribe'}
             </button>
             <CopyButton text={creator.id} label="Copy creator id" small={false} />
-            <button
-              onClick={() => navigate(`/wallet?tab=send&to=${encodeURIComponent(creator.id)}`)}
-              title="Send credits to this creator from your wallet"
-            >
-              <Coins size={15} /> Send credits
-            </button>
+            {/* Only a VibeShare key id can receive credits — a platform id cannot. */}
+            {canReceiveCredits(creator.id) && (
+              <button
+                onClick={() => navigate(`/wallet?tab=send&to=${encodeURIComponent(creator.id)}`)}
+                title="Send credits to this creator from your wallet"
+              >
+                <Coins size={15} /> Send credits
+              </button>
+            )}
+            {view.via && (
+              <button onClick={() => setSuggesting(true)} title="Link accounts, suggest an icon or suggest content">
+                <Wand2 size={15} /> Creator suggestions
+              </button>
+            )}
           </div>
         </div>
         {channelLinks.length > 0 && (
@@ -562,12 +574,14 @@ export function CreatorPage() {
         )}
       </div>
       <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} />
-      {view.via && (
-        <>
+      {/* The account linking, icon and content suggestions moved into one modal (opened
+          from the action row) so the page itself stays short. */}
+      {view.via && suggesting && (
+        <Modal title="Creator suggestions" onClose={() => setSuggesting(false)} wide>
           <LinkAccounts creator={creator} nodeId={view.via} onSaved={load} />
           <SuggestIcon creator={creator} nodeId={view.via} />
           <SuggestContent creator={creator} nodeId={view.via} />
-        </>
+        </Modal>
       )}
       {view.items.length ? (
         <GridLayout items={view.items} page={CARD_PAGE} />

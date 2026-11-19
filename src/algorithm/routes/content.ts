@@ -326,6 +326,10 @@ export function registerContentRoutes(node: AlgorithmNode): void {
       // The first page of a search also asks other platforms (briefly) for the query.
       const query = body.query.trim();
       if (!body.cursor && query && !/^(format|topic):/.test(query)) await node.crawler.search(query);
+      // A search that names the user's subscribed creators looks for their new content
+      // on their platforms as well, briefly — best-effort, the catalog answers as is.
+      const subscribed = [...(body.filters?.creatorIds ?? []), ...(body.filters?.preferredCreators ?? [])];
+      if (subscribed.length) await node.crawler.refreshCreators(subscribed).wait(500);
       const filters = node.preferencesOf(body.filters);
       let visible = node.registry.visible(filters, node.config.policy.maxRating);
       if (body.filters?.creator) visible = visible.filter((entry) => entry.creatorId === body.filters!.creator);

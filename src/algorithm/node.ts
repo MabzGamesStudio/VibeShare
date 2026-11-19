@@ -250,7 +250,8 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       this.path('crawler.json'),
       (items) => this.ingest(items),
       (url) => this.transport(url.href)?.fetch,
-      this.traces
+      this.traces,
+      (id) => this.registry.creator(id)
     );
   }
 
@@ -380,6 +381,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     if (!Array.isArray(crawler.modules) || crawler.modules.some((path) => typeof path !== 'string')) {
       throw badRequest('crawler.modules is a list of module paths');
     }
+    if (!(Number(crawler.creatorRefreshHours) >= 0)) throw badRequest('crawler.creatorRefreshHours is a number of hours (0 or more)');
     for (const [id, adapter] of Object.entries(crawler.adapters) as [string, { dailyLimit?: unknown; searchShare?: unknown }][]) {
       if (adapter.dailyLimit !== undefined && !(Number(adapter.dailyLimit) >= 0)) throw badRequest(`${id}: daily limit must be 0 or more`);
       if (adapter.searchShare !== undefined && !(Number(adapter.searchShare) >= 0 && Number(adapter.searchShare) <= 1)) {

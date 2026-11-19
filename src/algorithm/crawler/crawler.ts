@@ -29,6 +29,7 @@ import {
 import { crawlPage, webDefaults, type WebConfig } from './adapters/web.js';
 import { FetchFailed, PoliteFetcher, RobotsDisallowed, SiteBlocked } from './fetcher.js';
 import { identifyLink } from './oembed.js';
+import { creatorQueries, runPool, type CreatorLookup, type CreatorQuery, type CreatorRefreshSummary } from './creators.js';
 import { BudgetUsed, type Adapter, type CrawlContext, type Discovered } from './types.js';
 import { sourceKeyOf, sourceOfHost } from '../sources.js';
 
@@ -59,6 +60,8 @@ export interface CrawlerConfig {
   /** How long a client search waits for platform results. */
   searchTimeoutMs: number;
   searchCacheMinutes: number;
+  /** Hours before a subscribed creator is looked up on its platform again. */
+  creatorRefreshHours: number;
   /** Crawl private network addresses (only for tests and intranets). */
   allowPrivateAddresses: boolean;
   /** Spacing of official API calls to one host (their own rate limits apply too). */
@@ -140,6 +143,7 @@ export function crawlerDefaults(): CrawlerConfig {
     searchPlatforms: true,
     searchTimeoutMs: 3000,
     searchCacheMinutes: 30,
+    creatorRefreshHours: 6,
     allowPrivateAddresses: false,
     apiDelayMs: 250,
     blockedSources: [],
@@ -204,6 +208,10 @@ interface CrawlerState {
   seen: string[];
   searches: Record<string, { count: number; last: number }>;
   stats: Record<string, AdapterStats>;
+  /** `creatorId|adapterId` → when that platform lookup last completed (refresh throttle). */
+  creatorChecks: Record<string, number>;
+  /** Creators whose refresh did not finish: looked up first the next time. */
+  creatorPending: string[];
 }
 
 /** Hands discovered content to the registry; returns how many entries were new. */
@@ -240,7 +248,9 @@ export class Crawler {
     /** A fetch through Tor for this URL when the node sends the crawler through Tor. */
     transport?: (url: URL) => typeof fetch | undefined,
     /** The node's trace log, when it keeps one: cycles, adapter fetches and failures. */
-    private readonly traces?: TraceStore
+    private readonly traces?: TraceStore,
+    /** Resolves a subscribed creator id to its record (accounts, name), when known. */
+    private readonly resolveCreator?: (id: string) => CreatorLookup | undefined
   ) {
     this.fetcher = new PoliteFetcher({
       userAgent: config().userAgent,
@@ -254,10 +264,12 @@ export class Crawler {
     this.ctx = this.contextFor(null, 'crawl');
     this.store = new JsonFile<CrawlerState>(
       statePath,
-      () => ({ usage: {}, cursors: {}, frontier: [], identify: [], seen: [], searches: {}, stats: {} }),
+      () => ({ usage: {}, cursors: {}, frontier: [], identify: [], seen: [], searches: {}, stats: {}, creatorChecks: {}, creatorPending: [] }),
       5000
     );
     this.store.data.usage ??= {};
+    this.store.data.creatorChecks ??= {};
+    this.store.data.creatorPending ??= [];
     this.seen = new Set(this.store.data.seen);
   }
 
@@ -649,6 +661,120 @@ export class Crawler {
       timer.unref?.();
     });
     return Promise.race([all, timeout]);
+  }
+
+  // ------------------------------------------------------------- creator refresh
+
+  /**
+   * Best-effort lookups of subscribed creators on their own platforms, so a
+   * subscriptions feed carries what is new there — the local catalog alone only
+   * knows what this node has already crawled. Returns `done` (the totals once every
+   * lookup settled) and `wait(ms)` (whatever has landed by then; the rest keeps
+   * running in the background and shows on the next request).
+   */
+  refreshCreators(ids: string[]): { done: Promise<CreatorRefreshSummary>; wait: (ms: number) => Promise<CreatorRefreshSummary> } {
+    const summary: CreatorRefreshSummary = { checked: 0, added: 0, pending: 0 };
+    const done = this.runCreatorRefresh([...new Set(ids)], summary).catch((error) => {
+      // Best-effort all the way: an unexpected failure is traced and swallowed.
+      this.traces?.trace('error', 'algorithm.crawler', 'function:refreshCreators', { error: (error as Error).message });
+      return summary;
+    });
+    return {
+      done,
+      wait: async (ms) => {
+        await Promise.race([
+          done,
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.max(0, ms));
+            timer.unref?.();
+          }),
+        ]);
+        return { ...summary };
+      },
+    };
+  }
+
+  private async runCreatorRefresh(ids: string[], summary: CreatorRefreshSummary): Promise<CreatorRefreshSummary> {
+    if (!this.config().enabled || !ids.length) return summary;
+    await this.loadModules();
+    const ttl = Math.max(0, Number(this.config().creatorRefreshHours ?? 6)) * 3_600_000;
+    const now = Date.now();
+    // Creators whose last refresh did not finish come first, so the whole subscriber
+    // list gets covered across requests.
+    const pending = this.state.creatorPending;
+    const ordered = [...ids].sort((a, b) => Number(pending.includes(b)) - Number(pending.includes(a)));
+    const work: { creatorId: string; pair: string; query: CreatorQuery }[] = [];
+    for (const creatorId of ordered) {
+      const queries = creatorQueries(creatorId, this.resolveCreator?.(creatorId), this.enabledAdapters(), (adapter) => this.adapterConfig(adapter.id));
+      for (const query of queries) {
+        // Recently checked creators and spent budgets are skipped quietly.
+        const pair = `${creatorId}|${query.adapter.id}`;
+        if ((this.state.creatorChecks[pair] ?? 0) + ttl > now) continue;
+        if (!this.budgetLeft(query.adapter.id, 'search')) continue;
+        work.push({ creatorId, pair, query });
+      }
+    }
+    const failed = new Set<string>();
+    await runPool(work, 4, async (job) => {
+      try {
+        const result = await this.runCreatorLookup(job.query);
+        summary.checked++;
+        summary.added += result.added;
+        // Only a lookup that completed counts as checked: a failed one is retried.
+        this.state.creatorChecks[job.pair] = Date.now();
+        this.store.changed();
+      } catch (error) {
+        // One failing creator never stops the batch (a spent budget is not a failure).
+        failed.add(job.creatorId);
+        if (!(error instanceof BudgetUsed)) {
+          this.traces?.trace('error', 'algorithm.crawler', 'creator refresh', {
+            message: `${job.query.adapter.id} · ${job.creatorId.slice(0, 32)}`,
+            error: (error as Error).message,
+            data: { adapter: job.query.adapter.id, creator: job.creatorId.slice(0, 32) },
+          });
+        }
+      }
+    });
+    const left = pending.filter((id) => !ids.includes(id) || failed.has(id));
+    for (const id of ids) if (failed.has(id) && !left.includes(id)) left.push(id);
+    this.state.creatorPending = left.slice(-500);
+    summary.pending = this.state.creatorPending.length;
+    this.store.changed();
+    this.traces?.trace('basic', 'algorithm.crawler', 'function:refreshCreators', {
+      message: `${ids.length} creators · ${summary.checked} checked · ${summary.added} added`,
+      data: { creators: ids.length, checked: summary.checked, added: summary.added, pending: summary.pending },
+    });
+    return summary;
+  }
+
+  private async runCreatorLookup(query: CreatorQuery): Promise<{ found: number; added: number }> {
+    const config = this.adapterConfig(query.adapter.id);
+    const started = Date.now();
+    const raw =
+      query.target && query.adapter.discover
+        ? (await query.adapter.discover(this.contextFor(query.adapter, 'search'), config, query.target)).items
+        : query.search && query.adapter.search
+          ? await query.adapter.search(this.contextFor(query.adapter, 'search'), config, query.search)
+          : [];
+    // Findings are tagged with the id the client subscribed to, so the subscriptions
+    // feed lists them under its own creator.
+    const items: Discovered[] = raw.map((item) => ({
+      ...item,
+      creator: { id: query.creatorId, name: item.creator?.name ?? query.name ?? query.creatorId, url: item.creator?.url },
+    }));
+    const added = items.length ? this.ingest(items) : 0;
+    this.traces?.trace('dependency', 'algorithm.crawler', 'creator refresh', {
+      message: `${query.adapter.id} · ${query.creatorId.slice(0, 32)} · ${items.length} found`,
+      data: {
+        adapter: query.adapter.id,
+        creator: query.creatorId.slice(0, 32),
+        via: query.target ?? query.search ?? '',
+        found: items.length,
+        added,
+        ms: Date.now() - started,
+      },
+    });
+    return { found: items.length, added };
   }
 
   /** An error, with a hint when an API refused the credentials. */

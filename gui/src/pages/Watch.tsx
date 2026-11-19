@@ -936,6 +936,9 @@ function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedInd
   );
 }
 
+/** Only VibeShare key ids (vk1…) can receive credits; platform ids cannot. */
+const canReceiveCredits = (id: string) => /^vk1[a-z2-7]{52}$/i.test(id);
+
 export function WatchPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
@@ -1148,7 +1151,9 @@ export function WatchPage() {
             <SaveCidButton id={view.id} title={title} />
             {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
             <ShareButton target={{ id: view.id, title }} className="" label="Share" />
-            {creator && (
+            {/* Only a VibeShare key id can receive credits — a content whose creator is
+                known only by a platform id (yt:…) hides this. */}
+            {creator && canReceiveCredits(creator.id) && (
               <button onClick={() => navigate(`/wallet?tab=send&to=${encodeURIComponent(creator.id)}`)} title="Send credits to this content's creator">
                 <Coins size={16} /> Send credits
               </button>

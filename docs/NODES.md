@@ -145,7 +145,10 @@ never set are reported as *unknown*.
   redirect, with Crawl-delay), spaces requests per host and never fetches private
   addresses. Finds land in *Review* or are listed right away; the operator's
   decisions are never overridden. The *Crawler* tab turns adapters on and off,
-  runs them, adds seed sites and shows what robots.txt blocked.
+  runs them, adds seed sites and shows what robots.txt blocked. Loading a
+  subscriptions feed also looks for each subscribed creator's new content on
+  their own platform (background, best-effort, at most once per creator every
+  `crawler.creatorRefreshHours` — 6 by default).
 - **Platform APIs** — the *API keys* tab holds credentials from the operator's
   own developer accounts (Vimeo, Twitch, YouTube, Flickr, Unsplash, Pexels,
   GIPHY, Tenor, Imgur, DeviantArt, Europeana, Reddit, Tumblr, X, Instagram,
