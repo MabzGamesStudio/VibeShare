@@ -62,6 +62,7 @@ export interface ClientApiSpec {
   'post-topics-suggestions': { method: 'POST'; path: '/api/topics/suggestions'; request: { nodeId?: string; topic?: string; description?: string; icon?: string; reason?: string }; response: TopicSuggestionResponse };
   'get-topics-suggestions-id': { method: 'GET'; path: '/api/topics/suggestions/:id'; request: void; response: { suggestions: TopicSuggestion[] } };
   'put-creators-accounts': { method: 'PUT'; path: '/api/creators/accounts'; request: { nodeId?: string; creator?: string; accounts?: { platform: string; handle: string; url?: string; creator?: string; subscribers?: number }[]; name?: string; kind?: string; sign?: boolean; symmetric?: boolean }; response: AccountLinkResponse };
+  'post-credits-transfer': { method: 'POST'; path: '/api/credits/transfer'; request: { nodeId: string; to: string; amount: number }; response: { transfer: { from: string; to: string; toName?: string; amount: number; balance: number; minSenderBalance: number } } };
   'get-account-links-id': { method: 'GET'; path: '/api/account-links/:id'; request: void; response: { proposals: AccountLinkProposal[] } };
   'post-creator-suggestions': { method: 'POST'; path: '/api/creator-suggestions'; request: { nodeId?: string; creator?: string; id?: string; message?: string; title?: string; platform?: string; metrics?: Record<string, number> }; response: CreatorContentResponse };
   'get-creator-suggestions-id': { method: 'GET'; path: '/api/creator-suggestions/:id'; request: void; response: { suggestions: CreatorContentSuggestion[] } };
@@ -182,6 +183,7 @@ export const CLIENT_API: { [K in keyof ClientApiSpec]: { method: ClientApiSpec[K
   'post-topics-suggestions': { method: 'POST', path: '/api/topics/suggestions' },
   'get-topics-suggestions-id': { method: 'GET', path: '/api/topics/suggestions/:id' },
   'put-creators-accounts': { method: 'PUT', path: '/api/creators/accounts' },
+  'post-credits-transfer': { method: 'POST', path: '/api/credits/transfer' },
   'get-account-links-id': { method: 'GET', path: '/api/account-links/:id' },
   'post-creator-suggestions': { method: 'POST', path: '/api/creator-suggestions' },
   'get-creator-suggestions-id': { method: 'GET', path: '/api/creator-suggestions/:id' },

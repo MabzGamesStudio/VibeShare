@@ -3,6 +3,7 @@
 // a row opens the job in full, with the content's own "Storage jobs" tab beside it (the
 // very component the content details modal shows for the same tab).
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { jobOutcomeLong, jobTagsFromCounts } from './job-state';
 import { CopyButton, Loading, Modal } from '../components/ui';
 import { formatBytes, timeAgo } from '../util';
 import { admin, message } from './api';
@@ -264,9 +265,14 @@ function JobDetails({ view, onClose, reloadList }: { view: JobView; onClose: () 
               </Fact>
               <Fact label="Status">
                 {(() => {
-                  const label = wanted > 0 && x >= wanted ? 'success' : x > 0 ? 'partial success' : job.status;
-                  const tone = x > 0 ? 'ok' : job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : '';
-                  return <span className={`badge ${tone}`}>{label}</span>;
+                  const tags = jobTagsFromCounts(x, wanted, wanted - x);
+                  const outcome = jobOutcomeLong(tags);
+                  return (
+                    <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                      <span className={`badge ${tags.availability.tone}`}>{tags.availability.label}</span>
+                      <span className={`badge ${outcome.tone}`}>{outcome.label}</span>
+                    </span>
+                  );
                 })()}{' '}
                 {job.reopened ? (
                   <span className="badge warn" title="A holder failed and was removed — the job opened again for the freed copy">
@@ -359,11 +365,12 @@ function JobDetails({ view, onClose, reloadList }: { view: JobView; onClose: () 
                       <td className="mono tiny">{holder.accountId}</td>
                       <td>
                         {/* A removed holder failed and was deleted from the job — kept visible, never counted as active. */}
+                        {/* Same wording as the storage job tab: a removed holder reads failed. */}
                         <span
                           className={`badge ${holder.status === 'failed' || holder.status === 'removed' ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}
                           title={holder.status === 'removed' ? 'This user failed and was deleted from the job (kept visible here)' : undefined}
                         >
-                          {holder.status}
+                          {holder.status === 'removed' ? 'failed' : holder.status}
                         </span>
                       </td>
                       <td className="small">{holder.earned} credits</td>
@@ -662,10 +669,22 @@ export function StorageJobs() {
                         )}
                       </td>
                       <td className="small">
-                        {x}/{wanted} jobs fulfilled
-                        <div className="tiny faint">
-                          {x > 0 ? (x >= wanted ? 'success' : 'partial success') : job.status === 'failed' ? 'failed' : 'waiting for holders'}
-                        </div>
+                        {(() => {
+                          // Two tags: whether copies can still be filled, and how the filled
+                          // ones are doing. Same derivation as the details tab and the modal.
+                          const tags = jobTagsFromCounts(x, wanted, wanted - x);
+                          return (
+                            <>
+                              <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                                <span className={`badge ${tags.availability.tone}`}>{tags.availability.label}</span>
+                                <span className={`badge ${tags.outcome.tone}`}>{tags.outcome.label}</span>
+                              </span>
+                              <div className="tiny faint">
+                                {x}/{wanted} jobs fulfilled
+                              </div>
+                            </>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );

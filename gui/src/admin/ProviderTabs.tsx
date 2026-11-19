@@ -10,6 +10,7 @@ import { assembleVvshWebm, normalizeVvshWebmChunk } from '../../../src/shared/vv
 import { useToast } from './AdminApp';
 import { ManualContentSync } from './ManualContentSync';
 import { StorageJobs } from './StorageJobs';
+import { freeSlots, holderState, jobOutcomeLong, jobTags } from './job-state';
 
 interface ContentRow {
   cid: string;
@@ -472,7 +473,7 @@ function EndpointRow({
   return (
     <div className="endpoint-row">
       <span className="faint">#{index + 1}</span>
-      <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'accepted'}</span>
+      <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'success'}</span>
       <span className="mono tiny endpoint-url" title={location}>
         {location}
       </span>
@@ -556,22 +557,31 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
       {jobs.map((job) => {
         // A removed holder failed and was deleted from the job: its row stays visible (the
         // data keeps it), but its copy is free again — so one more slot needs filling.
-        const freed = job.holders.filter((holder) => holder.status === 'removed' || holder.status === 'failed').length;
-        const slots = Math.max(job.replicas + freed, job.holders.length);
+        const freed = job.holders.filter((holder) => holder.status !== 'active' && holder.status !== 'downloading').length;
+        // The copies the plan wants: the tier's media copies + URL backups (as the Storage
+        // jobs panel counts them), or the job's own replicas without a tier.
+        const plan = data.tier?.plan;
+        const tierWanted = plan
+          ? Object.values(plan.media ?? {}).reduce((sum, count) => sum + (count ?? 0), 0) + (plan.externalUrls ?? 0)
+          : undefined;
+        const wanted = tierWanted ?? Math.max(job.replicas + freed, job.holders.length);
+        const slots = Math.max(wanted + freed, job.holders.length);
         return (
           <div key={job.id} className="card form-stack" style={{ padding: 12 }}>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               {(() => {
-                // The label follows what the holders actually do: a job with working users
-                // is a success (or a partial one), never a grey "failed".
-                const active = job.holders.filter((entry) => entry.status === 'active').length;
-                const wanted = Math.max(job.replicas, job.holders.length);
-                const label =
-                  wanted > 0 && active >= wanted ? 'success' : active > 0 ? 'partial success' : job.status;
-                const tone = active > 0 ? 'ok' : job.status === 'failed' ? 'danger' : job.status === 'open' ? 'accent' : '';
-                return <span className={`badge ${tone}`}>storage job {label}</span>;
+                // Two tags, derived from the copies themselves (never from a stale job
+                // status): open/closed for the free slots, and success / partial failure /
+                // failure for the copies that are actually reachable.
+                const tags = jobTags(job.holders, wanted);
+                const outcome = jobOutcomeLong(tags);
+                return (
+                  <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                    <span className={`badge ${tags.availability.tone}`}>{tags.availability.label}</span>
+                    <span className={`badge ${outcome.tone}`}>{outcome.label}</span>
+                  </span>
+                );
               })()}
-              {job.managed ? <span className="badge">automatic</span> : null}
               <span className="tiny faint">
                 {job.rewards.upfront} upfront · {job.rewards.perRetrieval}/retrieval · {job.rewards.completion} end · test the URL every{' '}
                 {Math.round((job.retrievalIntervalSeconds ?? 0) / 60)}m · {Math.round(job.durationSeconds / 86400)} days
@@ -604,12 +614,9 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                   );
                 }
                 const links = [...holder.links].sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0));
-                // The badge is the holder's own status from the node. It only reads failed
-                // when the node marked the holder out and none of its URLs serves the
-                // content right now — a link's fail count is history the next good check
-                // clears, so it never condemns the whole holder on its own.
-                const serving = links.some((link) => (link.fails ?? 0) === 0);
-                const failed = (holder.status === 'failed' || holder.status === 'removed') && !serving;
+                // One derivation, shared with the details tab: active (or a URL that serves),
+                // downloading, or failed when the node dropped the holder and nothing serves.
+                const state = holderState(holder);
                 return (
                   <div key={holder.id} className="form-stack" style={{ gap: 6 }}>
                     <div className="job-row">
@@ -621,9 +628,7 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                       >
                         Test storage job
                       </button>
-                      <span className={`badge ${failed ? 'danger' : holder.status === 'active' ? 'ok' : ''}`}>
-                        storage job {failed ? 'failed' : holder.status}
-                      </span>
+                      <span className={`badge ${state.tone}`}>storage job {state.label}</span>
                       {(holder.failedChecks ?? 0) > 0 ? (
                         <span
                           className="badge warn"

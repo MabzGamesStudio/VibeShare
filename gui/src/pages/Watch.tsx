@@ -4,6 +4,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  Coins,
   Download,
   ExternalLink,
   Flag,
@@ -17,7 +18,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { claimSourceMetrics } from '../../../src/algorithm/metrics';
 import { SOURCE_CATALOG, sourceKeyOf } from '../../../src/algorithm/sources';
 import type { ContentView, Job, NodeEntry, PublishPreview } from '../../../src/shared/clientapi';
@@ -937,6 +938,7 @@ function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedInd
 
 export function WatchPage() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const { state, refresh, toast } = useApp();
   const [view, setView] = useState<ContentView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1146,6 +1148,11 @@ export function WatchPage() {
             <SaveCidButton id={view.id} title={title} />
             {view.downloadUrl && <DownloadButton url={view.downloadUrl} name={view.manifest?.name} />}
             <ShareButton target={{ id: view.id, title }} className="" label="Share" />
+            {creator && (
+              <button onClick={() => navigate(`/wallet?tab=send&to=${encodeURIComponent(creator.id)}`)} title="Send credits to this content's creator">
+                <Coins size={16} /> Send credits
+              </button>
+            )}
             <CopyButton text={view.id} label="Copy id" small={false} />
           </div>
 

@@ -82,6 +82,8 @@ export function featuresOf(info: NodeInfo): FeatureMap {
     'page-limit-creators': PAGE_LIMITS.creators,
     'page-limit-catalog': PAGE_LIMITS.catalog,
   };
+  features['credits-transfer'] = true;
+  features['min-sender-balance'] = info.transfers?.minSenderBalance ?? 0;
   if (info.type === 'provider') {
     const provider = info as ProviderInfo;
     features['storage-service'] = provider.services?.storage.enabled ?? false;

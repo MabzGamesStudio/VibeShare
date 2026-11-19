@@ -92,6 +92,10 @@ const TYPE_SOURCES: Record<string, string> = {
 const API_TYPES: Record<string, RouteTypes> = {
   'GET /api/version': { request: 'void', response: '{ version: number }' },
   'GET /api/state': { request: 'void', response: 'ClientState' },
+  'POST /api/credits/transfer': {
+    request: '{ nodeId: string; to: string; amount: number }',
+    response: '{ transfer: { from: string; to: string; toName?: string; amount: number; balance: number; minSenderBalance: number } }',
+  },
   'POST /api/nodes': { request: '{ text?: string }', response: '{ added: NodeEntry[]; errors: { ref: string; error: string }[] }' },
   'GET /api/nodes/export': { request: 'void', response: '{ text: string }' },
   'PATCH /api/nodes/:id': { request: 'Partial<NodeEntry>', response: 'NodeEntry' },

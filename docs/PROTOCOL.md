@@ -93,8 +93,16 @@ Every node keeps its own ledger. Credits are integers and only mean something on
 | `POST /v1/auth/session` | `{ key, ts, sig, pow? }` with `sig` over `"vibeshare-session\n" + nodeId + "\n" + ts` | `{ token, accountId, expiresAt, balance }` |
 | `POST /v1/auth/anonymous` | `{ ts, nonce, pow? }` | `{ token, accountId, balance }` — the token *is* the account |
 | `GET /v1/account` | — | `{ account, history }` |
+| `POST /v1/credits/transfer` | `{ to, amount }` | `{ transfer: { from, to, toName?, amount, balance, minSenderBalance } }` |
 
 `ts` is Unix milliseconds within 10 minutes of the node's clock; each signature and anonymous nonce is accepted once. Session tokens last 24 hours.
+
+**Credit transfers.** Any account holding enough credits may send some to another
+account with `POST /v1/credits/transfer` (authenticated). The sender's balance must
+be at least `transfers.minSenderBalance` — **1000** by default, set by the operator
+in *Settings → Credits transfers*; `0` disables the gate. `to` names the recipient:
+a `vk1…` key id, a creator id such as `yt:…`, or a percent-encoded form like
+`youtube%3A…`. The response reports the transfer and the sender's new balance.
 
 **Proof of work.** If `signup.powBits > 0`, opening an account requires `pow` such that SHA-256(`"vibeshare-pow\n" + nodeId + "\n" + subject + "\n" + ts + ":" + pow`) starts with `powBits` zero bits; `subject` is the key id, or `anon:` + nonce. A key session for an account that already exists needs no proof; the node answers `403 pow_required` when one is needed.
 
@@ -595,6 +603,8 @@ One deliberate exception to "may be dropped": `ManifestMeta.x` is **hashed like 
 | `bloom-inline-max-bits` / `bloom-account-max-bits` | number | Filter size caps |
 | `bloom-tiers` | string[] | The ids of the paid filter-storage tiers |
 | `page-limit-feed` / `page-limit-search` / `page-limit-creators` / `page-limit-catalog` | number | The `limit` caps of §11 |
+| `credits-transfer` | boolean | Accounts may send credits to other accounts (`POST /v1/credits/transfer`) |
+| `min-sender-balance` | number | The `transfers.minSenderBalance` gate those sends must clear (§3) |
 
 ## 11. Pages, cursors and limits
 

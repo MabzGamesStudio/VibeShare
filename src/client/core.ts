@@ -381,6 +381,11 @@ export class ClientCore {
     return this.credits.contributions();
   }
 
+  /** Sends credits to another account of one node (see Credits.transfer). */
+  transferCredits(request: { nodeId: string; to: string; amount: number }) {
+    return this.credits.transfer(request);
+  }
+
   /** The content id an upload will have, computed on this client before publishing. */
   previewPublish(request: PublishRequest): Promise<PublishPreview> {
     return this.publishing.previewPublish(request);

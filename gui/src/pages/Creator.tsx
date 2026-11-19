@@ -1,6 +1,6 @@
-import { ExternalLink } from 'lucide-react';
+import { Coins, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import type { AccountLinkProposal, AlgorithmInfo, CreatorAccount, CreatorContentSuggestion, CreatorIconSuggestion, CreatorInfo } from '../../../src/shared/protocol';
@@ -458,6 +458,7 @@ function SuggestIcon({ creator, nodeId }: { creator: CreatorInfo; nodeId: string
 
 export function CreatorPage() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const { state, refresh, toast } = useApp();
   const [view, setView] = useState<CreatorView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -538,6 +539,12 @@ export function CreatorPage() {
               {subscribed ? 'Subscribed' : 'Subscribe'}
             </button>
             <CopyButton text={creator.id} label="Copy creator id" small={false} />
+            <button
+              onClick={() => navigate(`/wallet?tab=send&to=${encodeURIComponent(creator.id)}`)}
+              title="Send credits to this creator from your wallet"
+            >
+              <Coins size={15} /> Send credits
+            </button>
           </div>
         </div>
         {channelLinks.length > 0 && (

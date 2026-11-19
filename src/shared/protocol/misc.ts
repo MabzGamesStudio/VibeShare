@@ -31,6 +31,12 @@ export interface ContentUrlRecord {
   fails?: number;
   /** When the last successful check ran (endpoints that just worked move to the top). */
   lastOkAt?: number;
+  /**
+   * For a base URL: the content ids it has actually served. A base URL is one address for
+   * every content, so success is kept per content id — a copy of one content saying
+   * nothing about another.
+   */
+  okCids?: string[];
 }
 
 /** A place a client can fetch a cid from, offered when this node does not hold the bytes. */

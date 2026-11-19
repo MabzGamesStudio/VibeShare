@@ -218,6 +218,59 @@ describe('storage job endpoint checks', async () => {
     await (provider as unknown as { runEndpointTests(all?: boolean): Promise<void> }).runEndpointTests(false);
     assert.ok(jobState(job.id).lastEndpointTestAt, 'the first test runs at once and is persisted');
   });
+
+  it('probes a freshly offered URL and counts the copy as fulfilled right away', async () => {
+    // The client offers its URL after the node started (the usual startup order): the
+    // node checks it at once, the downloading holder becomes live, and the copy counts
+    // in the admin list before any manual Test or scheduled round.
+    const data = randomBytesOf(MiB, 121);
+    const { cid, manifest } = await provider.importBuffer(data, { name: 'offered.bin' });
+    host.blobs.set(cid, data);
+    const job = provider.service.createJob({
+      cid,
+      chunks: manifest.chunks,
+      replicas: 2,
+      durationSeconds: 3600,
+      rewards: { upfront: 4, perRetrieval: 1, completion: 0 },
+    });
+    const user = clientFor(provider.url(), 'identity');
+    await user.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
+    assert.equal(assignment.status, 'downloading');
+    // Offer the working URL now: the node probes it and the holder counts.
+    await user.json('/v1/content-urls', { body: { cid, url: goodUrl(cid) } });
+    await waitFor(() => holderOf(assignment.id).status === 'active');
+    assert.equal(holderOf(assignment.id).earned, 4, 'the owed upfront is paid by the passing probe');
+    const listed = await admin<{ jobs: { id: string; holders: number }[] }>(provider.url(), '/v1/admin/storage/jobs');
+    assert.equal(listed.jobs.find((entry) => entry.id === job.id)?.holders, 1, 'one of two copies is fulfilled');
+  });
+
+  it('tests a holder the node had let go (released) instead of saying it is not part of the job', async () => {
+    // The operator sees the row in the modal and presses Test: the row's status (released,
+    // completed, failed…) must not decide whether the URL is checked — the URL does.
+    const data = randomBytesOf(MiB, 133);
+    const { cid, manifest } = await provider.importBuffer(data, { name: 'released.bin' });
+    host.blobs.set(cid, data);
+    const job = provider.service.createJob({
+      cid,
+      chunks: manifest.chunks,
+      replicas: 2,
+      durationSeconds: 3600,
+      rewards: { upfront: 3, perRetrieval: 1, completion: 0 },
+    });
+    const user = clientFor(provider.url(), 'identity');
+    await user.json('/v1/content-urls', { body: { cid, url: goodUrl(cid) } });
+    await user.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
+    await user.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
+    await user.json(`/v1/services/storage/assignments/${assignment.id}/release`, { method: 'POST' });
+    assert.equal(holderOf(assignment.id).status, 'released');
+
+    const result = await provider.testStorageJob(job.id, assignment.accountId);
+    assert.equal(result.ok, true, 'the working URL is what decides, not the row status');
+    assert.deepEqual(result.holders, { succeeded: 1, total: 1 });
+    assert.equal(holderOf(assignment.id).status, 'active', 'the passing check brings the copy back');
+  });
 });
 
 describe('the startup test round', async () => {

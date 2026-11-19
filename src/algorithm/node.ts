@@ -1,3 +1,4 @@
+import { isKeyId } from '../shared/crypto.js';
 // The search algorithm node: this file is the coordinator. The node's state lives on
 // AlgorithmNode below; the routes and the domain logic around them are grouped by
 // subject in ./routes, and the shared building blocks live next to it. Every public
@@ -152,6 +153,7 @@ export function algorithmDefaults(): AlgorithmConfig {
     port: 7702,
     trustProxy: false,
     tor: { ...DEFAULT_NODE_TOR },
+    transfers: { minSenderBalance: 1000 },
     signup: { grant: 100, powBits: 0, anonymous: true, perIpPerHour: 30 },
     payments: [{ id: 'voucher', type: 'voucher' }, ...defaultCryptoPaymentConfigs()],
     peers: [],
@@ -661,6 +663,18 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
 
   async importCatalog(provider: string, limit: number): Promise<{ queued: number; skipped: number }> {
     return content.importCatalog(this, provider, limit);
+  }
+
+  /**
+   * A creator id is not an account id: the credits go to the account of the creator's
+   * signing key (the key its manifests are signed with). Without a key the creator
+   * cannot receive credits yet — the caller tells the user to use a vk1… id instead.
+   */
+  protected override resolveCreatorAccount(creatorId: string): { id: string; name?: string } | null {
+    const creator = this.registry.creator(creatorId);
+    if (!creator) return null;
+    const key = (creator.keys ?? []).find((candidate) => isKeyId(candidate));
+    return key ? { id: key, name: creator.name } : null;
   }
 
   protected adminStatus(): Record<string, unknown> {

@@ -932,6 +932,10 @@ export interface FieldDef {
   type: 'number' | 'text' | 'bool' | 'select' | 'list';
   options?: readonly string[];
   hint?: string;
+  /** Number fields: the smallest value accepted (the field clamps to it). */
+  min?: number;
+  /** Number fields: whole numbers only (the field rounds to them). */
+  integer?: boolean;
 }
 
 const COMMON_FIELDS: FieldDef[] = [
@@ -1041,12 +1045,16 @@ function SettingsTab({ groups, only }: { groups: FieldGroup[]; only?: string }) 
                   <input
                     key={JSON.stringify(value)}
                     type={field.type === 'number' ? 'number' : 'text'}
+                    min={field.min}
                     defaultValue={field.type === 'list' ? ((value as string[]) ?? []).join(', ') : String(value ?? '')}
                     onBlur={(e) => {
                       const text = e.target.value;
+                      const raw = field.type === 'number' ? Number(text) : text;
                       const next =
                         field.type === 'number'
-                          ? Number(text)
+                          ? field.integer
+                            ? Math.round(Math.max(field.min ?? Number.NEGATIVE_INFINITY, raw as number))
+                            : Math.max(field.min ?? Number.NEGATIVE_INFINITY, raw as number)
                           : field.type === 'list'
                             ? text.split(',').map((s) => s.trim()).filter(Boolean)
                             : text || undefined;
@@ -1541,6 +1549,25 @@ const LOGGING_GROUP: FieldGroup = {
   ],
 };
 
+// Who may send credits to whom — the same rule on both kinds of node, because the
+// base config carries it (default 1000; 0 disables the gate). Every change saves
+// through the config save like any other setting (nested patches merge into
+// config.transfers).
+const CREDITS_TRANSFERS_GROUP: FieldGroup = {
+  id: 'credits-transfers',
+  label: 'Credits transfers',
+  fields: [
+    {
+      path: 'transfers.minSenderBalance',
+      label: 'Minimum sender balance',
+      type: 'number',
+      min: 0,
+      integer: true,
+      hint: 'Only accounts holding at least this many credits may send credits to another account (0 disables the gate; default 1000)',
+    },
+  ],
+};
+
 const PROVIDER_GROUPS: FieldGroup[] = [
   { id: 'general', label: 'General', fields: COMMON_FIELDS },
   {
@@ -1597,6 +1624,7 @@ const PROVIDER_GROUPS: FieldGroup[] = [
       { path: 'storageService.auto.rewards.completion', label: 'Credits at the end of the term', type: 'number' },
     ],
   },
+  CREDITS_TRANSFERS_GROUP,
   LOGGING_GROUP,
 ];
 
@@ -1722,5 +1750,6 @@ const ALGORITHM_GROUPS: FieldGroup[] = [
       { path: 'console.comments.perPage', label: 'Comments: items per page', type: 'number', hint: '5–500' },
     ],
   },
+  CREDITS_TRANSFERS_GROUP,
   LOGGING_GROUP,
 ];

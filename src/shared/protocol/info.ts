@@ -61,6 +61,11 @@ export interface NodeInfoBase {
   protocol?: { min: number; max: number };
   /** What this node supports beyond the base protocol (v2+). Unknown keys MUST be ignored. */
   features?: Record<string, boolean | number | string | string[]>;
+  /**
+   * Credits transfers this node accepts: accounts holding at least `minSenderBalance`
+   * credits may send them to another account. 0 turns the gate off.
+   */
+  transfers?: { minSenderBalance: number };
 }
 
 export interface ProviderPricing {

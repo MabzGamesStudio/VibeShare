@@ -1,7 +1,7 @@
 import { Coins, ExternalLink, Gift, Wallet } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { AccountResponse, NodeEntry } from '../../../src/shared/clientapi';
+import type { AccountResponse, CreatorView, NodeEntry } from '../../../src/shared/clientapi';
 import type { Invoice, PaymentMethodInfo } from '../../../src/shared/protocol';
 import type { StoredReceipt } from '../../../src/client/receipts';
 import { api, errorMessage } from '../api';
@@ -403,10 +403,200 @@ function NodeWallet({ node }: { node: NodeEntry }) {
   );
 }
 
+/** The node's minimum sender balance: its advertised feature, its info block, or 1000. */
+function minSenderBalance(node: NodeEntry): number {
+  const feature = node.info?.features?.['min-sender-balance'];
+  if (typeof feature === 'number') return feature;
+  return node.info?.transfers?.minSenderBalance ?? 1000;
+}
+
+/**
+ * Sending credits to another account or creator: the transfer leaves this client's
+ * account on the chosen node and lands on the recipient's account there. The node is the
+ * authority on who may send what — the checks here only keep the obvious mistakes from
+ * reaching it, and its answer is what the sender sees when it disagrees.
+ */
+function SendCredits({ initialTo, initialNodeId }: { initialTo: string; initialNodeId?: string }) {
+  const { state, providers, algorithms, toast, refresh } = useApp();
+  const nodes = [...providers, ...algorithms].filter((node) => node.enabled);
+  const [nodeId, setNodeId] = useState(() =>
+    initialNodeId && nodes.some((node) => node.id === initialNodeId) ? initialNodeId : (providers.find((node) => node.enabled)?.id ?? nodes[0]?.id ?? '')
+  );
+  const node = nodes.find((entry) => entry.id === nodeId) ?? nodes[0];
+  const [to, setTo] = useState(initialTo);
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState('');
+  const [error, setError] = useState('');
+  // A best-effort name for the recipient from the algorithm nodes. Sending never waits
+  // for it: the receiving node alone decides whether the recipient exists.
+  const [resolved, setResolved] = useState<{ id: string; name?: string } | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const resolveCreator = (value: string) => {
+    const id = value.trim();
+    // A vk1… key is an account, not a creator page — there is nothing to look up.
+    if (!id || id.startsWith('vk1')) {
+      setResolved(null);
+      return;
+    }
+    setChecking(true);
+    api<CreatorView>(`/api/creators/${encodeURIComponent(id)}`)
+      .then((view) => setResolved({ id, name: view.creator?.name }))
+      .catch(() => setResolved({ id }))
+      .finally(() => setChecking(false));
+  };
+  // A link can land here with ?to= already set — look that one up right away.
+  useEffect(() => {
+    if (initialTo.trim()) resolveCreator(initialTo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const balance = node?.balance ?? 0;
+  const minimum = node ? minSenderBalance(node) : 1000;
+  const value = Math.round(Number(amount));
+  // Sending to this client's own account is refused here too (the node would refuse it
+  // anyway): both the key and this client's account on the node are known already.
+  const self = Boolean(state && node && to.trim() && (to.trim() === state.identity.id || to.trim() === node.accountId));
+  const problem = !node
+    ? 'Add a node to send from first'
+    : !to.trim()
+      ? 'Say who to send to'
+      : self
+        ? 'That is this client’s own account'
+        : !Number.isFinite(value) || value <= 0
+          ? 'Enter a whole number of credits above zero'
+          : value > balance
+            ? `More than the ${balance.toLocaleString()} credits on ${node.name}`
+            : balance < minimum
+              ? `Sending from ${node.name} needs at least ${minimum.toLocaleString()} credits — this client has ${balance.toLocaleString()}`
+              : '';
+
+  const send = async () => {
+    if (!node || problem) return;
+    setBusy(true);
+    setError('');
+    setSent('');
+    try {
+      const answer = await api<{ transfer: { from: string; to: string; toName?: string; amount: number; balance: number; minSenderBalance: number } }>(
+        '/api/credits/transfer',
+        { body: { nodeId: node.id, to: to.trim(), amount: value } }
+      );
+      const transfer = answer.transfer;
+      const line = `Sent ${transfer.amount.toLocaleString()} credits to ${transfer.toName ?? transfer.to}`;
+      setSent(line);
+      toast(line, 'success');
+      setAmount('');
+      // Balances moved on the node — re-read the state now instead of waiting for the
+      // app's own refresh cycle to notice.
+      void refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card form-stack">
+      <h3>Send credits</h3>
+      <p className="small muted">
+        Credits only work on the node that issued them. The transfer moves them from this client's account on that node to another
+        account or creator there.
+      </p>
+      {!nodes.length ? (
+        <Empty icon={<Coins size={40} />} title="No nodes to send from">
+          <p>
+            Add one on the{' '}
+            <Link to="/nodes" className="link">
+              Nodes page
+            </Link>
+            .
+          </p>
+        </Empty>
+      ) : (
+        <div className="form-stack">
+          <label className="field">
+            Node
+            <select value={node?.id ?? ''} onChange={(e) => setNodeId(e.target.value)}>
+              {nodes.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name} · {entry.type} · {entry.balance ?? '–'} credits
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            To (creator id or key)
+            <input
+              type="text"
+              className="mono"
+              value={to}
+              placeholder="creator id or vk1… key"
+              onChange={(e) => {
+                setTo(e.target.value);
+                setResolved(null);
+              }}
+              onBlur={() => resolveCreator(to)}
+              onKeyDown={(e) => e.key === 'Enter' && resolveCreator(to)}
+            />
+          </label>
+          {checking && <span className="hint">Looking the creator up on the algorithm nodes…</span>}
+          {resolved?.name && (
+            <span className="small check-ok">
+              Creator: <strong>{resolved.name}</strong>
+            </span>
+          )}
+          {resolved && !resolved.name && <span className="small check-bad">no such creator on the algorithm nodes</span>}
+          <label className="field">
+            Credits
+            <div className="row">
+              <input type="number" min={1} step={1} value={amount} placeholder="0" onChange={(e) => setAmount(e.target.value)} />
+              <button
+                type="button"
+                className="small"
+                title={`The whole balance on ${node?.name ?? 'the node'}`}
+                onClick={() => setAmount(String(balance))}
+              >
+                Max
+              </button>
+            </div>
+          </label>
+          <p className="small muted" style={{ margin: 0 }}>
+            Balance {balance.toLocaleString()} credits · minimum to send from {node?.name}: {minimum.toLocaleString()} credits
+          </p>
+          {problem && (
+            <p className="hint" style={{ margin: 0 }}>
+              {problem}
+            </p>
+          )}
+          <button className="primary" disabled={busy || Boolean(problem)} onClick={() => void send()}>
+            {busy ? <Spinner /> : <Coins size={16} />} Send
+          </button>
+        </div>
+      )}
+      {sent && <div className="banner info small">{sent}</div>}
+      {error && <div className="banner danger small">{error}</div>}
+    </div>
+  );
+}
+
 export function WalletPage() {
   const { state, providers, algorithms } = useApp();
   const [params, setParams] = useSearchParams();
-  const [tab, setTab] = useState<'provider' | 'algorithm'>('provider');
+  // The send form opens from links (?tab=send&to=…) and keeps its tab in the URL; the two
+  // node tabs keep their own ?node= selection semantics untouched.
+  const [tab, setTab] = useState<'provider' | 'algorithm' | 'send'>(() => (params.get('tab') === 'send' ? 'send' : 'provider'));
+  useEffect(() => {
+    setTab((current) => (params.get('tab') === 'send' ? 'send' : current === 'send' ? 'provider' : current));
+  }, [params]);
+  const selectTab = (next: 'provider' | 'algorithm' | 'send') => {
+    setTab(next);
+    const nextParams = new URLSearchParams(params);
+    if (next === 'send') nextParams.set('tab', 'send');
+    else nextParams.delete('tab');
+    setParams(nextParams);
+  };
   if (!state) return null;
   const nodes = tab === 'provider' ? providers : algorithms;
   const selected = nodes.find((n) => n.id === params.get('node')) ?? nodes[0];
@@ -419,14 +609,19 @@ export function WalletPage() {
         </div>
       </div>
       <div className="tabs" style={{ marginBottom: 14 }}>
-        <button className={`tab ${tab === 'provider' ? 'on' : ''}`} onClick={() => setTab('provider')}>
+        <button className={`tab ${tab === 'provider' ? 'on' : ''}`} onClick={() => selectTab('provider')}>
           Content provider nodes
         </button>
-        <button className={`tab ${tab === 'algorithm' ? 'on' : ''}`} onClick={() => setTab('algorithm')}>
+        <button className={`tab ${tab === 'algorithm' ? 'on' : ''}`} onClick={() => selectTab('algorithm')}>
           Algorithm search nodes
         </button>
+        <button className={`tab ${tab === 'send' ? 'on' : ''}`} onClick={() => selectTab('send')}>
+          Send credits
+        </button>
       </div>
-      {!nodes.length ? (
+      {tab === 'send' ? (
+        <SendCredits initialTo={params.get('to') ?? ''} initialNodeId={params.get('node') ?? undefined} />
+      ) : !nodes.length ? (
         <Empty icon={<Coins size={40} />} title={tab === 'provider' ? 'No content provider nodes' : 'No algorithm search nodes'}>
           <p>
             Add one on the <Link to="/nodes" className="link">Nodes page</Link>.
@@ -457,7 +652,7 @@ export function WalletPage() {
         </div>
       )}
       <div style={{ height: 16 }} />
-      {selected && <Receipts key={`receipts-${selected.id}`} node={selected} />}
+      {tab !== 'send' && selected && <Receipts key={`receipts-${selected.id}`} node={selected} />}
     </div>
   );
 }

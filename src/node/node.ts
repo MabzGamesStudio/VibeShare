@@ -17,12 +17,14 @@ import {
 import { log } from '../shared/node/log.js';
 import type { Transport } from '../shared/remote.js';
 import { isOnionUrl, OnionService, TorRouter, type TorMode } from '../shared/node/tor.js';
+import { parseCreditRecipient } from '../shared/credits.js';
 import { formatNodeRef, parseNodeRef, type NodeType } from '../shared/noderef.js';
 import {
   enrichNodeInfo,
   infoSigningPayload,
   PROTOCOL_VERSION,
   SOFTWARE,
+  type CreditTransferResult,
   type NodeInfo,
   type NodeInfoBase,
   type SignedInfo,
@@ -54,7 +56,15 @@ export interface BaseConfig {
   /** Local tracing (off by default): what is recorded and for how long. */
   tracing?: TraceSettings;
   tor: NodeTorConfig;
+  /**
+   * Credits transfers between accounts of this node. Only accounts holding at least
+   * `minSenderBalance` credits may send; 0 turns the gate off.
+   */
+  transfers: { minSenderBalance: number };
 }
+
+/** The default minimum a sender must hold before they can send credits. */
+export const DEFAULT_MIN_SENDER_BALANCE = 1000;
 
 /** Tor: publishing the node as an onion service, and which outgoing requests go through Tor. */
 export interface NodeTorConfig {
@@ -278,6 +288,7 @@ export abstract class BaseNode<C extends BaseConfig> {
       payments: this.payments.info(),
       peers: config.peers.filter((peer) => parseNodeRef(peer)),
       tracing: this.traces.info(),
+      transfers: { minSenderBalance: this.minSenderBalance() },
     };
     // The v2 additive fields (protocol range, capability map) come from the complete
     // info — including what extraInfo() contributes — so every node kind publishes
@@ -296,6 +307,20 @@ export abstract class BaseNode<C extends BaseConfig> {
     if (!token || !safeEqual(token.trim(), this.adminToken)) throw forbidden('Admin token required');
   }
 
+  /** The smallest balance that may send credits (0 = anyone). */
+  protected minSenderBalance(): number {
+    return Math.max(0, Math.round(this.config.transfers?.minSenderBalance ?? DEFAULT_MIN_SENDER_BALANCE));
+  }
+
+  /**
+   * Resolves a creator id (`yt:…`, `name:…`) to the account that receives its credits.
+   * The base node only knows key ids; algorithm nodes hold the creator catalog and
+   * override this with the creator's signing keys.
+   */
+  protected resolveCreatorAccount(_creatorId: string): { id: string; name?: string } | null {
+    return null;
+  }
+
   private baseRoutes(): void {
     const router = this.router;
     router.get('/v1/info', () => this.signedInfo());
@@ -305,6 +330,48 @@ export abstract class BaseNode<C extends BaseConfig> {
     router.get('/v1/account', (ctx) => {
       const account = this.auth.require(ctx);
       return { account: this.ledger.view(account), history: account.recent };
+    });
+    // Sending credits to another account of this node: a key id, a creator id or a link
+    // to one. The gate keeps zero-balance throwaway accounts from moving credits around.
+    router.post('/v1/credits/transfer', async (ctx) => {
+      const account = this.auth.require(ctx);
+      const body = await readJson<{ to?: string; amount?: number }>(ctx.req);
+      const recipient = parseCreditRecipient(String(body.to ?? ''));
+      if (!recipient) throw badRequest('Give the recipient as a VibeShare id (vk1…), a creator id (yt:…) or a link to one');
+      const amount = Math.round(Number(body.amount));
+      if (!Number.isFinite(amount) || amount <= 0) throw badRequest('Give a whole number of credits above zero');
+      const min = this.minSenderBalance();
+      if (account.balance < min) {
+        throw forbidden(`Only accounts with at least ${min} credits can send credits (the balance is ${account.balance})`);
+      }
+      if (account.balance < amount) {
+        throw badRequest(`Not enough credits: the balance is ${account.balance}, the transfer is ${amount}`);
+      }
+      let targetId: string;
+      let toName: string | undefined;
+      if (recipient.kind === 'key') {
+        targetId = recipient.id;
+      } else {
+        const creator = this.resolveCreatorAccount(recipient.id);
+        if (!creator) {
+          throw notFound(
+            `No creator ${recipient.id} with a VibeShare account on this node — use the creator's VibeShare id (vk1…) instead`
+          );
+        }
+        targetId = creator.id;
+        toName = creator.name;
+      }
+      if (targetId === account.id) throw badRequest('You cannot send credits to yourself');
+      // The recipient may never have signed in here: create their account (no signup
+      // grant) so the credits land somewhere they can collect by logging in with their key.
+      this.ledger.create('key', { id: targetId, grant: 0 });
+      this.ledger.transfer(account.id, targetId, amount, 'credits transfer', targetId);
+      const balance = this.ledger.require(account.id).balance;
+      this.traces.trace('basic', this.type, 'credits transferred', {
+        data: { from: account.id.slice(0, 16), to: targetId.slice(0, 16), amount },
+      });
+      const transfer: CreditTransferResult = { from: account.id, to: targetId, toName, amount, balance, minSenderBalance: min };
+      return { transfer };
     });
     this.payments.routes(router, this.auth, (ctx) => this.requireAdmin(ctx));
 

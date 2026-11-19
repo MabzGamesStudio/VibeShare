@@ -339,6 +339,13 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     }>();
     return core.linkCreatorAccounts(nodes.require(String(body.nodeId ?? '')), body);
   });
+  // Sending credits to another account of one node: the amount and the recipient as the
+  // user typed it (a vk1… key, a creator id like yt:…, or a link to one).
+  on('POST', '/api/credits/transfer', async (request) => {
+    const body = await request.json<{ nodeId?: string; to?: string; amount?: number }>();
+    const transfer = await core.transferCredits({ nodeId: String(body.nodeId ?? ''), to: String(body.to ?? ''), amount: Math.round(Number(body.amount)) });
+    return { transfer };
+  });
   on('GET', '/api/account-links/:id', (request) => core.myAccountLinks(node(request)));
   on('POST', '/api/creator-suggestions', async (request) => {
     const body = await request.json<{

@@ -49,6 +49,9 @@ port changes need a restart.
 - **Accounts and credits.** Each node runs its own ledger: credits for new
   accounts, optional proof of work and per-IP signup limits, anonymous accounts
   on or off, manual credit adjustments and notes per account.
+- **Credit transfers** — accounts may send credits to another account when the
+  sender holds at least `transfers.minSenderBalance` (default **1000**; 0
+  disables the gate). Set per node in *Settings → Credits transfers*.
 - **Payments** — selling credits for: vouchers, ETH and ERC-20 tokens on any EVM
   chain, on-chain bitcoin, SOL and SPL tokens, Monero, Lightning (LNbits),
   hosted checkouts with signed webhooks (Stripe, or anything that can sign a
@@ -105,6 +108,9 @@ it issues itself.
 - **Content URLs** — clients register URLs (or base URLs) where they host copies
   of content; this node pulls from them and pays the client per verified download.
   Accept/review is the operator's (`autoAccept` can skip it).
+- **Credit transfers** — the shared minimum-sender-balance gate applies here too:
+  `transfers.minSenderBalance`, default 1000, set in *Settings → Credits
+  transfers*.
 - **VVSH conversion** — provider-side `.vvsh` verifiable video conversion
   prefers **FFmpeg** with `libvpx-vp9` and `libopus` (`VIBESHARE_FFMPEG` when not
   on `PATH`); without it the provider uses its pinned Mediabunny/NodeAV fallback.
@@ -155,6 +161,9 @@ never set are reported as *unknown*.
   link, or for new cids/links by criteria (platform, ids vs links, metrics,
   filters, newest/popular/random); exchange peer lists; push this node's catalog
   in bounded batches.
+- **Credit transfers** — the shared minimum-sender-balance gate applies here too:
+  `transfers.minSenderBalance`, default 1000, set in *Settings → Credits
+  transfers*.
 
 ## Making it real
 

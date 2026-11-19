@@ -144,6 +144,7 @@ export function providerDefaults(): ProviderConfig {
     port: 7701,
     trustProxy: false,
     tor: { ...DEFAULT_NODE_TOR },
+    transfers: { minSenderBalance: 1000 },
     signup: { grant: 500, powBits: 0, anonymous: true, perIpPerHour: 30 },
     payments: [{ id: 'voucher', type: 'voucher' }, ...defaultCryptoPaymentConfigs()],
     peers: [],
@@ -848,6 +849,87 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    * failure threshold); when every endpoint of a user fails, that user is red failed
    * and out of the job.
    */
+  /**
+   * A freshly offered URL is checked right away: when it serves the content, the holder
+   * that offered it counts as live and the job reopens (this is what makes the dashboard
+   * right at startup, instead of waiting for the 60-minute round). A URL that is not up
+   * yet is only recorded — a fresh offer is not a failed check and never a strike.
+   */
+  private async probeOfferedContentUrl(record: ContentUrlRecord): Promise<void> {
+    const cids = record.cid ? [record.cid] : this.jobCidsFor(record.account).slice(0, 20);
+    let anyOk = false;
+    for (const cid of cids) {
+      const target =
+        record.url && record.cid === cid
+          ? record.url
+          : record.baseUrl
+            ? `${record.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(cid)}`
+            : undefined;
+      if (!target) continue;
+      const verify = await this.verifyEndpoint(cid, target);
+      if (!verify.ok) continue;
+      anyOk = true;
+      record.fails = 0;
+      record.lastOkAt = Date.now();
+      record.okCids = [...new Set([...(record.okCids ?? []), cid])].slice(-50);
+      this.contentUrls.changed();
+      const jobs = this.service.jobs().filter((job) => job.cid === cid);
+      for (const job of jobs) {
+        for (const assignment of this.service.assignmentsForAdmin().filter(
+          (entry) => entry.jobId === job.id && entry.accountId === record.account
+        )) {
+          this.service.endpointLive(assignment.id);
+        }
+      }
+      this.service.markEndpointTested(jobs.map((job) => job.id));
+      this.traces.trace('basic', 'provider.node', 'offered content url served', {
+        data: { account: record.account.slice(0, 16), cid: cid.slice(0, 16), jobs: jobs.length },
+      });
+    }
+    // Only a content URL that failed is a recorded miss; for a base URL one content not
+    // being served says nothing about the others, so its count is left alone.
+    if (!anyOk && record.cid) {
+      record.fails = (record.fails ?? 0) + 1;
+      this.contentUrls.changed();
+    }
+  }
+
+  /** The content ids this account holds an assignment for — what a base URL should serve. */
+  private jobCidsFor(accountId: string): string[] {
+    const cids = new Set<string>();
+    for (const assignment of this.service.assignmentsForAdmin()) {
+      if (assignment.accountId !== accountId) continue;
+      const job = this.service.jobs().find((entry) => entry.id === assignment.jobId);
+      if (job?.cid) cids.add(job.cid);
+    }
+    return [...cids];
+  }
+
+  /**
+   * How many copies of a job are actually fulfilled right now: holders that are active,
+   * plus holders still downloading whose offered URL already served the content.
+   */
+  private fulfilledHolders(job: { id: string; cid?: string }): number {
+    const assignments = this.service
+      .assignmentsForAdmin()
+      .filter((a) => a.jobId === job.id && (a.status === 'active' || a.status === 'downloading'));
+    return assignments.filter((a) => a.status === 'active' || this.servingUrlFor(a.accountId, job.cid)).length;
+  }
+
+  /** Whether one account has an accepted URL for this content that served it at least once. */
+  private servingUrlFor(accountId: string, cid?: string): boolean {
+    if (!cid) return false;
+    return Object.values(this.contentUrls.data.items).some((record) => {
+      if (record.account !== accountId || record.status !== 'accepted') return false;
+      if (record.url !== undefined) {
+        return record.cid === cid && (record.fails ?? 0) === 0 && record.lastOkAt !== undefined;
+      }
+      if (record.baseUrl === undefined) return false;
+      // A base URL keeps success per content id (old records fall back to their last check).
+      return record.okCids ? record.okCids.includes(cid) : (record.fails ?? 0) === 0 && record.lastOkAt !== undefined;
+    });
+  }
+
   async testStorageJob(jobId: string, onlyAccount?: string): Promise<JobTestResult> {
     const job = this.service.jobs().find((entry) => entry.id === jobId);
     if (!job) throw notFound('No such job');
@@ -873,16 +955,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     const empty: JobTestResult = { ok: false, holders: { succeeded: 0, total: 0 }, urls: { served: 0, checked: 0 }, checked: 0, total: 0 };
     const cid = job.cid;
     if (!cid) return report({ ...empty, error: 'This job has no content id — there is nothing to fetch from its endpoints' });
-    // Removed holders are tested too: a check that passes brings one back, healing rows
-    // the old one-strike behaviour dropped.
+    // Every row that exists for the job is tested — including ones the node had given up
+    // on (removed, released, failed): the URL is the authority, and a check that serves
+    // brings the copy back. Filtering by status made "Test storage job" answer "That user
+    // is not part of this job" for a row the operator could see on screen.
     const holders = this.service
       .assignmentsForAdmin()
-      .filter(
-        (assignment) =>
-          assignment.jobId === job.id &&
-          (assignment.status === 'active' || assignment.status === 'downloading' || assignment.status === 'removed') &&
-          (!onlyAccount || assignment.accountId === onlyAccount)
-      );
+      .filter((assignment) => assignment.jobId === job.id && (!onlyAccount || assignment.accountId === onlyAccount));
     if (!holders.length) {
       return report({ ...empty, error: onlyAccount ? 'That user is not part of this job' : 'This job has no users to test yet' });
     }
@@ -1357,6 +1436,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       // An accepted URL is an external backup for its content's tier (the domain rule
       // decides how much it counts for).
       if (record.status === 'accepted' && record.cid && record.url) this.tiers.recordUrl(record.cid, record.url);
+      // A client that hands over a URL is usually the holder of one of this node's jobs:
+      // probe it at once so the job shows the copy as working without waiting for the
+      // schedule (a fresh offer is never a strike when the URL is simply not up yet).
+      if (record.status === 'accepted') void this.probeOfferedContentUrl(record).catch(() => undefined);
       return { record };
     });
 
@@ -2379,7 +2462,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     });
     router.get('/v1/admin/storage/jobs', (ctx) => {
       this.requireAdmin(ctx);
-      return { jobs: this.service.jobs(), stats: this.service.stats() };
+      // A copy counts as fulfilled once its data is reachable: actively held, or held by a
+      // client whose offered URL has already served the content (a client that is still
+      // downloading but hosts a working copy is a real copy — otherwise a fresh start shows
+      // 0/N until someone presses Test).
+      return {
+        jobs: this.service.jobs().map((job) => ({ ...job, holders: this.fulfilledHolders(job) })),
+        stats: this.service.stats(),
+      };
     });
     router.post('/v1/admin/storage/jobs', async (ctx) => {
       this.requireAdmin(ctx);
@@ -2588,6 +2678,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       void this.runEndpointTests(true).catch((error) => log.warn('endpoint tests:', error));
     }, 3_000);
     firstRound.unref();
+    // A cold host (a static site waking up, DNS not ready) can make that first pass miss:
+    // retry soon instead of leaving the dashboard wrong for the whole interval.
+    for (const delay of [30_000, 120_000]) {
+      const retry = setTimeout(() => {
+        void this.runEndpointTests(true).catch((error) => log.warn('endpoint tests:', error));
+      }, delay);
+      retry.unref();
+    }
   }
 
   async stop(): Promise<void> {

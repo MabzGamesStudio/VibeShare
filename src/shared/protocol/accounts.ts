@@ -11,6 +11,23 @@ export interface SessionResponse {
   balance: number;
 }
 
+/** What a client asks to send: a recipient (key id, creator id or a link to one) and an amount. */
+export interface CreditTransferRequest {
+  to: string;
+  amount: number;
+}
+
+/** The answer of a transfer: who sent, who received, and the sender's balance after. */
+export interface CreditTransferResult {
+  from: string;
+  to: string;
+  /** The creator's name when the node resolved a creator id. */
+  toName?: string;
+  amount: number;
+  balance: number;
+  minSenderBalance: number;
+}
+
 export interface AccountView {
   id: string;
   kind: 'anonymous' | 'key';

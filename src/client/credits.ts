@@ -2,7 +2,7 @@
 // played from outside the network, platform popularity numbers — and the log of what
 // the user contributed (suggestions, submissions) the nodes pay for. One collaborator
 // of ClientCore; browser-safe.
-import type { ClaimResponse } from '../shared/protocol.js';
+import type { ClaimResponse, CreditTransferResult } from '../shared/protocol.js';
 import { RemoteError } from '../shared/remote.js';
 import { errorText } from './nodes.js';
 import type { ClientCore } from './core.js';
@@ -75,6 +75,33 @@ export class Credits {
     );
     return { nodes: results };
   }
+  /**
+   * Sends credits to another account of one node. `to` is the recipient as the user pasted
+   * it (a vk1… key, a creator id like yt:…, or a link to one); the node resolves creator
+   * ids through its catalog and rejects the transfer when nothing matches.
+   */
+  async transfer(request: { nodeId: string; to: string; amount: number }): Promise<CreditTransferResult> {
+    const entry = this.core.nodes.require(request.nodeId);
+    const started = Date.now();
+    try {
+      const answer = await this.core.nodes.client(entry).json<{ transfer: CreditTransferResult }>('/v1/credits/transfer', {
+        body: { to: request.to, amount: request.amount },
+      });
+      this.core.traces.trace('basic', 'core', 'credits sent', {
+        message: entry.name,
+        data: this.core.traces.summarize({ node: entry.id, to: answer.transfer.to.slice(0, 16), amount: answer.transfer.amount, ms: Date.now() - started }),
+      });
+      return answer.transfer;
+    } catch (error) {
+      this.core.traces.trace('error', 'core', 'credits transfer failed', {
+        message: entry.name,
+        data: this.core.traces.summarize({ node: entry.id, ms: Date.now() - started }),
+        error: errorText(error),
+      });
+      throw error;
+    }
+  }
+
   async contributions() {
     const results = await Promise.all(
       this.core.nodes.list('algorithm').map(async (entry) => {

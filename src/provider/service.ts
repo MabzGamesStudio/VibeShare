@@ -372,9 +372,14 @@ export class StorageService {
     assignment.failedChecks = 0;
     const job = this.data.jobs[assignment.jobId];
     if (job && job.status === 'failed') job.status = 'open';
+    const room = !job || this.liveAssignments(job.id).length < job.replicas;
+    const termOver = Date.parse(assignment.expiresAt) <= Date.now();
+    // Any copy whose URL serves counts again, whatever the node had made of it before:
+    // a downloading holder goes active, and one that was dropped (removed), gave the job
+    // back (released) or was marked failed comes back while the job has room and its term
+    // is still running. An explicit check is the operator saying "this endpoint works".
     const restored =
-      assignment.status === 'downloading' ||
-      (assignment.status === 'removed' && (!job || this.liveAssignments(job.id).length < job.replicas));
+      assignment.status === 'downloading' || (!LIVE.includes(assignment.status) && room && !termOver);
     if (restored) assignment.status = 'active';
     this.store.changed();
     if (restored && assignment.status === 'active') {
