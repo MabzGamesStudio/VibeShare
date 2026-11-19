@@ -8,6 +8,8 @@ describe('provider node', async () => {
   const provider = await startProvider({
     signup: { grant: 10, powBits: 0 },
     pricing: { perMiB: 2, freeMiBPerDay: 0, creatorShare: 0.5 },
+    // This suite tests the pre-review upload flow: pushed content goes live at once.
+    review: { enabled: false },
   });
   const url = provider.url();
   after(() => provider.stop());

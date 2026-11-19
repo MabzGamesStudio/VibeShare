@@ -154,6 +154,8 @@ export interface TagNote {
 export interface ContentItem {
   /** Full content id, including fallback sources (`vs1…~yt:…`). */
   id: string;
+  /** Free-form content data the operator or publisher set: short string pairs. */
+  data?: Record<string, string>;
   status: 'listed';
   title: string;
   description?: string;

@@ -84,6 +84,8 @@ export interface ClientApiSpec {
   'get-jobs': { method: 'GET'; path: '/api/jobs'; request: void; response: { jobs: Job[] } };
   'get-jobs-id': { method: 'GET'; path: '/api/jobs/:id'; request: void; response: Job };
   'get-library': { method: 'GET'; path: '/api/library'; request: void; response: { published: LibraryItem[]; history: HistoryItem[] } };
+  'delete-library-id': { method: 'DELETE'; path: '/api/library/:id'; request: void; response: { published: LibraryItem[] } };
+  'post-removals': { method: 'POST'; path: '/api/removals'; request: { nodeIds: string[]; id: string; message?: string }; response: { results: { node: string; name: string; ok: boolean; error?: string }[] } };
   'post-history': { method: 'POST'; path: '/api/history'; request: { id?: string; title?: string; contentId?: string; link?: string }; response: unknown };
   'delete-history': { method: 'DELETE'; path: '/api/history'; request: void; response: unknown };
   'get-search-history': { method: 'GET'; path: '/api/search-history'; request: void; response: { items: SearchHistoryItem[] } };
@@ -131,6 +133,7 @@ export interface ClientApiSpec {
   'post-identity-import': { method: 'POST'; path: '/api/identity/import'; request: { seed?: string }; response: { id: string } };
   'get-cache': { method: 'GET'; path: '/api/cache'; request: void; response: { bytes: number; chunks: number; limit: number } };
   'delete-cache': { method: 'DELETE'; path: '/api/cache'; request: void; response: { bytes: number; chunks: number } };
+  'delete-cache-id': { method: 'DELETE'; path: '/api/cache/:id'; request: void; response: { dropped: number } };
 }
 
 /** The route table as runtime data: method and literal path per route. */
@@ -205,6 +208,8 @@ export const CLIENT_API: { [K in keyof ClientApiSpec]: { method: ClientApiSpec[K
   'get-jobs': { method: 'GET', path: '/api/jobs' },
   'get-jobs-id': { method: 'GET', path: '/api/jobs/:id' },
   'get-library': { method: 'GET', path: '/api/library' },
+  'delete-library-id': { method: 'DELETE', path: '/api/library/:id' },
+  'post-removals': { method: 'POST', path: '/api/removals' },
   'post-history': { method: 'POST', path: '/api/history' },
   'delete-history': { method: 'DELETE', path: '/api/history' },
   'get-search-history': { method: 'GET', path: '/api/search-history' },
@@ -252,6 +257,7 @@ export const CLIENT_API: { [K in keyof ClientApiSpec]: { method: ClientApiSpec[K
   'post-identity-import': { method: 'POST', path: '/api/identity/import' },
   'get-cache': { method: 'GET', path: '/api/cache' },
   'delete-cache': { method: 'DELETE', path: '/api/cache' },
+  'delete-cache-id': { method: 'DELETE', path: '/api/cache/:id' },
 };
 
 export type ClientApiRoute = keyof ClientApiSpec;

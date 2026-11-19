@@ -14,13 +14,22 @@ export function pageOf<T>(items: T[], cursor: string | undefined, limit: number)
   const slice = items.slice(offset, offset + limit);
   return { items: slice, cursor: offset + limit < items.length ? String(offset + limit) : undefined, total: items.length };
 }
+/**
+ * The requested formats with the ones their medium covers: "image" covers image lists
+ * too — an image list is images packaged in one content — so the image medium shows
+ * both however the request words it.
+ */
+export function formatsCovering(formats: Format[]): Format[] {
+  return formats.includes('image') && !formats.includes('image-list') ? [...formats, 'image-list'] : formats;
+}
+
 /** A few matching native items lead every surface. Explicitly filtered pages get a few
  *  of each requested format; an unfiltered page gets three native items overall. */
 export function nativeSuggestions<T extends { id: string; format: Format }>(entries: T[], formats: Format[] = []): T[] {
   const native = entries.filter((entry) => entry.id.startsWith('vs1'));
   if (!formats.length) return native.slice(0, 3);
   const first: T[] = [];
-  for (const format of formats) first.push(...native.filter((entry) => entry.format === format && !first.includes(entry)).slice(0, 3));
+  for (const format of formatsCovering(formats)) first.push(...native.filter((entry) => entry.format === format && !first.includes(entry)).slice(0, 3));
   return first;
 }
 export function slug(text: string): string {

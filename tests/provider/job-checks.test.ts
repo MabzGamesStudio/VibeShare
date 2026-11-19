@@ -97,12 +97,17 @@ describe('storage job endpoint checks', async () => {
     assert.equal(holderOf(assignment.id).status, 'active', 'a success keeps the holder');
     assert.equal(holderOf(assignment.id).failedChecks, 0);
 
-    // …and the stale `fails` of the dead endpoint must not keep the row looking failed.
-    const records = Object.values((provider as unknown as { contentUrls: { data: { items: Record<string, { account: string; fails?: number }> } } }).contentUrls.data.items).filter(
+    // …and the success keeps honest books: the endpoint it checked is clean, while the
+    // dead one was never reached — its history stays and its row reads "not tested".
+    const records = Object.values((provider as unknown as { contentUrls: { data: { items: Record<string, { account: string; fails?: number; lastOutcome?: string }> } } }).contentUrls.data.items).filter(
       (record) => record.account === holderOf(assignment.id).accountId
     );
     assert.ok(records.length >= 2);
-    assert.ok(records.every((record) => !record.fails), 'every endpoint of the row is clean after a success');
+    assert.equal(records.find((record) => record.lastOutcome === 'success')?.fails ?? 1, 0, 'the endpoint the run checked is clean after the success');
+    assert.ok(
+      records.some((record) => record.lastOutcome === 'not tested' && (record.fails ?? 0) > 0),
+      'the endpoint the run never reached keeps its fail history'
+    );
   });
 
   it('restores a holder that earlier failures removed', async () => {
@@ -245,9 +250,9 @@ describe('storage job endpoint checks', async () => {
     assert.equal(listed.jobs.find((entry) => entry.id === job.id)?.holders, 1, 'one of two copies is fulfilled');
   });
 
-  it('tests a holder the node had let go (released) instead of saying it is not part of the job', async () => {
-    // The operator sees the row in the modal and presses Test: the row's status (released,
-    // completed, failed…) must not decide whether the URL is checked — the URL does.
+  it('forgets a released holder entirely — as if the assignment never existed', async () => {
+    // Releasing gives the copy back: the row goes (nothing to show or restore later),
+    // the slot frees and the job reopens for another client.
     const data = randomBytesOf(MiB, 133);
     const { cid, manifest } = await provider.importBuffer(data, { name: 'released.bin' });
     host.blobs.set(cid, data);
@@ -264,12 +269,102 @@ describe('storage job endpoint checks', async () => {
     const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
     await user.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
     await user.json(`/v1/services/storage/assignments/${assignment.id}/release`, { method: 'POST' });
-    assert.equal(holderOf(assignment.id).status, 'released');
+
+    assert.equal(
+      provider.service.assignmentsForAdmin().some((entry) => entry.id === assignment.id),
+      false,
+      'the released assignment is gone from the book'
+    );
+    assert.equal(jobState(job.id).reopened, 1, 'the job reopens for another client');
+    assert.equal(jobState(job.id).holders, 0);
+    const result = await provider.testStorageJob(job.id, assignment.accountId);
+    assert.equal(result.error, 'That user is not part of this job', 'there is no holder left to test');
+  });
+
+  /** One content, one job, one holder whose endpoints are offered in the given order. */
+  const withTwoUrls = async (name: string, order: ('dead' | 'good')[]) => {
+    const data = randomBytesOf(MiB, name.length * 11);
+    const { cid, manifest } = await provider.importBuffer(data, { name });
+    const job = provider.service.createJob({ cid, chunks: manifest.chunks, replicas: 1, durationSeconds: 3600, rewards: { upfront: 0, perRetrieval: 0, completion: 0 } });
+    const user = clientFor(provider.url(), 'identity');
+    for (const kind of order) await user.json('/v1/content-urls', { body: { cid, url: kind === 'dead' ? deadUrl(cid) : goodUrl(cid) } });
+    await user.json(`/v1/services/storage/offers/${job.id}/accept`, { method: 'POST' });
+    const assignment = provider.service.assignmentsForAdmin().find((entry) => entry.jobId === job.id)!;
+    await user.json(`/v1/services/storage/assignments/${assignment.id}/ready`, { method: 'POST' });
+    return { cid, data, job, assignment };
+  };
+  /** The URL records of one account, in the order the node keeps them. */
+  const urlRecords = (account: string) =>
+    Object.values(
+      (provider as unknown as { contentUrls: { data: { items: Record<string, { id: string; account: string; url?: string; fails?: number; lastOutcome?: string }> } } }).contentUrls.data.items
+    ).filter((record) => record.account === account);
+  /** The links the admin content-details route reports for a content (what the console reads). */
+  const detailLinks = async (cid: string) => {
+    const details = await admin<{ jobs: { holders: { links: { id: string; url?: string; fails?: number; lastOutcome?: string }[] }[] }[] }>(
+      provider.url(),
+      `/v1/admin/content/${encodeURIComponent(cid)}`
+    );
+    return details.jobs.flatMap((entry) => entry.holders.flatMap((holder) => holder.links));
+  };
+
+  it('reports per-URL outcomes [failed, success] when the dead URL is tried before the working one', async () => {
+    // Both URLs are offered while the content is not up yet — a fresh offer is never a
+    // strike, so no row is preferred over the other and the try order is the offer order.
+    const { cid, data, job, assignment } = await withTwoUrls('dead-first.bin', ['dead', 'good']);
+    const first = await provider.testStorageJob(job.id, assignment.accountId);
+    assert.deepEqual(first.links?.map((entry) => entry.outcome), ['failed', 'failed'], 'down URLs are reported as failed, not skipped');
+
+    // The content comes up: the run fails on the dead URL and serves from the second.
+    host.blobs.set(cid, data);
+    const second = await provider.testStorageJob(job.id, assignment.accountId);
+    assert.deepEqual(second.links?.map((entry) => entry.outcome), ['failed', 'success']);
+    // Every outcome names the URL record it is about, in the order the run tried them.
+    const byUrl = new Map(urlRecords(assignment.accountId).map((record) => [record.url, record.id]));
+    assert.equal(second.links?.[0].id, byUrl.get(deadUrl(cid)), 'the failed outcome points at the dead URL');
+    assert.equal(second.links?.[1].id, byUrl.get(goodUrl(cid)), 'the success outcome points at the serving URL');
+    // The outcomes are kept on the records too, so the rows keep their tags after a reload.
+    const persisted = new Map(urlRecords(assignment.accountId).map((record) => [record.url, record.lastOutcome]));
+    assert.equal(persisted.get(deadUrl(cid)), 'failed');
+    assert.equal(persisted.get(goodUrl(cid)), 'success');
+  });
+
+  it('reports per-URL outcomes [success, not tested] when the first URL serves and the second is never reached', async () => {
+    const { cid, data, job, assignment } = await withTwoUrls('good-first.bin', ['good', 'dead']);
+    host.blobs.set(cid, data);
+    const result = await provider.testStorageJob(job.id, assignment.accountId);
+    assert.deepEqual(result.links?.map((entry) => entry.outcome), ['success', 'not tested'], 'an earlier serving URL leaves the rows behind it untried');
+    const byUrl = new Map(urlRecords(assignment.accountId).map((record) => [record.url, record.id]));
+    assert.equal(result.links?.[0].id, byUrl.get(goodUrl(cid)));
+    assert.equal(result.links?.[1].id, byUrl.get(deadUrl(cid)), 'the untried outcome points at the URL behind the serving one');
+    // The admin content-details payload carries the same outcomes to the console — what
+    // the rows show after the reload that follows a test.
+    const payload = new Map((await detailLinks(cid)).map((link) => [link.id, link.lastOutcome]));
+    assert.equal(payload.get(byUrl.get(goodUrl(cid))!), 'success');
+    assert.equal(payload.get(byUrl.get(deadUrl(cid))!), 'not tested');
+  });
+
+  it('keeps the fail history of the rows a success never reached', async () => {
+    // The dead URL has a history from earlier checks. The run serves from the good one
+    // and never reaches the dead one: the history must stay — the rows the run skipped
+    // are "not tested", not freshly failed and not wiped clean either.
+    const { cid, data, job, assignment } = await withTwoUrls('history.bin', ['dead', 'good']);
+    host.blobs.set(cid, data);
+    const before = new Map((await detailLinks(cid)).map((link) => [link.url, link]));
+    await admin(provider.url(), `/v1/admin/content/${encodeURIComponent(cid)}/verify`, {
+      body: { url: deadUrl(cid), linkId: before.get(deadUrl(cid))!.id },
+    });
+    assert.equal(before.get(deadUrl(cid))!.lastOutcome, undefined, 'the payload is read before the check');
+    const struck = new Map(urlRecords(assignment.accountId).map((record) => [record.url, record]));
+    assert.equal(struck.get(deadUrl(cid))!.lastOutcome, 'failed', 'the single-URL check records its own outcome');
+    const history = struck.get(deadUrl(cid))!.fails ?? 0;
+    assert.ok(history > 0, 'the dead URL has a failure history to keep');
 
     const result = await provider.testStorageJob(job.id, assignment.accountId);
-    assert.equal(result.ok, true, 'the working URL is what decides, not the row status');
-    assert.deepEqual(result.holders, { succeeded: 1, total: 1 });
-    assert.equal(holderOf(assignment.id).status, 'active', 'the passing check brings the copy back');
+    assert.deepEqual(result.links?.map((entry) => entry.outcome), ['success', 'not tested']);
+    const after = new Map(urlRecords(assignment.accountId).map((record) => [record.url, record]));
+    assert.equal(after.get(deadUrl(cid))!.lastOutcome, 'not tested', 'the row the run never reached reads "not tested"');
+    assert.equal(after.get(deadUrl(cid))!.fails, history, 'its fail history is not wiped by a success elsewhere');
+    assert.equal(after.get(goodUrl(cid))!.lastOutcome, 'success');
   });
 });
 

@@ -626,6 +626,8 @@ export interface PublishRequest {
   providers: string[];
   algorithms: string[];
   thumbnail?: string;
+  /** Free-form content data to keep on the entry (short string pairs). */
+  data?: Record<string, string>;
   /** Sign as the creator (your public key) — off publishes without a creator identity. */
   sign: boolean;
   /**

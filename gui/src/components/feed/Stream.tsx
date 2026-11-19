@@ -156,7 +156,7 @@ export function StreamLayout({ items, page, ipfsGateway }: { items: FeedItem[]; 
   const height = Math.min(100, Math.max(10, Number(page.options.imageHeight) || 72));
   return (
     <div
-      className={`stream stream-${page.options.size} ${items.some((item) => item.format === 'image') ? 'stream-images' : ''}`}
+      className={`stream stream-${page.options.size} ${items.some((item) => item.format === 'image' || item.format === 'image-list') ? 'stream-images' : ''}`}
       style={{ '--image-height': `${height}vh` } as React.CSSProperties}
     >
       {items.map((item) => (

@@ -26,6 +26,8 @@ import {
 } from '../shared/node/http.js';
 import { log } from '../shared/node/log.js';
 import { NodeClient } from '../shared/nodeclient.js';
+import { RemovalQueue } from './removals.js';
+import { registerRemovalRoutes } from './removals-routes.js';
 import { parseNodeRef } from '../shared/noderef.js';
 import type {
   ProviderInfo,
@@ -87,6 +89,18 @@ export interface ProviderConfig extends BaseConfig {
   };
   /** Publish the list of hosted content at /v1/catalog (lets algorithm nodes discover it). */
   catalog: boolean;
+  /**
+   * Content pushed here from outside (client uploads, peer pushes) waits for the
+   * operator's review before it is listed, served or given a storage job. Off accepts
+   * pushed content immediately, like operator imports always do. `syncMinutes` runs
+   * the algorithm-node sync over the queue that often (0 = only by hand).
+   */
+  review: { enabled: boolean; syncMinutes: number };
+  /**
+   * Trusted algorithm search nodes: content pushed here that one of them already
+   * lists is accepted automatically (autoAccept), because it has been reviewed there.
+   */
+  algorithmPeers: { refs: string[]; autoAccept: boolean };
   storageService: StorageServiceConfig;
   /** Exchanging content bytes with other content provider nodes. */
   peering: {
@@ -169,6 +183,8 @@ export function providerDefaults(): ProviderConfig {
       usePeers: true,
     },
     catalog: true,
+    review: { enabled: true, syncMinutes: 0 },
+    algorithmPeers: { refs: [], autoAccept: true },
     storageService: {
       enabled: true,
       retrievalIntervalSeconds: 0,
@@ -221,6 +237,9 @@ interface EndpointCheck {
   error?: string;
 }
 
+/** One of an account's content URLs and what one run did with it, in the order tried. */
+type LinkOutcome = { id: string; outcome: 'success' | 'failed' | 'not tested' };
+
 /** What one storage-job endpoint test found across its users' endpoints. */
 interface JobTestResult {
   ok: boolean;
@@ -234,6 +253,11 @@ interface JobTestResult {
   checked: number;
   total: number;
   error?: string;
+  /**
+   * Every content URL of the tested holders, in try order: the row that served, the rows
+   * tried before it (failed), and the rows an earlier success left untried (not tested).
+   */
+  links?: LinkOutcome[];
 }
 
 /** A suggestion with the same content and the same value as an earlier one is not new. */
@@ -252,6 +276,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   readonly service: StorageService;
   /** Content storage tiers: which copies live where, and for how long. */
   readonly tiers: TierManager;
+  /** Content removal requests waiting for the operator's delete review. */
+  readonly removals: RemovalQueue;
   private uploads: JsonFile<{ uploads: Record<string, PendingUpload> }>;
   /** Content ids clients reported; the node learns what is out there from them. */
   private reports: JsonFile<{ ids: Record<string, { at: string; account: string }> }>;
@@ -266,6 +292,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   private tierTimer: NodeJS.Timeout;
   private endpointTimer: NodeJS.Timeout;
   private syncTimer: NodeJS.Timeout | null = null;
+  /** The automatic review sync (review.syncMinutes; 0 = only the manual button). */
+  private reviewSyncTimer: NodeJS.Timeout;
+  private lastReviewSyncAt = Date.now();
+  private reviewSyncing = false;
+  /** One pending re-check ladder per queued content, and its unref'd timers. */
+  private reviewRechecks = new Set<string>();
+  private reviewRecheckTimers = new Set<NodeJS.Timeout>();
   /** Clients for the targets of manual syncs, kept per ref so a long sync reuses sessions. */
   private adHocClients = new Map<string, NodeClient>();
 
@@ -304,6 +337,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       },
       this.traces
     );
+    this.removals = new RemovalQueue(this.path('removals.json'));
     this.store = new ContentStore({
       indexPath: this.path('content-index.json'),
       backends: () => this.backends(),
@@ -319,11 +353,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     this.gcTimer.unref();
     this.tiers = new TierManager(this.path('tiers.json'), () => this.config.tiers, this.ledger, {
       releaseBytes: (cid) => this.store.releaseContentBytes(cid),
-      deleteContent: (cid) => {
-        // A content without local memory keeps no jobs either.
-        for (const job of this.service.jobs()) if (job.cid === cid) this.service.deleteJob(job.id);
-        return this.store.deleteContent(cid);
-      },
+      deleteContent: (cid) => this.removeContent(cid),
       holders: (cid) => this.service.holdersOf(cid),
       bytesOf: (cid) => this.store.getContent(cid)?.size ?? 0,
       // A tier change always reshapes the content's storage job (created, resized, deleted).
@@ -337,6 +367,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     this.tierTimer.unref();
     // Periodic endpoint tests for the jobs that want them (never client polling).
     this.endpointTimer = setInterval(() => void this.runEndpointTests().catch((error) => log.warn('endpoint tests:', error)), 30_000);
+    this.reviewSyncTimer = setInterval(() => void this.runReviewSync().catch((error) => log.warn('review sync:', error)), 30_000);
+    this.reviewSyncTimer.unref();
     this.endpointTimer.unref();
   }
 
@@ -423,6 +455,13 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   protected validateConfig(config: ProviderConfig): void {
+    if (typeof config.review?.enabled !== 'boolean') throw badRequest('review.enabled must be true or false');
+    const syncMinutes = Number(config.review?.syncMinutes);
+    if (!Number.isFinite(syncMinutes) || syncMinutes < 0) throw badRequest('review.syncMinutes must be zero or a positive number of minutes');
+    for (const ref of config.algorithmPeers?.refs ?? []) {
+      const parsed = parseNodeRef(String(ref));
+      if (!parsed || parsed.type !== 'algorithm') throw badRequest(`algorithmPeers: not an algorithm search node reference: ${String(ref).slice(0, 80)}`);
+    }
     const ids = new Set<string>();
     for (const backend of config.storage.backends) {
       if (!backend.id || ids.has(backend.id)) throw badRequest('Storage backends need unique ids');
@@ -972,30 +1011,46 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     let total = 0;
     let servedUrls = 0;
     let succeeded = 0;
+    const linkOutcomes: LinkOutcome[] = [];
     for (const holder of holders) {
       const records = Object.values(this.contentUrls.data.items)
         .filter((record) => record.account === holder.accountId && Boolean(record.url ?? record.baseUrl))
         .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0) || (b.lastOkAt ?? 0) - (a.lastOkAt ?? 0));
       total += records.length;
       let served: { url: string; chunks?: { matched: number; total: number } } | null = null;
+      const outcomes: LinkOutcome[] = [];
       for (const record of records) {
         checked++;
         const target = record.url ?? `${String(record.baseUrl).replace(/\/+$/, '')}/${encodeURIComponent(cid)}`;
         const verify = await this.verifyEndpoint(cid, target, job.maxLatencyMs ?? 30_000);
         if (verify.ok) {
           record.lastOkAt = Date.now();
+          record.lastOutcome = 'success';
           served = { url: verify.url, chunks: verify.chunks };
+          outcomes.push({ id: record.id, outcome: 'success' });
           break;
         }
         record.fails = (record.fails ?? 0) + 1;
+        record.lastOutcome = 'failed';
         this.contentUrls.changed();
+        outcomes.push({ id: record.id, outcome: 'failed' });
       }
+      const tried = records.slice(0, outcomes.length);
+      // The rows after the one that served were never reached: saying so keeps them from
+      // looking like failures next to it. The outcome is kept on the record itself so it
+      // survives the reload the admin console does after a test.
+      for (const record of records.slice(outcomes.length)) {
+        record.lastOutcome = 'not tested';
+        outcomes.push({ id: record.id, outcome: 'not tested' });
+      }
+      this.contentUrls.changed();
+      linkOutcomes.push(...outcomes);
       if (served) {
         succeeded++;
         servedUrls++;
-        // A success wipes the whole row's failure state — the stale `fails` of the
-        // other endpoints must not keep it looking failed after a success.
-        for (const record of records) record.fails = 0;
+        // A success wipes the failure history of the rows this run actually checked — the
+        // rows it never reached keep theirs, so the history stays honest.
+        for (const record of tried) record.fails = 0;
         this.contentUrls.changed();
         // The holder counts again (streak reset, a lost row restored) and the upfront
         // reward is paid if it was still owed.
@@ -1010,6 +1065,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
             urls: { served: 1, checked },
             checked,
             total,
+            links: outcomes,
           });
         }
         continue;
@@ -1026,6 +1082,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       urls: { served: servedUrls, checked },
       checked,
       total,
+      links: linkOutcomes,
       // A partial success is a success: only a run where nothing served is an error.
       error: succeeded > 0 ? undefined : onlyAccount ? `No endpoint of ${onlyAccount} served the content (${checked} tried)` : 'No endpoint served the content',
     });
@@ -1326,10 +1383,17 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
 
   protected registerRoutes(): void {
     const router = this.router;
+    registerRemovalRoutes(this);
 
     router.get('/v1/content/:cid', async (ctx) => {
       const cid = ctx.params.cid;
-      const manifest = await this.getManifest(cid);
+      // Content waiting for review is invisible: treated exactly like content this
+      // node never heard of (links and 404 included). Someone wants it now though —
+      // worth asking the trusted algorithm nodes once more, since their listing may
+      // have landed after the push (the usual order is upload first, submit second).
+      const pending = this.store.isPending(cid);
+      if (pending) this.autoAcceptReviewed(cid);
+      const manifest = pending ? undefined : await this.getManifest(cid);
       if (!manifest) {
         // Feature: this node does not hold the content, but a client's link may. Send the
         // link instead so the client can fetch the bytes and check the cid itself.
@@ -1356,7 +1420,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     router.post('/v1/has', async (ctx) => {
       const body = await readJson<{ ids?: string[] }>(ctx.req);
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
-      return { has: Object.fromEntries(ids.map((id) => [id, Boolean(this.store.getContent(String(id)))])) };
+      // Pending-review content is not advertised: it answers like unknown content.
+      return { has: Object.fromEntries(ids.map((id) => [id, Boolean(this.store.getContent(String(id))) && !this.store.isPending(String(id))])) };
     });
 
     // ---- developer builds only: a static data host for testing the URL flows locally.
@@ -1558,7 +1623,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       this.requirePeer(ctx, 'send');
       const body = await readJson<{ ids?: string[] }>(ctx.req);
       const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : [];
-      return { has: Object.fromEntries(ids.map((id) => [String(id), this.store.hasChunk(String(id))])) };
+      // Bytes that only pending-review content claims are not advertised to peers.
+      return { has: Object.fromEntries(ids.map((id) => [String(id), this.store.hasChunk(String(id)) && this.store.servesChunk(String(id))])) };
     });
 
     router.get('/v1/peers/chunks/:id', async (ctx) => {
@@ -1609,20 +1675,25 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (contentIdOf(manifest) !== cid) throw badRequest('The manifest does not match the content id');
       const complete = manifest.chunks.every((chunk) => this.store.hasChunk(chunk.id));
       const isNew = !this.store.getContent(cid);
+      // Pushed content waits for the operator's review, like client uploads; the
+      // accept route (or a disabled queue) makes it live and gives it its job.
+      const review = this.config.review.enabled ? 'pending' : undefined;
       if (complete) {
-        await this.store.addContent(manifest, peer.id);
+        await this.store.addContent(manifest, peer.id, review);
         // New content earns its storage job once, like an upload or an import (a repeat
         // push of the same manifest must not open a second job).
         if (isNew) this.autoJob(cid, manifest);
       } else {
-        this.store.adopt(manifest, peer.id);
+        this.store.adopt(manifest, peer.id, review);
       }
-      return { ok: true, cid };
+      // A trusted algorithm node's listing can clear the queue on its own.
+      this.autoAcceptReviewed(cid);
+      return { ok: true, cid, review: this.store.isPending(cid) ? 'pending' : 'accepted' };
     });
 
     router.get('/v1/quote/:cid', (ctx) => {
       const cid = ctx.params.cid;
-      const content = this.store.getContent(cid);
+      const content = this.store.isPending(cid) ? undefined : this.store.getContent(cid);
       if (!content) throw notFound('This node does not have the content');
       const account = this.auth.account(ctx);
       const freeLeft = account
@@ -1644,7 +1715,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       if (!isChunkId(id)) throw badRequest('Not a chunk id');
       const cid = ctx.query.get('cid') ?? undefined;
       const record = this.store.chunkRecord(id);
-      if (!record) throw notFound('This node does not have the chunk');
+      // Bytes that only pending-review content claims are not served — as unknown.
+      if (!record || !this.store.servesChunk(id)) throw notFound('This node does not have the chunk');
       const account = this.auth.account(ctx);
       // Check the price before reading, so an account without credits costs no backend traffic.
       const price = this.chunkPrice(record.size, cid);
@@ -1715,7 +1787,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
 
     router.post('/v1/uploads/:cid/commit', async (ctx) => {
       const cid = ctx.params.cid;
-      if (this.store.getContent(cid)) return { cid, status: 'ready' };
+      if (this.store.getContent(cid)) return { cid, status: this.store.isPending(cid) ? 'pending' : 'ready' };
       const upload = this.pendingUpload(ctx, cid);
       const missing = upload.manifest.chunks.filter((chunk) => !this.store.hasChunk(chunk.id)).map((chunk) => chunk.id);
       if (missing.length) throw new HttpError(409, 'incomplete', `${missing.length} chunks are still missing`, { missing });
@@ -1724,15 +1796,20 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         const cost = Math.ceil((upload.manifest.size / MiB) * settings.perMiB);
         if (cost > 0) this.ledger.debit(upload.uploader, cost, 'upload', cid);
       }
-      await this.store.addContent(upload.manifest, upload.uploader);
+      // Pushed content waits for the operator's review; autoJob below skips it until
+      // the accept route runs it. Operator imports never land here.
+      await this.store.addContent(upload.manifest, upload.uploader, this.config.review.enabled ? 'pending' : undefined);
       delete this.uploads.data.uploads[cid];
       this.uploads.changed();
       this.autoJob(cid, upload.manifest);
+      // A trusted algorithm node's listing can clear the queue on its own — off the
+      // response path, so a slow lookup never delays the upload.
+      this.autoAcceptReviewed(cid);
       this.traces.trace('basic', 'provider.node', 'upload committed', {
-        data: { cid: cid.slice(0, 16), chunks: upload.manifest.chunks.length, bytes: upload.manifest.size, uploader: upload.uploader.slice(0, 16) },
+        data: { cid: cid.slice(0, 16), chunks: upload.manifest.chunks.length, bytes: upload.manifest.size, uploader: upload.uploader.slice(0, 16), review: this.store.isPending(cid) },
       });
-      log.info(`Stored ${upload.manifest.name} (${cid.slice(0, 16)}…, ${(upload.manifest.size / MiB).toFixed(1)} MiB)`);
-      return { cid, status: 'ready' };
+      if (!this.options.quietLogs) log.info(`Stored ${upload.manifest.name} (${cid.slice(0, 16)}…, ${(upload.manifest.size / MiB).toFixed(1)} MiB)`);
+      return { cid, status: this.store.isPending(cid) ? 'pending' : 'ready' };
     });
 
     // .vvsh verifiable video streams: the file itself is metadata and the tree root. Every
@@ -2000,6 +2077,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   private autoJob(cid: string, manifest: Manifest): void {
+    // Content waiting for review earns no job — the accept route runs this again.
+    if (this.store.isPending(cid)) return;
     // With automatic tiers on, the content's tier decides the storage job (syncTierJob
     // below runs when the tier assignment lands) — no second, plan-less job.
     const assigned = this.config.tiers.auto
@@ -2035,6 +2114,8 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
    * The job's replicas are the copies the plan wants (local media + URL backups).
    */
   private syncTierJob(cid: string): void {
+    // Content waiting for review has no job to follow a tier yet.
+    if (this.store.isPending(cid)) return;
     // A tier change replaces the content's job wholesale — the old terms end and the
     // plan's own job opens (or nothing, when no tier wants copies anymore).
     for (const job of this.service.jobs()) {
@@ -2182,6 +2263,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
         );
       return { items: matched.slice(offset, offset + limit), total: matched.length, stats: this.store.stats() };
     });
+    // The review queue: content pushed here from outside, waiting for the operator.
+    // Registered before /v1/admin/content/:cid so the static path wins the match.
+    router.get('/v1/admin/content/review', (ctx) => {
+      this.requireAdmin(ctx);
+      const offset = Math.max(0, Number(ctx.query.get('offset') ?? 0));
+      const limit = Math.min(500, Math.max(1, Number(ctx.query.get('limit') ?? 100)));
+      const pending = this.store.pendingContent();
+      return { items: pending.slice(offset, offset + limit), total: pending.length };
+    });
     // Everything the node knows about one content, for the dashboard's details modal.
     router.get('/v1/admin/content/:cid', (ctx) => {
       this.requireAdmin(ctx);
@@ -2242,13 +2332,14 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
                 links: Object.values(this.contentUrls.data.items)
                   .filter((record) => record.account === assignment.accountId)
                   .sort((a, b) => (a.fails ?? 0) - (b.fails ?? 0))
-                  .map(({ id, cid: linkCid, url, baseUrl, status, fails }) => ({
+                  .map(({ id, cid: linkCid, url, baseUrl, status, fails, lastOutcome }) => ({
                     id,
                     cid: linkCid,
                     url,
                     baseUrl,
                     status,
                     fails: fails ?? 0,
+                    lastOutcome,
                   })),
               })),
           })),
@@ -2391,8 +2482,58 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     });
     router.delete('/v1/admin/content/:cid', async (ctx) => {
       this.requireAdmin(ctx);
-      if (!(await this.store.deleteContent(ctx.params.cid))) throw notFound('No such content');
+      // Deleting content deletes its storage jobs with it (see removeContent).
+      if (!(await this.removeContent(ctx.params.cid))) throw notFound('No such content');
       return { ok: true };
+    });
+    // The review queue's verdicts: accept publishes the content (it becomes visible,
+    // servable and earns its storage job), reject deletes it with everything under it.
+    router.post('/v1/admin/content/:cid/accept', async (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      if (!(await this.publishReviewed(cid))) throw notFound('No such content');
+      return { record: this.store.getContent(cid) };
+    });
+    router.post('/v1/admin/content/:cid/reject', async (ctx) => {
+      this.requireAdmin(ctx);
+      const cid = String(ctx.params.cid).split('~')[0];
+      const body = await readJson<{ reason?: string; note?: string }>(ctx.req).catch(() => ({}) as { reason?: string; note?: string });
+      const reason = String(body.reason ?? body.note ?? '').slice(0, 500) || undefined;
+      if (!(await this.removeContent(cid))) throw notFound('No such content');
+      this.traces.trace('basic', 'provider.node', 'content rejected from review', {
+        message: reason,
+        data: { cid: cid.slice(0, 16) },
+      });
+      if (!this.options.quietLogs) log.info(`Rejected pushed content ${cid.slice(0, 16)}…${reason ? `: ${reason}` : ''}`);
+      return { ok: true, rejected: true, reason };
+    });
+    // One review-sync round by hand (the Review page's "Check algorithm nodes"): ask
+    // the trusted algorithm nodes about everything queued and accept whatever any of
+    // them lists — the same run the periodic job repeats every review.syncMinutes.
+    router.post('/v1/admin/content/review/sync', async (ctx) => {
+      this.requireAdmin(ctx);
+      return this.syncReviewedQueue();
+    });
+    // Trusted algorithm search nodes: what they list already reviewed content, so the
+    // queue accepts it on its own (see autoAcceptReviewed). Each entry is probed on
+    // read, so the panel shows what is actually reachable.
+    router.get('/v1/admin/algorithms', async (ctx) => {
+      this.requireAdmin(ctx);
+      return { refs: this.config.algorithmPeers.refs, autoAccept: this.config.algorithmPeers.autoAccept, nodes: await this.probeAlgorithmPeers() };
+    });
+    router.put('/v1/admin/algorithms', async (ctx) => {
+      this.requireAdmin(ctx);
+      const body = await readJson<{ refs?: string[]; autoAccept?: boolean }>(ctx.req);
+      const refs = body.refs === undefined ? this.config.algorithmPeers.refs : body.refs.map((entry) => String(entry).trim()).filter(Boolean);
+      for (const ref of refs) {
+        const parsed = parseNodeRef(ref);
+        if (!parsed || parsed.type !== 'algorithm') throw badRequest(`Not an algorithm search node reference: ${ref.slice(0, 80)}`);
+      }
+      const autoAccept = body.autoAccept ?? this.config.algorithmPeers.autoAccept;
+      this.configFile.data.algorithmPeers = { refs, autoAccept };
+      this.configFile.changed();
+      this.traces.trace('basic', 'provider.node', 'algorithm peers updated', { data: { refs: refs.length, autoAccept } });
+      return { refs, autoAccept, nodes: await this.probeAlgorithmPeers() };
     });
     router.post('/v1/admin/content/import', async (ctx) => {
       this.requireAdmin(ctx);
@@ -2529,6 +2670,7 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const record = body.linkId ? this.contentUrls.data.items[String(body.linkId)] : undefined;
       if (record) {
         record.fails = verify.ok ? 0 : (record.fails ?? 0) + 1;
+        record.lastOutcome = verify.ok ? 'success' : 'failed';
         if (verify.ok) record.lastOkAt = Date.now();
         this.contentUrls.changed();
         // The URL belongs to a holder of a job for this content, so the check also decides
@@ -2614,6 +2756,176 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
     });
   }
 
+  /**
+   * Deletes a content everywhere it matters: its storage jobs (with their assignments)
+   * go first — deleting content must never leave orphaned jobs behind — then the
+   * content and its chunks.
+   */
+  /** Removes content with its storage jobs and bytes — the operator's and the creator's way. */
+  async removeContent(cid: string): Promise<boolean> {
+    for (const job of this.service.jobs()) if (job.cid === cid) this.service.deleteJob(job.id);
+    this.service.flush();
+    return this.store.deleteContent(cid);
+  }
+
+  /** The client this node talks to one trusted algorithm node with. */
+  private algorithmPeerClient(parsed: { id?: string; url: string }): NodeClient {
+    return new NodeClient({
+      url: parsed.url,
+      expectedId: parsed.id,
+      expectedType: 'algorithm',
+      auth: 'identity',
+      identity: this.identity,
+      transport: () => this.transport(parsed.url),
+    });
+  }
+
+  /**
+   * The accept path of the review queue, shared by the operator's verdict and the
+   * automatic one: the content becomes visible and servable and earns its storage job.
+   */
+  private async publishReviewed(cid: string): Promise<boolean> {
+    const record = this.store.acceptContent(cid);
+    if (!record) return false;
+    const manifest = await this.getManifest(cid);
+    if (manifest) this.autoJob(cid, manifest);
+    this.traces.trace('basic', 'provider.node', 'content accepted from review', {
+      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size },
+    });
+    return true;
+  }
+
+  /**
+   * Asks the trusted algorithm nodes about one pushed content: a listing there is the
+   * review, so the content is accepted here at once (the same publish path as the
+   * operator's Accept). Never throws — a broken or unreachable node vouches for
+   * nothing — and reports what the checks found.
+   */
+  private async reviewWithAlgorithms(cid: string): Promise<{ checks: number; accepted: boolean; errors: number }> {
+    let checks = 0;
+    let errors = 0;
+    if (!this.store.isPending(cid)) return { checks, accepted: false, errors };
+    for (const ref of this.config.algorithmPeers?.refs ?? []) {
+      const parsed = parseNodeRef(ref);
+      if (!parsed || parsed.type !== 'algorithm') continue;
+      try {
+        const answer = await this.algorithmPeerClient(parsed).json<{ items: { id: string; status: string }[] }>('/v1/lookup', {
+          body: { ids: [cid] },
+          timeoutMs: 15000,
+        });
+        checks++;
+        const listed = (answer.items ?? []).some((item) => item.id === cid && item.status === 'listed');
+        this.traces.trace('dependency', 'provider.node', 'algorithm peer lookup', {
+          message: listed ? 'listed — content accepted automatically' : 'not listed',
+          data: { peer: parsed.id?.slice(0, 16), cid: cid.slice(0, 16), listed },
+        });
+        if (listed) {
+          await this.publishReviewed(cid);
+          return { checks, accepted: true, errors };
+        }
+      } catch (error) {
+        errors++;
+        // Unreachable or broken accepts nothing: the push itself already succeeded.
+        this.traces.trace('error', 'provider.node', 'algorithm peer lookup failed', {
+          error: (error as Error).message,
+          data: { peer: parsed.id?.slice(0, 16), cid: cid.slice(0, 16) },
+        });
+      }
+    }
+    return { checks, accepted: false, errors };
+  }
+
+  /**
+   * One review-sync round — what the "Check algorithm nodes" button and the periodic
+   * job both run: every queued content is asked of the trusted algorithm nodes, and
+   * whatever one of them lists is accepted.
+   */
+  async syncReviewedQueue(): Promise<{ checked: number; accepted: number; errors: number }> {
+    let checked = 0;
+    let accepted = 0;
+    let errors = 0;
+    for (const record of this.store.pendingContent()) {
+      const result = await this.reviewWithAlgorithms(record.cid);
+      checked++;
+      if (result.accepted) accepted++;
+      errors += result.errors;
+    }
+    this.traces.trace('basic', 'provider.node', 'review sync', { data: { checked, accepted, errors } });
+    return { checked, accepted, errors };
+  }
+
+  /**
+   * Content pushed here that a trusted algorithm node already lists needs no human
+   * eyes — the listing there is the review. Runs after the push response goes out, so
+   * a slow lookup never delays the push. The world usually catches up after the push
+   * (upload first, submit to the algorithm nodes second), so a content nothing
+   * vouches for yet is re-checked a few times before the queue keeps it.
+   */
+  private autoAcceptReviewed(cid: string): void {
+    const peers = this.config.algorithmPeers;
+    if (!this.config.review.enabled || !peers?.autoAccept || !peers.refs?.length) return;
+    void this.reviewWithAlgorithms(cid).then((result) => {
+      if (!result.accepted) this.recheckReviewedLater(cid, 0);
+    });
+  }
+
+  /**
+   * Re-checks one queued content after its push (45 seconds, then 5 minutes): the
+   * listing on a trusted algorithm node can land any moment after the upload — and
+   * anything beyond that is what the automatic sync and the manual button are for.
+   */
+  private recheckReviewedLater(cid: string, step: number): void {
+    const delays = [45_000, 300_000];
+    if (step >= delays.length || this.reviewRechecks.has(cid)) return;
+    this.reviewRechecks.add(cid);
+    const timer = setTimeout(() => {
+      this.reviewRechecks.delete(cid);
+      void this.reviewWithAlgorithms(cid).then((result) => {
+        if (!result.accepted) this.recheckReviewedLater(cid, step + 1);
+      });
+    }, delays[step]);
+    timer.unref();
+    this.reviewRecheckTimers.add(timer);
+  }
+
+  /**
+   * The automatic review sync: every review.syncMinutes minutes (0 = only the manual
+   * button), the queue is run through the algorithm nodes exactly like a hand sync.
+   * The timer is cheap and always on — the minutes themselves decide whether anything
+   * happens, so a config change takes effect without rewiring anything.
+   */
+  private async runReviewSync(): Promise<void> {
+    const minutes = Number(this.config.review.syncMinutes) || 0;
+    if (minutes <= 0 || this.reviewSyncing) return;
+    if (Date.now() - this.lastReviewSyncAt < minutes * 60_000) return;
+    this.reviewSyncing = true;
+    this.lastReviewSyncAt = Date.now();
+    try {
+      await this.syncReviewedQueue();
+    } catch (error) {
+      log.warn('review sync:', error);
+    } finally {
+      this.reviewSyncing = false;
+    }
+  }
+
+  /** The trusted algorithm nodes, each probed once: name, online, latency or error. */
+  private async probeAlgorithmPeers(): Promise<{ ref: string; id?: string; name?: string; online: boolean; ms: number; error?: string }[]> {
+    return Promise.all(
+      (this.config.algorithmPeers?.refs ?? []).map(async (ref) => {
+        const started = Date.now();
+        try {
+          const parsed = parseNodeRef(ref);
+          if (!parsed || parsed.type !== 'algorithm') throw new Error('Not an algorithm search node reference');
+          const info = await this.algorithmPeerClient(parsed).fetchInfo();
+          return { ref, id: parsed.id, name: info.name, online: true, ms: Date.now() - started };
+        } catch (error) {
+          return { ref, online: false, ms: Date.now() - started, error: (error as Error).message };
+        }
+      })
+    );
+  }
+
   /** Adds a file from this machine's disk as operator content. */
   async importFile(
     path: string,
@@ -2663,7 +2975,12 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   }
 
   protected adminStatus(): Record<string, unknown> {
-    return { content: this.store.stats(), storageService: this.service.stats() };
+    return {
+      content: this.store.stats(),
+      storageService: this.service.stats(),
+      // The review queue's size drives the console's badge.
+      pending: { reviewContent: this.store.pendingContent().length, removals: this.removals.pending().length },
+    };
   }
 
   async start(): Promise<void> {
@@ -2691,6 +3008,10 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
   async stop(): Promise<void> {
     this.stopSync();
     clearInterval(this.gcTimer);
+    clearInterval(this.reviewSyncTimer);
+    for (const timer of this.reviewRecheckTimers) clearTimeout(timer);
+    this.reviewRecheckTimers.clear();
+    this.reviewRechecks.clear();
     this.service.stop();
     await super.stop();
   }

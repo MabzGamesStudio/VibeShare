@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isChunkId } from '../shared/sources.js';
@@ -76,6 +76,21 @@ export class ChunkCache implements ChunkStore {
 
   usage(): { bytes: number; chunks: number } {
     return { bytes: this.used, chunks: this.entries.size };
+  }
+
+  /** Drops the given chunks (one content's parts) and returns how many were kept here. */
+  drop(ids: string[]): number {
+    let dropped = 0;
+    for (const id of ids) {
+      const size = this.entries.get(id);
+      if (size === undefined) continue;
+      this.entries.delete(id);
+      this.used -= size;
+      this.memory.delete(id);
+      if (this.dir) rmSync(join(this.dir, id), { force: true });
+      dropped++;
+    }
+    return dropped;
   }
 
   async clear(): Promise<void> {

@@ -31,6 +31,8 @@ export interface ContentUrlRecord {
   fails?: number;
   /** When the last successful check ran (endpoints that just worked move to the top). */
   lastOkAt?: number;
+  /** What the latest check of this endpoint found — kept across reloads, shown on the rows. */
+  lastOutcome?: 'success' | 'failed' | 'not tested';
   /**
    * For a base URL: the content ids it has actually served. A base URL is one address for
    * every content, so success is kept per content id — a copy of one content saying
@@ -46,6 +48,8 @@ export interface ContentLink {
 }
 
 export interface SubmissionRequest {
+  /** Free-form content data to keep on the entry once the submission is accepted. */
+  data?: Record<string, string>;
   id: string;
   title: string;
   /** Where the content lives outside VibeShare (a link or a platform source), when there is no content id. */
@@ -100,4 +104,38 @@ export interface CensoredWordsChange {
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
+}
+
+// ---------------------------------------------------------------------------
+// Content removal requests. A creator asking for their own content gets it deleted
+// at once; anyone else's ask is queued for the operator's review.
+
+/** What a client sends to POST /v1/removals: the content to remove and why. */
+export interface RemovalRequestInput {
+  /** A content id (`vs1…`) or a link id the node knows. */
+  id: string;
+  /** The requester's reason, shown to the operator reviewing the request. */
+  message?: string;
+}
+
+/** One queued removal request, waiting for the operator. */
+export interface RemovalRequest {
+  /** The request's own id (what the admin's approve/reject name). */
+  id: string;
+  /** The content the request is about, in the node's own id form. */
+  cid: string;
+  /** The account that asked. */
+  account: string;
+  message?: string;
+  at: string;
+  status: 'pending';
+}
+
+/** What POST /v1/removals answered: a creator's own content is deleted at once. */
+export type RemovalOutcome = { deleted: true } | { queued: true; request: RemovalRequest };
+
+/** One row of the admin's delete review: the request plus what the node knows of the content. */
+export interface RemovalRequestView extends RemovalRequest {
+  title?: string;
+  creator?: string;
 }

@@ -236,6 +236,7 @@ export async function startDemo(options: DemoOptions) {
   const provider = new ProviderNode({
     dataDir: join(dataDir, 'provider'),
     guiDir,
+    quietLogs: true,
     overrides: {
       host: '127.0.0.1',
       port: basePort + 1,
@@ -249,6 +250,7 @@ export async function startDemo(options: DemoOptions) {
   const algorithm = new AlgorithmNode({
     dataDir: join(dataDir, 'algorithm'),
     guiDir,
+    quietLogs: true,
     overrides: {
       host: '127.0.0.1',
       port: basePort + 2,
@@ -325,7 +327,7 @@ export async function startDemo(options: DemoOptions) {
   provider.flush();
   algorithm.flush();
 
-  const client = new ClientNode({ dataDir: join(dataDir, 'client'), port: basePort, guiDir, quietStorageNotes: true });
+  const client = new ClientNode({ dataDir: join(dataDir, 'client'), port: basePort, guiDir, quietStorageNotes: true, quietLogs: true });
   await client.start();
   if (!client.nodes.list().length) await client.nodes.add(`${algorithm.reference()}\n${provider.reference()}`);
   const vouchers = provider.payments.createVouchers(500, 2, 'demo');

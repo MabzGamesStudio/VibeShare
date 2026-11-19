@@ -352,7 +352,7 @@ export interface ContentDetailsData {
       earned: number;
       /** Consecutive failed checks since the last success (per user, not per URL). */
       failedChecks?: number;
-      links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string; fails?: number; location?: string }[];
+      links: { id: string; cid?: string; url?: string; baseUrl?: string; status: string; fails?: number; location?: string; lastOutcome?: TestOutcome }[];
     }[];
   }[];
   media?: { id: string; type: string; medium?: string; location?: string }[];
@@ -431,21 +431,31 @@ function StorageMediaRows({ data }: { data: ContentDetailsData }) {
   );
 }
 
+/** What the last job test of a user did with one of their URLs. */
+type TestOutcome = 'success' | 'failed' | 'not tested';
+
 /** One endpoint row of a user inside a storage job: status tag, url and its buttons. */
 function EndpointRow({
   cid,
   link,
   index,
   reload,
+  outcome,
 }: {
   cid: string;
   link: NonNullable<ContentDetailsData['jobs']>[number]['holders'][number]['links'][number];
   index: number;
   reload: () => void;
+  /** The last job test's outcome for this URL, when the node reported one. */
+  outcome?: TestOutcome;
 }) {
   const [result, setResult] = useState('');
   const location = link.location ?? link.url ?? `${link.baseUrl ?? ''}/${encodeURIComponent(cid)}`;
-  const bad = (link.fails ?? 0) > 0;
+  // The last test of this URL decides its tag: the running test's own outcome first, then
+  // the outcome the node kept on the record (it survives the reload after a test), and
+  // only when neither is known does the fail count speak. "Not tested" stays neutral.
+  const tag = outcome ?? link.lastOutcome ?? ((link.fails ?? 0) > 0 ? 'failed' : 'success');
+  const tone = tag === 'success' ? 'ok' : tag === 'not tested' ? '' : 'warn';
   const check = async (mode: 'test' | 'info') => {
     setResult(mode === 'test' ? 'Testing…' : 'Fetching…');
     try {
@@ -473,7 +483,7 @@ function EndpointRow({
   return (
     <div className="endpoint-row">
       <span className="faint">#{index + 1}</span>
-      <span className={`badge ${bad ? 'warn' : 'ok'}`}>{bad ? 'failed' : 'success'}</span>
+      <span className={`badge ${tone}`}>{tag}</span>
       <span className="mono tiny endpoint-url" title={location}>
         {location}
       </span>
@@ -499,11 +509,16 @@ function EndpointRow({
  */
 export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData; cid: string; reload: () => void }) {
   const [jobTests, setJobTests] = useState<Record<string, string>>({});
+  // What the last test run did with each URL of one user (job.id:accountId → link id →
+  // outcome). It drives the rows' tags until the next run for that user clears it.
+  const [outcomes, setOutcomes] = useState<Record<string, Record<string, TestOutcome>>>({});
   const [toast, show] = useToast();
 
   const testJob = async (job: NonNullable<ContentDetailsData['jobs']>[number], accountId: string) => {
     const key = `${job.id}:${accountId}`;
     setJobTests((m) => ({ ...m, [key]: 'Testing each endpoint of this user…' }));
+    // A new run speaks for itself: its outcomes replace the previous run's tags.
+    setOutcomes((m) => ({ ...m, [key]: {} }));
     try {
       const result = await admin<{
         test: {
@@ -518,9 +533,12 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
           holders?: { succeeded: number; total: number };
           /** URL-level outcome (newer nodes): how many endpoints answered. */
           urls?: { served: number; checked: number };
+          /** Per-URL outcomes of the run (newer nodes), in the order they were tried. */
+          links?: { id: string; outcome: TestOutcome }[];
         };
       }>(`/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: { account: accountId } });
       const t = result.test;
+      setOutcomes((m) => ({ ...m, [key]: Object.fromEntries((t.links ?? []).map((entry) => [entry.id, entry.outcome])) }));
       // Holder counts decide the outcome: some holders serving the content is a partial
       // success and only zero of them is a failure. Older nodes send just the ok flag.
       const succeeded = t.holders ? t.holders.succeeded : t.ok ? 1 : 0;
@@ -646,7 +664,14 @@ export function StorageJobsTab({ data, cid, reload }: { data: ContentDetailsData
                           URL to get the full retrieved data
                         </div>
                         {links.map((link, index) => (
-                          <EndpointRow key={link.id} cid={cid} link={link} index={index} reload={reload} />
+                          <EndpointRow
+                            key={link.id}
+                            cid={cid}
+                            link={link}
+                            index={index}
+                            reload={reload}
+                            outcome={outcomes[`${job.id}:${holder.accountId}`]?.[link.id]}
+                          />
                         ))}
                       </>
                     ) : (

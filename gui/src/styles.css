@@ -2924,6 +2924,39 @@ button.watch-info:hover {
   color: white;
 }
 
+/* The image-list viewer: the picture between its two arrows — outside it, never over
+   it — and the counter below, centred. On narrow screens the arrows shrink instead of
+   covering the picture. */
+.image-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.image-list-row .image-frame {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.image-list-nav {
+  flex: 0 0 auto;
+}
+.image-list-view.compact .image-list-row {
+  gap: 4px;
+}
+.image-list-counter {
+  margin-top: 6px;
+  text-align: center;
+}
+@media (max-width: 640px) {
+  .image-list-row {
+    gap: 4px;
+  }
+  .image-list-nav {
+    transform: scale(0.85);
+  }
+}
+
 .image-rail {
   position: absolute;
   top: 8px;
@@ -2989,9 +3022,11 @@ button.watch-info:hover {
    the picture behind the panel instead). */
 .image-stage.comments-cover .image-media,
 .image-stage.comments-cover .image-frame-wrap,
+.image-stage.comments-cover .image-list-row,
 .image-stage.comments-cover .image-frame,
 .image-stage.comments-cover .image-full,
 .image-stage.comments-shrink .image-frame-wrap,
+.image-stage.comments-shrink .image-list-row,
 .image-stage.comments-shrink .image-frame,
 .image-stage.comments-shrink .image-full {
   height: 100%;

@@ -195,6 +195,24 @@ function JobDetails({ view, onClose, reloadList }: { view: JobView; onClose: () 
   const [tab, setTab] = useState<'details' | 'jobs'>('details');
   const [details, setDetails] = useState<ContentDetailsData | null>(null);
   const [detailsError, setDetailsError] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [, show] = useToast();
+  // The same "Delete job" as the Storage jobs tab: the job and every assignment under it
+  // go together, and the panel behind the modal reloads once they are gone.
+  const remove = async () => {
+    if (!window.confirm('Delete this storage job and every assignment under it?')) return;
+    setDeleting(true);
+    try {
+      await admin(`/v1/admin/storage/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+      show('Storage job deleted');
+      reloadList();
+      onClose();
+    } catch (e) {
+      show(message(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
   // The second tab is the content's own Storage jobs tab, so it needs the content details.
   const loadDetails = useCallback(() => {
     if (!cid) return;
@@ -392,6 +410,16 @@ function JobDetails({ view, onClose, reloadList }: { view: JobView; onClose: () 
                 .filter(([status]) => status !== 'active')
                 .map(([status, count]) => ` · ${count} ${status}`)
                 .join('')}
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <button
+                className="small danger"
+                disabled={deleting}
+                title="Delete this storage job and every assignment under it"
+                onClick={() => void remove()}
+              >
+                {deleting ? 'Deleting…' : 'Delete job'}
+              </button>
             </div>
           </div>
         )}

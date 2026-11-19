@@ -184,6 +184,12 @@ export interface ServeOptions {
   /** Runs before routing; throw an HttpError to reject the request. */
   guard?: (ctx: Ctx) => void;
   /**
+   * Keeps unexpected request failures out of the console (the demo sets this: it prints
+   * its own script, and a node that does not have an object is a normal answer there).
+   * The 500 reply itself is unchanged.
+   */
+  quietFailures?: boolean;
+  /**
    * Local tracing of every API request (off by default downstream): one timeline per
    * call, told how it ended so the trace line carries the URL and response time.
    */
@@ -263,7 +269,7 @@ export function createHttpServer(options: ServeOptions): Server {
       if (error instanceof HttpError) {
         sendJson(res, error.status, { error: { code: error.code, message: error.message, ...error.extra } });
       } else {
-        log.error(`[${options.name}] ${req.method} ${url.pathname} failed:`, error);
+        if (!options.quietFailures) log.error(`[${options.name}] ${req.method} ${url.pathname} failed:`, error);
         sendJson(res, 500, { error: { code: 'internal', message: (error as Error)?.message ?? 'Internal error' } });
       }
     }

@@ -1,5 +1,5 @@
-import { ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { LayoutGrid } from 'lucide-react';
+import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import type { Subscription } from '../../../src/shared/clientapi';
 import { useApp } from '../state';
@@ -37,38 +37,9 @@ export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] 
     if (order === 'random') return list.sort((a, b) => byId(a.id) - byId(b.id));
     return list.sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
   }, [subscriptions, order, salt]);
-  const rowRef = useRef<HTMLDivElement>(null);
-  const [edges, setEdges] = useState({ start: true, end: true });
-
-  const measure = useCallback(() => {
-    const row = rowRef.current;
-    if (!row) return;
-    setEdges({
-      start: row.scrollLeft <= 2,
-      end: row.scrollLeft + row.clientWidth >= row.scrollWidth - 2,
-    });
-  }, []);
-
-  useEffect(() => {
-    measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [measure, subscriptions.length]);
-
-  const nudge = (direction: -1 | 1) => {
-    const row = rowRef.current;
-    if (!row) return;
-    row.scrollBy({ left: direction * Math.max(240, row.clientWidth * 0.8), behavior: 'smooth' });
-  };
-
   return (
     <div className="carousel">
-      {!edges.start && (
-        <button type="button" className="carousel-arrow left" aria-label="Scroll subscriptions left" onClick={() => nudge(-1)}>
-          <ChevronLeft size={18} />
-        </button>
-      )}
-      <div className="carousel-row" ref={rowRef} onScroll={measure}>
+      <div className="carousel-row">
         <Link to="/subscriptions/all" className="carousel-tile view-all" aria-label="View all subscriptions">
           <span className="carousel-avatar">
             <LayoutGrid size={22} />
@@ -82,11 +53,6 @@ export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] 
           </Link>
         ))}
       </div>
-      {!edges.end && (
-        <button type="button" className="carousel-arrow right" aria-label="Scroll subscriptions right" onClick={() => nudge(1)}>
-          <ChevronRight size={18} />
-        </button>
-      )}
     </div>
   );
 }

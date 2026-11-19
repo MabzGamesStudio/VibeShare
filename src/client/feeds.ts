@@ -98,14 +98,17 @@ export class Feeds {
    * only goes to content actually opened before (the selected filter): a preview is not
    * a watch, so the first open of previewed content is never marked watched.
    */
-  private applySeenFilters(items: FeedItem[]): FeedItem[] {
+  private applySeenFilters(items: FeedItem[], imageMedium = false): FeedItem[] {
     const rank = this.core.settings.seenContentMode === 'rank';
     const shown: FeedItem[] = [];
     const demoted: FeedItem[] = [];
     for (const item of items) {
       // Only the algorithm node's small leading native group is seen-exempt. Other
-      // native items still follow the user's ordinary seen-content preference.
-      if (item.nativeSuggestion) {
+      // native items still follow the user's ordinary seen-content preference — except
+      // in the images medium, where a VibeShare-native picture leads the page, seen or
+      // not (nativeFirst keeps the native ones at the front below).
+      const nativeImage = imageMedium && item.id.startsWith('vs1') && (item.format === 'image' || item.format === 'image-list');
+      if (item.nativeSuggestion || nativeImage) {
         const identity = { id: item.id, contentId: item.contentId, link: item.link };
         shown.push(this.core.blooms.sees('selected', identity) ? { ...item, seen: true } : item);
         continue;
@@ -153,6 +156,8 @@ export class Feeds {
     // Nodes filter by language too; this covers nodes that do not, and content they pass on.
     const languages = ((body.preferences ?? body.filters) as Preferences | undefined)?.languages ?? this.core.settings.preferences.languages;
     const wanted = (item: ContentItem) => matchesLanguages(item, languages);
+    // The images medium: native pictures lead it and are never hidden by seen-filters.
+    const imageMedium = (((body.preferences ?? body.filters) as Preferences | undefined)?.formats ?? []).includes('image');
     const ask = async (node: NodeEntry, limit: number): Promise<Page<ContentItem>> => {
       const price = this.core.nodes.algorithmPrice(node, priceKind);
       // (Paid answers carry the new balance; nothing else is asked — except when the node
@@ -180,7 +185,7 @@ export class Feeds {
           const page = await ask(node, 24);
           const shown = this.nativeFirst(
             seenContent
-              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
+              ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)), imageMedium)
               : page.items.filter(wanted).map((item) => this.feedItem(node, item))
           );
           this.core.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
@@ -225,7 +230,7 @@ export class Feeds {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items) : items);
+    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items, imageMedium) : items);
     this.core.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
     return {
       items: shown,

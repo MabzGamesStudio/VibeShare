@@ -184,9 +184,10 @@ describe('storage service', async () => {
       false,
       'a job being downloaded is not offered to the same account again'
     );
-    // Pretend the download started long ago and never finished: the slot frees up.
+    // Pretend the download started long ago and never finished: the assignment is
+    // forgotten entirely and the slot frees up.
     assignment.acceptedAt = new Date(Date.now() - 20 * 60_000).toISOString();
-    await waitFor(() => provider.service.assignmentsForAdmin().find((entry) => entry.id === assignment.id)?.status === 'released');
+    await waitFor(() => provider.service.assignmentsForAdmin().find((entry) => entry.id === assignment.id) === undefined);
     assert.equal(
       provider.service.offers(fake).some((offer) => offer.id === job.id),
       true,

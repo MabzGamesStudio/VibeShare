@@ -51,6 +51,14 @@ export function registerAdminRoutes(node: AlgorithmNode): void {
       });
       return node.registry.get(entry.id);
     });
+    // The free-form content data of one entry, replaced as a whole: dropping a pair is
+    // leaving its key out, an empty map clears them all.
+    router.post('/v1/admin/content/:id/data', async (ctx) => {
+      admin(ctx);
+      const body = await readJson<{ data?: Record<string, string> }>(ctx.req);
+      const entry = node.registry.upsert({ id: ctx.params.id, data: body.data ?? {} });
+      return node.registry.get(entry.id);
+    });
     router.post('/v1/admin/content/:id/block', async (ctx) => {
       admin(ctx);
       const body = await readJson<{ reason?: string }>(ctx.req);

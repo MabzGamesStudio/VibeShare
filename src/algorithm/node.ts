@@ -33,6 +33,8 @@ import { registerSuggestionsRoutes } from './routes/suggestions.js';
 import { registerPeersRoutes } from './routes/peers.js';
 import { registerPeerSyncRoutes } from './routes/peer-sync.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { registerRemovalRoutes } from './routes/removals.js';
+import { RemovalQueue } from './removals.js';
 import { registerSyndicationRoutes } from './routes/syndication.js';
 import * as creators from './routes/creators.js';
 import * as suggestions from './routes/suggestions.js';
@@ -201,6 +203,8 @@ export function algorithmDefaults(): AlgorithmConfig {
 
 export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   readonly registry: Registry;
+  /** Content removal requests waiting for the operator's delete review. */
+  readonly removals: RemovalQueue;
   contributions: JsonFile<ContributionData>;
   /** Seen-content bloom filters kept for accounts: a paid copy (until it expires), and the
    *  account's own much larger filter, kept long term until it is dropped. */
@@ -221,6 +225,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
   constructor(options: NodeOptions<AlgorithmConfig>) {
     super('algorithm', algorithmDefaults(), options);
     this.registry = new Registry(this.path('registry.json'), options.dataDir ? join(options.dataDir, 'thumbnails') : null, this.traces);
+    this.removals = new RemovalQueue(this.path('removals.json'));
     this.contributions = new JsonFile(this.path('contributions.json'), () => ({
       votes: {},
       suggestions: {},
@@ -691,6 +696,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
         accountLinks: Object.values(data.accountLinks ?? {}).filter((p) => p.status === 'pending').length,
         groupSuggestions: Object.values(data.groupSuggestions ?? {}).filter((s) => s.status === 'pending').length,
         topicSuggestions: Object.values(data.topicSuggestions ?? {}).filter((s) => s.status === 'pending').length,
+        removals: this.removals.pending().length,
       },
     };
   }
@@ -711,6 +717,7 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
     registerPeersRoutes(this);
     registerPeerSyncRoutes(this);
     registerAdminRoutes(this);
+    registerRemovalRoutes(this);
     registerSyndicationRoutes(this);
   }
 }

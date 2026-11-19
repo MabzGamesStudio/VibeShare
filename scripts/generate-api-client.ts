@@ -204,6 +204,11 @@ const API_TYPES: Record<string, RouteTypes> = {
   'GET /api/jobs': { request: 'void', response: '{ jobs: Job[] }' },
   'GET /api/jobs/:id': { request: 'void', response: 'Job' },
   'GET /api/library': { request: 'void', response: '{ published: LibraryItem[]; history: HistoryItem[] }' },
+  'DELETE /api/library/:id': { request: 'void', response: '{ published: LibraryItem[] }' },
+  'POST /api/removals': {
+    request: '{ nodeIds: string[]; id: string; message?: string }',
+    response: '{ results: { node: string; name: string; ok: boolean; error?: string }[] }',
+  },
   'POST /api/history': { request: '{ id?: string; title?: string; contentId?: string; link?: string }', response: 'unknown' },
   'DELETE /api/history': { request: 'void', response: 'unknown' },
   'GET /api/search-history': { request: 'void', response: '{ items: SearchHistoryItem[] }' },
@@ -284,6 +289,7 @@ const API_TYPES: Record<string, RouteTypes> = {
   'POST /api/identity/import': { request: '{ seed?: string }', response: '{ id: string }' },
   'GET /api/cache': { request: 'void', response: '{ bytes: number; chunks: number; limit: number }' },
   'DELETE /api/cache': { request: 'void', response: '{ bytes: number; chunks: number }' },
+  'DELETE /api/cache/:id': { request: 'void', response: '{ dropped: number }' },
 };
 
 /** The stable key of a route in the generated map: 'get-content-id' for GET /api/content/:id. */

@@ -210,6 +210,7 @@ export class Publisher {
         native: true,
       };
       const submission: SubmissionRequest = {
+        data: request.data,
         id,
         title: request.title.trim(),
         description: request.description?.trim() || undefined,

@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import type { HistoryItem, LibraryItem, SavedState } from '../../../src/shared/clientapi';
 import { api, errorMessage } from '../api';
 import { SaveCidButton } from '../components/SaveCid';
-import { CopyButton, Empty, Loading } from '../components/ui';
+import { CopyButton, Empty, Loading, Modal } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, timeAgo, watchPath } from '../util';
 
@@ -81,6 +81,105 @@ function PagerNav({ pager }: { pager: Pager }) {
   );
 }
 
+/** One row's removal actions: gone from this device, or requested gone from the nodes. */
+function RemovalButtons({ onDelete, onRemove }: { onDelete: () => void; onRemove: () => void }) {
+  return (
+    <div className="row" style={{ gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      <button className="small" onClick={onDelete} title="Take it out of this library and delete its cached content on this device">
+        Delete locally
+      </button>
+      <button className="small" onClick={onRemove} title="Ask the nodes that hold or list it to remove or hide it">
+        Request removal
+      </button>
+    </div>
+  );
+}
+
+/** Asking the nodes to remove or hide one content: which nodes, and why (optionally). */
+function RemovalModal({ target, onClose }: { target: { id: string; title: string }; onClose: () => void }) {
+  const { state, toast } = useApp();
+  const nodes = state?.nodes ?? [];
+  const [chosen, setChosen] = useState<string[]>(() => nodes.filter((node) => node.enabled).map((node) => node.id));
+  const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
+  const [results, setResults] = useState<{ node: string; name: string; ok: boolean; error?: string }[] | null>(null);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const answer = await api<{ results: { node: string; name: string; ok: boolean; error?: string }[] }>('/api/removals', {
+        method: 'POST',
+        body: { nodeIds: chosen, id: target.id, message: message.trim() || undefined },
+      });
+      setResults(answer.results);
+      const sent = answer.results.filter((result) => result.ok).length;
+      toast(`Removal requested on ${sent} of ${answer.results.length} nodes`, sent ? 'success' : 'error');
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Request content removal"
+      onClose={onClose}
+      actions={
+        results ? (
+          <button className="primary" onClick={onClose}>
+            Close
+          </button>
+        ) : (
+          <>
+            <button onClick={onClose}>Cancel</button>
+            <button className="primary" disabled={sending || chosen.length === 0} onClick={() => void send()}>
+              {sending ? 'Sending…' : 'Send request'}
+            </button>
+          </>
+        )
+      }
+    >
+      <div className="form-stack">
+        <p className="small muted">
+          This asks the nodes you pick to remove or hide <strong>{target.title}</strong>. Each node decides for itself — the request goes out
+          on your account on it, and only the nodes that can delete or hide the content will.
+        </p>
+        <div className="field">
+          Nodes to ask
+          {nodes.map((node) => (
+            <label key={node.id} className="row small" style={{ gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={chosen.includes(node.id)}
+                onChange={(e) => setChosen((current) => (e.target.checked ? [...current, node.id] : current.filter((entry) => entry !== node.id)))}
+              />
+              {node.name} <span className="faint">· {node.type}</span>
+            </label>
+          ))}
+          {!nodes.length && <span className="hint">No nodes are configured yet.</span>}
+        </div>
+        <label className="field">
+          Message <span className="hint">(optional)</span>
+          <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={3} placeholder="Why this content should be removed" />
+        </label>
+        {results && (
+          <div className="field">
+            Results
+            {results.map((result) => (
+              <div key={result.node} className="row small" style={{ gap: 8 }}>
+                {result.ok ? <span className="badge ok">sent</span> : <span className="badge danger">failed</span>}
+                <span>{result.name}</span>
+                {result.error && <span className="faint">{result.error}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 export function LibraryPage() {
   const { state, toast } = useApp();
   const [data, setData] = useState<{ published: LibraryItem[]; history: HistoryItem[] } | null>(null);
@@ -88,6 +187,7 @@ export function LibraryPage() {
   const [saved, setSaved] = useState<SavedState | null>(null);
   const [filter, setFilter] = useState<string>('all');
   const [fresh, setFresh] = useState('');
+  const [removal, setRemoval] = useState<{ id: string; title: string } | null>(null);
 
   const load = () => {
     api<{ published: LibraryItem[]; history: HistoryItem[] }>('/api/library').then(setData).catch((e) => toast(errorMessage(e), 'error'));
@@ -95,6 +195,20 @@ export function LibraryPage() {
     api<SavedState>('/api/saved').then(setSaved).catch(() => undefined);
   };
   useEffect(load, []);
+
+  /** "Delete locally": out of the library and out of the cache — the content itself stays. */
+  const deleteLocally = async (item: { id: string; title: string }, from: 'saved' | 'published') => {
+    if (!window.confirm(`Delete "${item.title}" from this device? It leaves your library and its cached content is deleted. The content itself stays where it is published.`)) return;
+    try {
+      await api(`/api/cache/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      if (from === 'saved') await api(`/api/saved/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      else await api(`/api/library/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      load();
+      toast('Deleted from this device', 'success');
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    }
+  };
 
   const savedItems =
     filter === 'all' ? (saved?.items ?? []) : filter === 'none' ? (saved?.items ?? []).filter((item) => item.collections.length === 0) : (saved?.items ?? []).filter((item) => item.collections.includes(filter));
@@ -157,7 +271,13 @@ export function LibraryPage() {
                       ))}
                     </td>
                     <td>
-                      <CopyButton text={item.id} label="Id" />
+                      <div className="row" style={{ gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <CopyButton text={item.id} label="Id" />
+                        <RemovalButtons
+                          onDelete={() => void deleteLocally(item, 'published')}
+                          onRemove={() => setRemoval({ id: item.id, title: item.title })}
+                        />
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -244,7 +364,7 @@ export function LibraryPage() {
                     </div>
                   )}
                 </div>
-                <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                <div className="row" style={{ gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                   <SaveCidButton id={item.id} title={item.title} className="small" compact onSaved={setSaved} />
                   <CopyButton text={item.id} label="Id" />
                   <button
@@ -257,6 +377,10 @@ export function LibraryPage() {
                   >
                     <Trash2 size={14} />
                   </button>
+                  <RemovalButtons
+                    onDelete={() => void deleteLocally(item, 'saved')}
+                    onRemove={() => setRemoval({ id: item.id, title: item.title })}
+                  />
                 </div>
               </div>
             ))}
@@ -323,6 +447,7 @@ export function LibraryPage() {
           </div>
         </div>
       )}
+      {removal && <RemovalModal target={removal} onClose={() => setRemoval(null)} />}
     </div>
   );
 }

@@ -421,6 +421,10 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
 
   // Library and history
   on('GET', '/api/library', () => ({ published: core.store.data.data.library, history: core.store.data.data.history }));
+  // Taking one item out of the published library this device keeps ("delete locally").
+  on('DELETE', '/api/library/:id', (request) => core.removePublished(request.params.id));
+  // Asking the chosen nodes to remove or hide one content — each answers for itself.
+  on('POST', '/api/removals', async (request) => core.requestRemoval(await request.json<{ nodeIds: string[]; id: string; message?: string }>()));
   on('POST', '/api/history', async (request) => core.remember(await request.json()));
   on('DELETE', '/api/history', () => core.forgetHistory());
   // Search history: what the search bar suggests from — viewable and clearable in History
@@ -736,6 +740,8 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
     await core.cache.clear();
     return core.cache.usage();
   });
+  // One content's cached chunks ("delete locally"): its manifest lists them.
+  on('DELETE', '/api/cache/:id', (request) => core.dropCachedContent(request.params.id));
 
   return routes;
 }

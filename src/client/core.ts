@@ -14,6 +14,7 @@ import type {
   FeedItem,
   FeedResponse,
   GroupView,
+  LibraryItem,
   NodeEntry,
   PageFilters,
   PageSource,
@@ -467,6 +468,21 @@ export class ClientCore {
   /** Assigns a saved cid to different cid collections (or takes it out of some). */
   assignSavedCid(id: string, body: { title?: string; collections?: unknown }): SavedState {
     return this.contents.assignSavedCid(id, body);
+  }
+
+  /** Removes one item from the published library this device keeps. */
+  removePublished(id: string): { published: LibraryItem[] } {
+    return this.contents.removePublished(id);
+  }
+
+  /** Drops one content's cached chunks from this device (the "delete locally" half). */
+  dropCachedContent(id: string): Promise<{ dropped: number }> {
+    return this.contents.dropCachedContent(id);
+  }
+
+  /** Asks the chosen nodes to remove or hide one content; each answers for itself. */
+  requestRemoval(input: { nodeIds: string[]; id: string; message?: string }): Promise<{ results: { node: string; name: string; ok: boolean; error?: string }[] }> {
+    return this.contents.requestRemoval(input);
   }
 
   /** Takes a cid out of the saved list; it leaves every collection with it. */

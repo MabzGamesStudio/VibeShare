@@ -19,7 +19,8 @@ interface Backend {
 type CreateBackend = (options: { kv: unknown; config: unknown; appUrl: string; hostName: string }) => Promise<Backend>;
 
 describe('the web client backend', async () => {
-  const provider = await startProvider({ name: 'Web CDN', signup: { grant: 50 }, pricing: { perMiB: 1, freeMiBPerDay: 0 } });
+  // Review off: this suite publishes and expects the content live at once.
+  const provider = await startProvider({ name: 'Web CDN', signup: { grant: 50 }, pricing: { perMiB: 1, freeMiBPerDay: 0 }, review: { enabled: false } });
   const algorithm = await startAlgorithm({ name: 'Web Curator' });
   after(async () => {
     await provider.stop();

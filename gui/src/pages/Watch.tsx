@@ -25,7 +25,10 @@ import type { ContentView, Job, NodeEntry, PublishPreview } from '../../../src/s
 import { VvshPlayer } from '../components/VvshPlayer';
 import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
+import { IMAGE_LIST_MIME } from '../../../src/shared/image-list';
 import { baseId } from '../../../src/shared/sources';
+import { ContentDataTab } from '../components/AboutContent';
+import { ImageListView, UnverifiedImage, useVerified } from '../components/ImageList';
 import {
   CREATOR_KIND_LABELS,
   FORMAT_LABELS,
@@ -127,6 +130,8 @@ function NativePlayer({
   const src = useMediaSrc(view.streamUrl!);
   const download = useMediaSrc(view.downloadUrl);
   const [ratio, measured] = useRatio(view);
+  // Images gate on the algorithm nodes' say-so: an image nobody has listed never loads.
+  const verified = useVerified(view.item ? baseId(view.item.id) : undefined);
   // A .vvsh verifiable video stream plays chunk by chunk: seeking fetches only the chunk
   // under the playhead (each verified, each charged), never the whole file.
   if (view.manifest?.vvsh) {
@@ -157,7 +162,17 @@ function NativePlayer({
       </div>
     );
   }
+  // One packaged image list: the viewer pages through its pictures beside the arrows.
+  if (view.item?.format === 'image-list' || view.manifest?.meta?.format === 'image-list' || mime === IMAGE_LIST_MIME) {
+    return (
+      <div className="player">
+        <ImageListView id={view.item ? baseId(view.item.id) : undefined} url={view.streamUrl} title={view.item?.title ?? view.manifest!.name} />
+      </div>
+    );
+  }
   if (mime.startsWith('image/')) {
+    if (verified === false) return <div className="player"><UnverifiedImage /></div>;
+    if (verified === null) return <div className="player"><span className="image-skeleton" /></div>;
     return (
       <Fit ratio={ratio}>
         <img src={src} alt={view.item?.title ?? view.manifest!.name} onLoad={(e) => measured(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} />
@@ -191,6 +206,8 @@ function NativePlayer({
 function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: number; setIndex: (i: number) => void }) {
   const embed = view.embeds[index];
   const [ratio, measured] = useRatio(view);
+  // Platform pictures need the algorithm nodes' say-so just like native ones.
+  const verified = useVerified(view.item ? baseId(view.item.id) : undefined);
   return (
     <>
       {view.embeds.length > 1 && (
@@ -221,9 +238,15 @@ function ExternalPlayer({ view, index, setIndex }: { view: ContentView; index: n
           <audio src={embed.src} controls />
         </div>
       ) : embed.kind === 'image' ? (
-        <Fit ratio={ratio}>
-          <img src={embed.src} alt="" onLoad={(e) => measured(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} />
-        </Fit>
+        verified === false ? (
+          <div className="player"><UnverifiedImage /></div>
+        ) : verified === null ? (
+          <div className="player"><span className="image-skeleton" /></div>
+        ) : (
+          <Fit ratio={ratio}>
+            <img src={embed.src} alt="" onLoad={(e) => measured(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} />
+          </Fit>
+        )
       ) : (
         <div className="player file">
           <div>
@@ -879,7 +902,7 @@ function SuggestDialog({
 }
 /** Where the content comes from and how it is stored — behind the (i) next to the video. */
 function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedIndex: number; onClose: () => void }) {
-  const [tab, setTab] = useState<'from' | 'tier'>('from');
+  const [tab, setTab] = useState<'from' | 'tier' | 'data'>('from');
   return (
     <Modal title="About this content" onClose={onClose} wide>
       <div className="tabs" style={{ marginBottom: 14 }}>
@@ -889,8 +912,13 @@ function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedInd
         <button className={`tab ${tab === 'tier' ? 'on' : ''}`} onClick={() => setTab('tier')}>
           Storage tier
         </button>
+        <button className={`tab ${tab === 'data' ? 'on' : ''}`} onClick={() => setTab('data')}>
+          Content data
+        </button>
       </div>
-      {tab === 'from' ? (
+      {tab === 'data' ? (
+        <ContentDataTab data={view.item?.data} />
+      ) : tab === 'from' ? (
         <dl className="kv" style={{ marginTop: 12 }}>
           <dt>Algorithm</dt>
           <dd>

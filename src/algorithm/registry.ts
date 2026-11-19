@@ -19,6 +19,7 @@ import {
   type Rating,
 } from '../shared/taxonomy.js';
 import { wilson, quality, seededRandom } from './ranking.js';
+import { formatsCovering } from './support.js';
 import { matchesLanguages } from '../shared/language.js';
 
 /** What the node knows about one content. Every entry has a content id, a link, or both — they are separate. */
@@ -70,6 +71,8 @@ export interface Entry {
   media?: ContentMedia;
   /** Platform popularity numbers the node kept (views, likes, comments… from claims). */
   platformStats?: Record<string, number>;
+  /** Free-form content data: short string pairs the operator or publisher set. */
+  data?: Record<string, string>;
 }
 
 export interface CreatorRecord extends CreatorInfo {
@@ -106,6 +109,19 @@ export type EntryInput = Partial<Omit<Entry, 'id' | 'likes' | 'dislikes' | 'adde
   /** Legacy input alias: platform tags, folded into topics (tags are redundant of topics). */
   tags?: string[];
 };
+
+/** The free-form content data of an entry: short string pairs, bounded in count. */
+export function cleanData(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 200) break;
+    const name = String(key).trim().slice(0, 80);
+    if (!name) continue;
+    out[name] = String(raw ?? '').slice(0, 1000);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 function cleanList(value: unknown, max = 32): string[] {
   if (!Array.isArray(value)) return [];
@@ -358,6 +374,8 @@ export class Registry {
       thumbnailUrl: input.thumbnailUrl ?? existing?.thumbnailUrl,
       media: input.media ?? existing?.media,
       platformStats: input.platformStats ?? existing?.platformStats,
+      // A provided data map replaces the old one (an empty one clears it).
+      data: input.data !== undefined ? cleanData(input.data) : existing?.data,
     };
     if (entry.status !== 'blocked') delete entry.reason;
     this.store.data.entries[entry.id] = entry;
@@ -501,6 +519,7 @@ export class Registry {
       },
       providers: entry.providers.length ? entry.providers : undefined,
       notes: entry.notes.length ? entry.notes : undefined,
+      data: entry.data && Object.keys(entry.data).length ? entry.data : undefined,
     };
   }
 
@@ -530,7 +549,7 @@ export class Registry {
   /** Listed entries that pass the viewer's preferences and the node's own rating ceiling. */
   visible(preferences: Preferences, nodeMaxRating: Rating): Entry[] {
     const limit = RATINGS[Math.min(RATINGS.indexOf(preferences.maxRating ?? nodeMaxRating), RATINGS.indexOf(nodeMaxRating))];
-    const formats = preferences.formats?.length ? new Set(preferences.formats) : null;
+    const formats = preferences.formats?.length ? new Set(formatsCovering(preferences.formats)) : null;
     const topics = preferences.onlyTopics && preferences.topics?.length ? new Set(preferences.topics) : null;
     const blockedTopics = preferences.blockedTopics?.length ? new Set(preferences.blockedTopics) : null;
     const blockedCreators = new Set(preferences.blockedCreators ?? []);
@@ -576,7 +595,7 @@ export class Registry {
   search(entries: Entry[], query: string, sort: SearchSort, seed = ''): { entry: Entry; score: number }[] {
     const tokens = words(query);
     const creators = tokens.filter((t) => t.startsWith('@')).map((t) => t.slice(1));
-    const formats = tokens.filter((t) => t.startsWith('format:')).map((t) => t.slice(7));
+    const formats = formatsCovering(tokens.filter((t) => t.startsWith('format:')).map((t) => t.slice(7)) as Format[]);
     const topicFilters = [
       ...tokens.filter((t) => t.startsWith('#')).map((t) => normalizeTag(t.slice(1))),
       ...tokens.filter((t) => t.startsWith('topic:')).map((t) => normalizeTag(t.slice(6))),

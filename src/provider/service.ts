@@ -271,10 +271,11 @@ export class StorageService {
   offers(account: Account): StorageOffer[] {
     if (!this.config().enabled) return [];
     // A job the account already holds — or lost to failing checks — is never offered to
-    // it again; only the assignments it finished or gave back reopen the offer.
+    // it again; a completed term reopens the offer, and a release forgets the row
+    // entirely (so there is nothing left to exclude).
     const mine = new Set(
       Object.values(this.data.assignments)
-        .filter((a) => a.accountId === account.id && a.status !== 'released' && a.status !== 'completed')
+        .filter((a) => a.accountId === account.id && a.status !== 'completed')
         .map((a) => a.jobId)
     );
     return Object.values(this.data.jobs)
@@ -375,9 +376,9 @@ export class StorageService {
     const room = !job || this.liveAssignments(job.id).length < job.replicas;
     const termOver = Date.parse(assignment.expiresAt) <= Date.now();
     // Any copy whose URL serves counts again, whatever the node had made of it before:
-    // a downloading holder goes active, and one that was dropped (removed), gave the job
-    // back (released) or was marked failed comes back while the job has room and its term
-    // is still running. An explicit check is the operator saying "this endpoint works".
+    // a downloading holder goes active, and one that was dropped (removed) or was
+    // marked failed comes back while the job has room and its term is still running.
+    // An explicit check is the operator saying "this endpoint works".
     const restored =
       assignment.status === 'downloading' || (!LIVE.includes(assignment.status) && room && !termOver);
     if (restored) assignment.status = 'active';
@@ -432,14 +433,36 @@ export class StorageService {
     return this.view(assignment);
   }
 
+  /**
+   * Gives a job back: the assignment is forgotten entirely — as if it never existed.
+   * The slot frees and the job reopens for another client at once; the ack still
+   * answers with the released view for the caller.
+   */
   release(account: Account, assignmentId: string): StorageAssignment {
     const assignment = this.own(account, assignmentId);
-    if (LIVE.includes(assignment.status)) {
-      assignment.status = 'released';
-      this.store.changed();
-      this.traces?.trace('basic', 'provider.service', 'assignment released', { data: { assignment: assignment.id, job: assignment.jobId } });
+    const ack: StorageAssignment = { ...this.view(assignment), status: 'released' };
+    if (LIVE.includes(assignment.status)) this.forgetAssignment(assignment);
+    return ack;
+  }
+
+  /**
+   * Removes an assignment from the book entirely: the record goes (nothing is left to
+   * show or restore later), the slot frees, and the job reopens for another client —
+   * counted like the other reopenings.
+   */
+  private forgetAssignment(assignment: Assignment): void {
+    delete this.data.assignments[assignment.id];
+    this.store.changed();
+    const job = this.data.jobs[assignment.jobId];
+    if (job && job.status !== 'failed') {
+      if (job.status === 'closed') job.status = 'open';
+      job.reopened = (job.reopened ?? 0) + 1;
     }
-    return this.view(assignment);
+    this.traces?.trace('basic', 'provider.service', 'assignment released', {
+      message: 'forgotten entirely — the job reopens for another client',
+      data: { assignment: assignment.id, job: assignment.jobId, account: assignment.accountId.slice(0, 16) },
+    });
+    this.store.flush();
   }
 
   mine(account: Account): StorageAssignment[] {
@@ -638,11 +661,11 @@ export class StorageService {
         this.finish(assignment);
         continue;
       }
-      // An assignment that never finished downloading frees its slot again — the job
-      // stays open for others instead of waiting on a client that never stored anything.
+      // An assignment that never finished downloading gives its slot back entirely —
+      // forgotten, like a release: the job opens for others instead of waiting on a
+      // client that never stored anything.
       if (assignment.status === 'downloading' && now - Date.parse(assignment.acceptedAt) > 15 * 60_000) {
-        assignment.status = 'released';
-        this.store.changed();
+        this.forgetAssignment(assignment);
         continue;
       }
     }

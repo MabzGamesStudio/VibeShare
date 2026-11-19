@@ -2,6 +2,7 @@ import { CheckCircle2, Circle, CircleAlert, Film, ImagePlus, Link2, Loader2, Upl
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Job } from '../../../src/shared/clientapi';
+import { IMAGE_LIST_EXT, IMAGE_LIST_MIME, packImageList } from '../../../src/shared/image-list';
 import { VvshCompose } from '../components/VvshCompose';
 import type { ProviderInfo } from '../../../src/shared/protocol';
 import type { Embed, ExternalSource } from '../../../src/shared/sources';
@@ -173,6 +174,10 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   const [duration, setDuration] = useState<number | undefined>();
   const [thumbnail, setThumbnail] = useState<string | undefined>();
   const [sources, setSources] = useState('');
+  // Free-form content data: optional short key/value pairs kept on the content.
+  const [pairs, setPairs] = useState<Record<string, string>>({});
+  const [pairKey, setPairKey] = useState('');
+  const [pairValue, setPairValue] = useState('');
   const [chosenProviders, setChosenProviders] = useState<string[]>([]);
   const [chosenAlgorithms, setChosenAlgorithms] = useState<string[]>([]);
   const [sign, setSign] = useState(true);
@@ -241,74 +246,68 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
     if (!file) return;
     try {
       setUploading(0);
-      // A list of images: every image publishes as its own content first (each gets its
-      // own id), and the list itself publishes last with all of those ids as its gallery.
-      const galleryIds: string[] = [];
-      for (const [index, image] of images.entries()) {
-        if (asList) setUploading(index / (images.length + 1));
-        const { fileId } = await uploadFile(image, asList ? () => undefined : setUploading);
-        const one = await api<Job>('/api/publish', {
+      if (asList) {
+        // One list of images is ONE content: the container holds every picture, so the
+        // user gets one cid and one file — its preview is the first image's thumbnail.
+        const packed = packImageList(
+          await Promise.all(
+            images.map(async (image) => ({
+              name: image.name,
+              mime: image.type || 'application/octet-stream',
+              data: new Uint8Array(await image.arrayBuffer()),
+            }))
+          )
+        );
+        const list = new File([packed.buffer as ArrayBuffer], `${meta.title.trim().replace(/[^\p{L}\p{N} -]+/gu, '').trim() || 'images'}${IMAGE_LIST_EXT}`, {
+          type: IMAGE_LIST_MIME,
+        });
+        const { fileId } = await uploadFile(list, setUploading);
+        setUploading(null);
+        const created = await api<Job>('/api/publish', {
           body: {
             fileId,
-            name: image.name,
-            mime: image.type || 'application/octet-stream',
-            title: asList ? `${meta.title} (${index + 1}/${images.length})` : meta.title,
+            name: list.name,
+            mime: list.type,
+            title: meta.title,
             description: meta.description,
-            format: asList ? 'image' : meta.format,
+            format: 'image-list',
             rating: meta.rating,
             topics: mergeTopics(meta),
             language: meta.language || undefined,
-            durationSeconds: asList ? undefined : duration,
-            sources: asList ? undefined : splitList(sources),
+            sources: splitList(sources),
+            data: Object.keys(pairs).length ? pairs : undefined,
             providers: chosenProviders,
             algorithms: chosenAlgorithms,
-            thumbnail: asList ? undefined : thumbnail,
+            thumbnail,
             sign,
           },
         });
-        if (!asList) {
-          watchJob(one.id);
-          return;
-        }
-        // The list needs the id of every image, so it waits for each image to finish.
-        let done = one;
-        for (let tick = 0; tick < 240 && done.status === 'running'; tick++) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          done = await api<Job>(`/api/jobs/${done.id}`);
-        }
-        if (done.status !== 'done' || !done.result?.id) throw new Error(done.error ?? `The upload of ${image.name} failed`);
-        galleryIds.push(done.result.id.split('~')[0]);
+        watchJob(created.id);
+        return;
       }
-      // The list itself: a tiny carrier file, with its images named in its own metadata.
-      const carrier = new File(
-        [
-          '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><rect width="1200" height="630" fill="#151821"/><text x="600" y="335" fill="#9aa1b5" font-size="52" text-anchor="middle" font-family="sans-serif">Photo list</text></svg>',
-        ],
-        'photo-list.svg',
-        { type: 'image/svg+xml' }
-      );
-      const { fileId } = await uploadFile(carrier, setUploading);
+      const { fileId } = await uploadFile(file, setUploading);
       setUploading(null);
-      const created = await api<Job>('/api/publish', {
+      const one = await api<Job>('/api/publish', {
         body: {
           fileId,
-          name: carrier.name,
-          mime: carrier.type,
+          name: file.name,
+          mime: file.type || 'application/octet-stream',
           title: meta.title,
           description: meta.description,
-          format: 'image-list',
+          format: meta.format,
           rating: meta.rating,
           topics: mergeTopics(meta),
           language: meta.language || undefined,
-          gallery: galleryIds,
+          durationSeconds: duration,
           sources: splitList(sources),
+          data: Object.keys(pairs).length ? pairs : undefined,
           providers: chosenProviders,
           algorithms: chosenAlgorithms,
           thumbnail,
           sign,
         },
       });
-      watchJob(created.id);
+      watchJob(one.id);
     } catch (error) {
       setUploading(null);
       toast(errorMessage(error), 'error');
@@ -359,7 +358,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             <h2 style={{ margin: '12px 0 6px', color: 'var(--text)' }}>{FORMAT_DROP[meta.format]}</h2>
             <p>It is split into chunks and uploaded to the providers you pick.</p>
             {meta.format === 'image' || meta.format === 'image-list' ? (
-              <p className="hint">Pick several images at once to publish them as a list of images: one content per image, plus the list itself.</p>
+              <p className="hint">Pick several images at once to publish them as one image list: a single content holding every picture.</p>
             ) : (
               <p className="hint">The format at the top decides which files this field takes.</p>
             )}
@@ -400,7 +399,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
         {asList && file && (
           <div className="field">
             <span>
-              Images in the list <span className="hint">Each one publishes as its own content; the list itself goes last.</span>
+              Images in the list <span className="hint">One content holds them all.</span>
             </span>
             <div className="form-stack" style={{ gap: 6 }}>
               {images.map((image, index) => (
@@ -431,6 +430,63 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             />
           </div>
         )}
+        <details className="field">
+          <summary style={{ cursor: 'pointer' }}>
+            Content data <span className="hint">Optional key/value pairs kept on the content (up to 200)</span>
+          </summary>
+          <div className="form-stack" style={{ gap: 6, marginTop: 8 }}>
+            {Object.entries(pairs).map(([key, value]) => (
+              <div key={key} className="card row between" style={{ padding: '6px 10px', margin: 0 }}>
+                <span className="small mono">{key}</span>
+                <span className="small" style={{ flex: 1 }}>{value}</span>
+                <button
+                  type="button"
+                  className="small"
+                  onClick={() => {
+                    const next = { ...pairs };
+                    delete next[key];
+                    setPairs(next);
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <div className="row" style={{ gap: 6 }}>
+              <input
+                type="text"
+                className="mono"
+                value={pairKey}
+                placeholder="Key"
+                aria-label="Content data key"
+                style={{ flex: 1 }}
+                onChange={(e) => setPairKey(e.target.value)}
+              />
+              <input
+                type="text"
+                value={pairValue}
+                placeholder="Value"
+                aria-label="Content data value"
+                style={{ flex: 2 }}
+                onChange={(e) => setPairValue(e.target.value)}
+              />
+              <button
+                type="button"
+                className="small"
+                disabled={!pairKey.trim() || Object.hasOwn(pairs, pairKey.trim())}
+                onClick={() => {
+                  const key = pairKey.trim().slice(0, 80);
+                  if (!key) return;
+                  setPairs({ ...pairs, [key]: pairValue.slice(0, 1000) });
+                  setPairKey('');
+                  setPairValue('');
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </details>
         <label className="field">
           Fallback links <span className="hint">Copies elsewhere (YouTube, archive.org, IPFS…), shown when no provider has the file. One per line.</span>
           <textarea value={sources} onChange={(e) => setSources(e.target.value)} rows={2} placeholder="https://www.youtube.com/watch?v=…" />
@@ -542,10 +598,6 @@ function LinkTab() {
 
 export function PublishPage() {
   const [tab, setTab] = useState<'file' | 'link' | 'vvsh'>('vvsh');
-  const [jobs, setJobs] = useState<Job[]>([]);
-  useEffect(() => {
-    api<{ jobs: Job[] }>('/api/jobs').then((r) => setJobs(r.jobs)).catch(() => undefined);
-  }, [tab]);
   return (
     <div className="page">
       <div className="page-header">
@@ -566,14 +618,6 @@ export function PublishPage() {
         </button>
       </div>
       {tab === 'vvsh' ? <VvshCompose /> : tab === 'file' ? <FileTab onVideo={() => setTab('vvsh')} /> : <LinkTab />}
-      {jobs.length > 0 && (
-        <div className="section">
-          <h2>Recent</h2>
-          {jobs.slice(0, 5).map((job) => (
-            <JobView key={job.id} job={job} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

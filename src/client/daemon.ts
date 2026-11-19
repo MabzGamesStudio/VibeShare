@@ -54,6 +54,8 @@ export interface ClientOptions {
   onSettings?: (settings: Settings) => void;
   /** Keeps the storage service's notes out of the console (the demo prints its own script). */
   quietStorageNotes?: boolean;
+  /** Keeps expected request failures out of the console (used by the demo). */
+  quietLogs?: boolean;
 }
 
 const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
@@ -457,6 +459,7 @@ export class ClientNode {
     this.server = createHttpServer({
       router: this.router,
       name: 'client',
+      quietFailures: this.options.quietLogs === true,
       // Every reply is stamped with the local API's contract version, so the GUI can
       // check what it is talking to before anything else fails.
       responseHeaders: apiVersionHeaders(),

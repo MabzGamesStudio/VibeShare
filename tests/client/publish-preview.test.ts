@@ -8,7 +8,8 @@ import type { Job, PublishPreview } from '../../src/shared/clientapi.js';
 import { admin, randomBytesOf, startClient, startProvider, tempDir, waitFor } from '../helpers.js';
 
 describe('the client computes the content id before uploading', async () => {
-  const provider = await startProvider({ name: 'Host' });
+  // Review off: this suite publishes and expects the content live at once.
+  const provider = await startProvider({ name: 'Host', review: { enabled: false } });
   const { dir, cleanup } = tempDir();
   const { client, api } = await startClient(dir);
   after(async () => {

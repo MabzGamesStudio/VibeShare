@@ -4,6 +4,8 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { FeedItem } from '../../../../src/shared/clientapi';
+import { parseContentId } from '../../../../src/shared/sources';
+import { ImageListView, UnverifiedImage, useVerified } from '../ImageList';
 import { imageFor, useMediaSrc } from '../../media';
 
 /** One image filling the screen: click outside or press Escape to come back. */
@@ -64,17 +66,34 @@ function ImageFrame({ src, alt, onOpen }: { src?: string; alt: string; onOpen: (
 }
 
 /**
- * One feed image — or a list of images for one piece of content, with left and right
- * buttons to scroll through the batch. Clicking opens the picture on screen fullscreen.
+ * One feed image: a plain picture, or an image list — one container the viewer pages
+ * through with arrows beside the picture. Nothing loads before the algorithm nodes
+ * vouch for the content. Clicking a picture opens it on screen fullscreen.
  */
 export function FeedImage({ item, onOpen }: { item: FeedItem; onOpen: (src: string) => void }) {
+  // A list of images is one packaged content: the viewer scrolls through its pictures.
+  if (item.format === 'image-list') return <ImageListView id={item.contentId ?? item.id} title={item.title} />;
+  return <VerifiedFeedImage item={item} onOpen={onOpen} />;
+}
+
+function VerifiedFeedImage({ item, onOpen }: { item: FeedItem; onOpen: (src: string) => void }) {
+  // The gate stands in front of the bytes: an image no algorithm node has listed never
+  // loads here, even when its bytes are fetchable.
+  const verified = useVerified(parseContentId(item.id)?.base ?? item.id);
   const gallery = item.gallery?.map((media) => media.url).filter(Boolean) ?? [];
   const single = imageFor(item);
   const list = gallery.length ? gallery : single ? [single] : [];
   const [index, setIndex] = useState(0);
+  if (verified === false) return <UnverifiedImage />;
   return (
     <div className="image-frame-wrap">
-      <ImageFrame src={list[Math.min(index, Math.max(0, list.length - 1))]} alt={item.title} onOpen={onOpen} />
+      {verified === null ? (
+        <div className="image-frame">
+          <span className="image-skeleton" />
+        </div>
+      ) : (
+        <ImageFrame src={list[Math.min(index, Math.max(0, list.length - 1))]} alt={item.title} onOpen={onOpen} />
+      )}
       {list.length > 1 && (
         <div className="image-arrows">
           <button type="button" className="round icon" aria-label="Previous image" onClick={() => setIndex((at) => (at - 1 + list.length) % list.length)}>

@@ -120,6 +120,8 @@ export interface NodeOptions<C> {
   adminToken?: string;
   /** Directory or embedded bundle of the web GUI (for /admin). */
   guiDir?: string | null;
+  /** Keeps expected operational noise out of the console (the demo prints its own script). */
+  quietLogs?: boolean;
 }
 
 export abstract class BaseNode<C extends BaseConfig> {
@@ -564,6 +566,7 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
       cors: true,
       trustProxy: this.config.trustProxy,
       name: this.type,
+      quietFailures: this.options.quietLogs === true,
       // Local tracing: one timeline per API request (dependency + error events), only
       // recorded when the operator has tracing on. Each line carries the request's
       // method, URL and response time — what the call actually was.

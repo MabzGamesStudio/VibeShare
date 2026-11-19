@@ -9,6 +9,7 @@ import type {
   ContentView,
   CreatorView,
   GroupView,
+  LibraryItem,
   NodeEntry,
   SavedState,
   SearchHistoryItem,
@@ -641,5 +642,53 @@ export class Content {
     for (const item of saved.items) item.collections = item.collections.filter((c) => c !== id);
     this.core.store.changed();
     return saved;
+  }
+
+  /**
+   * "Delete locally": drops the cached chunks of one content — its manifest lists them
+   * — and forgets the manifest. Chunks only ever enter the cache behind a manifest, so
+   * a content that cannot be resolved has nothing cached under it either way.
+   */
+  async dropCachedContent(id: string): Promise<{ dropped: number }> {
+    const base = parseContentId(id)?.base ?? id;
+    let dropped = 0;
+    try {
+      const { manifest } = await this.core.fetcher.manifest(base);
+      const cache = this.core.cache as typeof this.core.cache & { drop?: (ids: string[]) => number };
+      dropped = cache.drop?.(manifest.chunks.map((chunk) => chunk.id)) ?? 0;
+    } catch {
+      // Nothing resolved (and nothing cached): the local record still goes.
+    }
+    this.core.fetcher.forget(base);
+    return { dropped };
+  }
+
+  /** Removes one item from the published library this device keeps. */
+  removePublished(id: string): { published: LibraryItem[] } {
+    const data = this.core.store.data.data;
+    data.library = data.library.filter((item) => item.id !== id);
+    this.core.store.changed();
+    return { published: data.library };
+  }
+
+  /**
+   * Asks the chosen nodes to remove or hide one content. Every node decides for itself
+   * and the request goes out on this user's account on each — so the answer says per
+   * node whether the request was sent, and never fails as a whole.
+   */
+  async requestRemoval(input: { nodeIds: string[]; id: string; message?: string }): Promise<{ results: { node: string; name: string; ok: boolean; error?: string }[] }> {
+    const results = await Promise.all(
+      input.nodeIds.map(async (nodeId): Promise<{ node: string; name: string; ok: boolean; error?: string }> => {
+        const node = this.core.nodes.get(nodeId);
+        if (!node) return { node: nodeId, name: nodeId.slice(0, 12), ok: false, error: 'Unknown node' };
+        try {
+          await this.core.nodes.client(node).json('/v1/removals', { method: 'POST', body: { id: input.id, message: input.message || undefined } });
+          return { node: node.id, name: node.name, ok: true };
+        } catch (error) {
+          return { node: node.id, name: node.name, ok: false, error: errorText(error) };
+        }
+      })
+    );
+    return { results };
   }
 }

@@ -57,7 +57,13 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
     setEditing(false);
     setSnapshot(null);
   };
-  const filters = format ? { ...feedPage.filters, formats: [format] } : feedPage.filters;
+  // "Image" means image lists too — they are images packaged in one content. The node
+  // filter stays exact, so both formats travel together.
+  const imageFormats = (formats: typeof feedPage.filters.formats) =>
+    formats.includes('image') && !formats.includes('image-list') ? [...formats, 'image-list'] : formats;
+  const filters = format
+    ? { ...feedPage.filters, formats: format === 'image' ? ['image', 'image-list'] : [format] }
+    : { ...feedPage.filters, formats: imageFormats(feedPage.filters.formats) };
   const enabled = algorithms.filter((node) => node.enabled);
   const subscriptions = state?.subscriptions ?? [];
   const key = JSON.stringify([

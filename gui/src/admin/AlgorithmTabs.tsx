@@ -12,6 +12,7 @@ import {
   type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
+import { ContentDataTab } from '../components/AboutContent';
 import { CopyButton, Loading, Modal } from '../components/ui';
 import { formatDuration, splitList, timeAgo } from '../util';
 import { Groups, Topics } from './GroupsTopics';
@@ -422,6 +423,8 @@ interface Entry {
   thumbnail?: string;
   /** Platform numbers clients claimed (views, likes, comments…). */
   platformStats?: Record<string, number>;
+  /** Free-form content data: short string pairs. */
+  data?: Record<string, string>;
 }
 
 /** Where an entry was found, in operator words (kept separate from its status). */
@@ -605,6 +608,16 @@ function EntryDetails({
             ))}
           </div>
         )}
+        <div>
+          <h3>Content data</h3>
+          <ContentDataTab
+            data={entry.data}
+            onSave={async (next) => {
+              await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}/data`, { body: { data: next } }).catch((e) => show(message(e)));
+              onChanged?.();
+            }}
+          />
+        </div>
       </div>
     </Modal>
   );
@@ -656,6 +669,7 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
     <Modal
       title={entry.id ? 'Edit entry' : 'Add content'}
       onClose={onClose}
+      wide
       actions={
         <button className="primary" onClick={save} disabled={!resolvedId || !draft.title}>
           Save

@@ -9,6 +9,8 @@ import { admin, loadToken, message, setToken } from './api';
 import { PageSize, Pager, useConsoleList } from './paging';
 import { AlgorithmTabs } from './AlgorithmTabs';
 import { ProviderTabs } from './ProviderTabs';
+import { DeleteReview } from './DeleteReview';
+import { Review } from './Review';
 import { TracingTab } from './TracingTab';
 
 export interface Status {
@@ -20,13 +22,17 @@ export interface Status {
   storageService?: { jobs: number; activeAssignments: number; onlineHolders: number };
   registry?: { listed: number; blocked: number; creators: number; pending?: number; discovered?: number };
   pending?: {
-    suggestions: number;
-    submissions: number;
+    suggestions?: number;
+    submissions?: number;
     creatorSuggestions?: number;
     iconSuggestions?: number;
     accountLinks?: number;
     groupSuggestions?: number;
     topicSuggestions?: number;
+    /** Provider: content pushed from outside waiting in the review queue. */
+    reviewContent?: number;
+    /** Removal requests waiting on the delete review page (both node kinds). */
+    removals?: number;
   };
 }
 
@@ -144,14 +150,21 @@ function Overview({ status }: { status: Status }) {
           <div className="stat">
             <div className="label">Waiting for review</div>
             <div className="value">
-              {status.pending.submissions +
-                status.pending.suggestions +
+              {(status.pending.submissions ?? 0) +
+                (status.pending.suggestions ?? 0) +
                 (status.pending.creatorSuggestions ?? 0) +
                 (status.pending.iconSuggestions ?? 0) +
-                (status.pending.accountLinks ?? 0)}
+                (status.pending.accountLinks ?? 0) +
+                (status.pending.reviewContent ?? 0)}
             </div>
             <div className="tiny faint">
-              {status.pending.submissions} submissions · {status.pending.suggestions} suggestions
+              {[
+                status.pending.submissions ? `${status.pending.submissions} submissions` : null,
+                status.pending.suggestions ? `${status.pending.suggestions} suggestions` : null,
+                status.pending.reviewContent ? `${status.pending.reviewContent} pushed content` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
             </div>
           </div>
         )}
@@ -1275,6 +1288,135 @@ function BloomStorage({ config, save }: { config: Record<string, unknown>; save:
   );
 }
 
+interface AlgorithmPeersState {
+  refs: string[];
+  autoAccept: boolean;
+  nodes: { ref: string; id?: string; name?: string; online: boolean; ms?: number; error?: string }[];
+}
+
+/**
+ * Trusted algorithm search nodes: what they have already listed is reviewed content,
+ * so the review queue accepts pushed copies of it automatically (unless the operator
+ * turns that off). Every entry is probed on load, so the list shows what is really
+ * reachable — a broken node accepts nothing and breaks nothing.
+ */
+function AlgorithmPeers() {
+  const [data, setData] = useState<AlgorithmPeersState | null>(null);
+  const [adding, setAdding] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [toast, show] = useToast();
+
+  const load = useCallback(() => {
+    admin<AlgorithmPeersState>('/v1/admin/algorithms')
+      .then(setData)
+      .catch((e) => show(message(e)));
+  }, [show]);
+  useEffect(load, [load]);
+
+  const save = async (patch: { refs?: string[]; autoAccept?: boolean }) => {
+    setBusy(true);
+    try {
+      setData(await admin<AlgorithmPeersState>('/v1/admin/algorithms', { method: 'PUT', body: patch }));
+    } catch (e) {
+      show(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!data) return <Loading />;
+  return (
+    <div className="form-stack">
+      {toast && <div className="banner info small">{toast}</div>}
+      <div className="card form-stack">
+        <h3>Algorithm search node peers</h3>
+        <p className="small muted">
+          Content pushed to this node that one of these algorithm nodes already lists has been reviewed there — the
+          review queue can accept it on its own. Only algorithm search node references (<span className="mono">vs:algorithm:…</span>)
+          belong here.
+        </p>
+        <label className="row small" style={{ gap: 4 }}>
+          <input
+            type="checkbox"
+            checked={data.autoAccept}
+            disabled={busy}
+            onChange={(e) => void save({ autoAccept: e.target.checked })}
+          />
+          Accept content already reviewed by these algorithm nodes automatically
+        </label>
+        <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+          <label className="field" style={{ marginBottom: 0, flex: 1 }}>
+            Add algorithm node references
+            <input
+              className="mono"
+              value={adding}
+              placeholder="vs:algorithm:vk1…@https://search.example — one per line or space-separated"
+              onChange={(e) => setAdding(e.target.value)}
+            />
+          </label>
+          <button
+            className="small"
+            disabled={busy || !adding.trim()}
+            onClick={() => {
+              const refs = adding.split(/[\s,]+/).map((entry) => entry.trim()).filter(Boolean);
+              if (!refs.length) return;
+              setAdding('');
+              void save({ refs: [...data.refs, ...refs] });
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </div>
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Node</th>
+              <th>State</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {data.nodes.length === 0 && (
+              <tr>
+                <td colSpan={3} className="small muted">
+                  No algorithm search nodes are trusted yet.
+                </td>
+              </tr>
+            )}
+            {data.nodes.map((node) => (
+              <tr key={node.ref}>
+                <td>
+                  <strong>{node.name ?? '—'}</strong>
+                  <div className="mono tiny faint" title={node.ref}>
+                    {node.ref}
+                  </div>
+                </td>
+                <td className="small">
+                  {node.online ? (
+                    <span className="badge">online · {node.ms ?? 0} ms</span>
+                  ) : (
+                    <span className="badge danger">offline</span>
+                  )}
+                  {!node.online && node.error ? <div className="tiny faint">{node.error}</div> : null}
+                </td>
+                <td>
+                  <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                    <button className="small danger" disabled={busy} onClick={() => void save({ refs: data.refs.filter((ref) => ref !== node.ref) })}>
+                      Remove
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function AdminApp() {
   const [status, setStatus] = useState<Status | null>(null);
   const [needsLogin, setNeedsLogin] = useState(!loadToken());
@@ -1307,11 +1449,17 @@ export function AdminApp() {
     ['overview', 'Overview'],
     ...(provider
       ? ([
-          ['content', 'Content'],
+          [
+            'content',
+            <>
+              Content
+              {(status.pending?.reviewContent ?? 0) > 0 ? <span className="tab-dot" /> : null}
+            </>,
+          ],
           ['storage', 'Storage'],
           ['tiers', 'Tiers'],
           ['peers', 'Peers'],
-        ] as [string, string][])
+        ] as [string, ReactNode][])
       : ([
           // Review opens the submissions queue; its menu below jumps to the other
           // review pages. A dot (not a count) marks that something is waiting.
@@ -1320,7 +1468,11 @@ export function AdminApp() {
             <>
               Review
               {status.pending &&
-              status.pending.submissions + status.pending.suggestions + (status.pending.creatorSuggestions ?? 0) + (status.pending.iconSuggestions ?? 0) + (status.pending.accountLinks ?? 0) >
+              (status.pending.submissions ?? 0) +
+                (status.pending.suggestions ?? 0) +
+                (status.pending.creatorSuggestions ?? 0) +
+                (status.pending.iconSuggestions ?? 0) +
+                (status.pending.accountLinks ?? 0) >
                 0 ? (
                 <span className="tab-dot" />
               ) : null}
@@ -1383,6 +1535,7 @@ export function AdminApp() {
           // over the content at the top.
           (id === 'content' && provider) ||
           (id === 'storage' && provider) ||
+          (id === 'peers' && provider) ||
           id === 'accounts' ||
           id === 'settings' ||
           id === 'review' ||
@@ -1399,10 +1552,11 @@ export function AdminApp() {
               <button
                 className={`tab ${
                   tab === id ||
-                  (id === 'content' && (tab === 'add-local' || tab === 'suggestions')) ||
+                  (id === 'content' && (tab === 'add-local' || tab === 'suggestions' || tab === 'content-review' || tab === 'delete-review')) ||
                   (id === 'storage' && tab === 'storage-jobs') ||
+                  (id === 'peers' && (tab === 'peers' || tab === 'algorithm-peers')) ||
                   (id === 'accounts' && tab === 'moderation') ||
-                  (id === 'review' && tab.startsWith('review')) ||
+                  (id === 'review' && (tab.startsWith('review') || tab === 'delete-review')) ||
                   (id === 'catalog' && (tab === 'creators' || tab === 'groups' || tab === 'groups-topics'))
                     ? 'on'
                     : ''
@@ -1422,6 +1576,20 @@ export function AdminApp() {
                     <>
                       <button onClick={() => (setTabMenu(null), setTab('add-local'), load())}>Add locally</button>
                       <button onClick={() => (setTabMenu(null), setTab('suggestions'), load())}>Client suggestion</button>
+                      <button onClick={() => (setTabMenu(null), setTab('content-review'), load())}>
+                        Review
+                        {(status.pending?.reviewContent ?? 0) > 0 ? <span className="badge">{status.pending?.reviewContent}</span> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('delete-review'), load())}>
+                        Delete review
+                        {(status.pending?.removals ?? 0) > 0 ? <span className="badge">{status.pending?.removals}</span> : null}
+                      </button>
+                    </>
+                  )}
+                  {id === 'peers' && provider && (
+                    <>
+                      <button onClick={() => (setTabMenu(null), setTab('peers'), load())}>Peering &amp; sync</button>
+                      <button onClick={() => (setTabMenu(null), setTab('algorithm-peers'), load())}>Algorithm search node peers</button>
                     </>
                   )}
                   {id === 'storage' && (
@@ -1451,6 +1619,10 @@ export function AdminApp() {
                       <button onClick={() => (setTabMenu(null), setTab('review-links'), load())}>
                         Account links without the creator key
                         {status.pending?.accountLinks ? <span className="tab-dot" /> : null}
+                      </button>
+                      <button onClick={() => (setTabMenu(null), setTab('delete-review'), load())}>
+                        Delete review
+                        {(status.pending?.removals ?? 0) > 0 ? <span className="badge">{status.pending?.removals}</span> : null}
                       </button>
                     </>
                   )}
@@ -1491,7 +1663,17 @@ export function AdminApp() {
       {tab === 'payments' && <Payments />}
       {tab === 'settings' && <SettingsTab groups={provider ? PROVIDER_GROUPS : ALGORITHM_GROUPS} only={settingsOnly} />}
       {tab === 'tracing' && <TracingTab />}
-      {provider ? <ProviderTabs tab={tab} /> : <AlgorithmTabs tab={tab} />}
+      {tab === 'delete-review' ? (
+        <DeleteReview onChanged={load} />
+      ) : provider && tab === 'content-review' ? (
+        <Review onChanged={load} />
+      ) : provider && tab === 'algorithm-peers' ? (
+        <AlgorithmPeers />
+      ) : provider ? (
+        <ProviderTabs tab={tab} />
+      ) : (
+        <AlgorithmTabs tab={tab} />
+      )}
       <ToastArea />
     </div>
   );

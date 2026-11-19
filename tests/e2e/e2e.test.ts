@@ -11,6 +11,8 @@ describe('a client using a provider and an algorithm node', async () => {
     name: 'Main CDN',
     signup: { grant: 50 },
     pricing: { perMiB: 1, freeMiBPerDay: 0 },
+    // Review off: this suite publishes and expects the content live at once.
+    review: { enabled: false },
   });
   const empty = await startProvider({ name: 'Empty provider', signup: { grant: 50 } });
   const algorithm = await startAlgorithm({ name: 'Curator' });

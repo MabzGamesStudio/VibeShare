@@ -10,10 +10,10 @@ import { log } from '../../shared/node/log.js';
 import { parseNodeRef } from '../../shared/noderef.js';
 import { type ClaimRequest, type ClaimResponse, type ContentItem, type FeedRequest, PAGE_LIMITS, type Page, SUGGESTION_KINDS, type SearchRequest, type SubmissionRequest, claimSigningPayload, pageLimit } from '../../shared/protocol.js';
 import { baseId } from '../../shared/sources.js';
-import { type CreatorKind, FORMATS, RATINGS } from '../../shared/taxonomy.js';
+import { type CreatorKind, FORMATS, type Format, RATINGS } from '../../shared/taxonomy.js';
 import { rank } from '../ranking.js';
 import { claimMultiplier, claimRuleFor } from '../metrics.js';
-import { type Entry, identityOf } from '../registry.js';
+import { cleanData, type Entry, identityOf } from '../registry.js';
 import { SOURCE_CATALOG, sourceKeyOf } from '../sources.js';
 import { nativeSuggestions, pageOf, slug } from '../support.js';
 import { type Submission } from '../contributions.js';
@@ -176,6 +176,7 @@ export function acceptSubmission(node: AlgorithmNode, submission: Submission, ov
     providers: request.providers,
     publishedAt: request.publishedAt,
     thumbnail: submission.hasThumbnail || undefined,
+    data: cleanData(submission.request.data),
     creatorId,
     origin: 'submission',
     ...overrides,
@@ -271,6 +272,18 @@ export async function verifyCreator(node: AlgorithmNode, providerUrl: string, ci
     return undefined;
   }
 }
+/**
+ * The images medium's rule, kept on this side too: a VibeShare-native picture leads
+ * the medium, seen or not. The client applies the same rule to the page when it
+ * arrives — but it can only exempt what the node still returns, so when the request
+ * asks for the image medium the seen filters must keep their hands off the native
+ * pictures and lists here, or the reader who has seen them once never sees them
+ * recommended again (exactly what the operator reported).
+ */
+function leadsImagesMedium(formats: Format[] | undefined, entry: Entry): boolean {
+  return Boolean(formats?.includes('image')) && entry.id.startsWith('vs1') && (entry.format === 'image' || entry.format === 'image-list');
+}
+
 export function registerContentRoutes(node: AlgorithmNode): void {
   const router = node.router;
   const admin = (ctx: Ctx) => node.requireAdmin(ctx);
@@ -296,13 +309,16 @@ export function registerContentRoutes(node: AlgorithmNode): void {
         trace: node.traces,
       });
       // An explore page is always led by a few VibeShare-published pieces, even ones the
-      // reader has seen before; everything after them respects the seen filters.
+      // reader has seen before; in the images medium EVERY native picture and list leads
+      // it, seen or not (see leadsImagesMedium). Everything else respects the seen filters.
       const first = nativeSuggestions(ranked, preferences.formats);
-      const rest = node.withoutSeen(
-        ranked.filter((entry) => !first.includes(entry)),
-        seen
+      const rest = ranked.filter((entry) => !first.includes(entry));
+      const leads = rest.filter((entry) => leadsImagesMedium(preferences.formats, entry));
+      const page = pageOf(
+        node.bySource([...first, ...leads, ...node.withoutSeen(rest.filter((entry) => !leadsImagesMedium(preferences.formats, entry)), seen)]),
+        body.cursor,
+        pageLimit('feed', body.limit, node.config.pageSize)
       );
-      const page = pageOf(node.bySource([...first, ...rest]), body.cursor, pageLimit('feed', body.limit, node.config.pageSize));
       // One summary per feed page: the strategy, the primary blend and what went out.
       node.traces.trace('basic', 'algorithm.feed', 'function:feedPage', {
         message: `${node.config.ranking.strategy} · ${page.items.length} of ${ranked.length} items`,
@@ -348,14 +364,16 @@ export function registerContentRoutes(node: AlgorithmNode): void {
         .map(({ entry }) => entry);
       // A few VibeShare-published pieces come first, whatever the ranking — the ones
       // matching the query, or simply whatever is published when the page just explores —
-      // and they are suggested even when the reader has seen them before. Everything
-      // after those few respects the seen filters.
+      // and in the images medium every native picture and list leads it, seen or not
+      // (see leadsImagesMedium). Everything else respects the seen filters.
       const first = nativeSuggestions(searched, filters.formats);
-      const rest = node.withoutSeen(
-        searched.filter((entry) => !first.includes(entry)),
-        seen
-      );
-      const results = node.bySource([...first, ...rest]);
+      const rest = searched.filter((entry) => !first.includes(entry));
+      const leads = rest.filter((entry) => leadsImagesMedium(filters.formats, entry));
+      const results = node.bySource([
+        ...first,
+        ...leads,
+        ...node.withoutSeen(rest.filter((entry) => !leadsImagesMedium(filters.formats, entry)), seen),
+      ]);
       const page = pageOf(results, body.cursor, pageLimit('search', body.limit, node.config.pageSize));
       // One summary per search: how long the query took and how much it found.
       const ms = Date.now() - started;

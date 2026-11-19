@@ -6,8 +6,10 @@ import type { PeerEntry } from '../../src/shared/protocol.js';
 import { admin, clientFor, randomBytesOf, startAlgorithm, startProvider } from '../helpers.js';
 
 describe('content providers peering', async () => {
-  const a = await startProvider({ name: 'Peer A' });
-  const b = await startProvider({ name: 'Peer B' });
+  // The review queue is off: pushed content goes live at once, which is what these
+  // exchange-and-idempotence flows describe.
+  const a = await startProvider({ name: 'Peer A', review: { enabled: false } });
+  const b = await startProvider({ name: 'Peer B', review: { enabled: false } });
   after(async () => {
     await a.stop();
     await b.stop();
@@ -210,8 +212,9 @@ describe('algorithm nodes peering', async () => {
 });
 
 describe('manual content sync', async () => {
-  const a = await startProvider({ name: 'Sync A' });
-  const b = await startProvider({ name: 'Sync B' });
+  // Review off again: the sync assertions count what the target serves immediately.
+  const a = await startProvider({ name: 'Sync A', review: { enabled: false } });
+  const b = await startProvider({ name: 'Sync B', review: { enabled: false } });
   after(async () => {
     await a.stop();
     await b.stop();

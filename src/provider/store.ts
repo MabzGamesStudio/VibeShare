@@ -10,6 +10,8 @@ export interface ChunkRecord {
   addedAt?: number;
   /** How many stored contents use this chunk. */
   refs: number;
+  /** How many of those contents are still pending review (see ContentRecord.review). */
+  pendingRefs?: number;
   /** Backend id → locator ('' when the backend uses the chunk id as the key). */
   locations: Record<string, string>;
 }
@@ -34,6 +36,12 @@ export interface ContentRecord {
   duplicates?: string[];
   /** The creator shown in the dashboard (the signed manifest's creator is immutable). */
   creatorEdit?: { id: string; name?: string };
+  /**
+   * Review state of content pushed here from outside (client uploads, peer pushes):
+   * pending content is stored but invisible and unserved until the operator accepts
+   * it. Absent means accepted — what every record saved before reviews existed is.
+   */
+  review?: 'pending' | 'accepted' | 'rejected';
 }
 
 interface IndexData {
@@ -254,7 +262,7 @@ export class ContentStore {
     }
   }
 
-  async addContent(manifest: Manifest, uploader: string): Promise<ContentRecord> {
+  async addContent(manifest: Manifest, uploader: string, review?: ContentRecord['review']): Promise<ContentRecord> {
     const cid = contentIdOf(manifest);
     const existing = this.index.data.contents[cid];
     if (existing) return existing;
@@ -262,7 +270,13 @@ export class ContentStore {
       if (!this.hasChunk(chunk.id)) throw new Error(`Chunk ${chunk.id} is missing`);
     }
     const unique = new Set(manifest.chunks.map((chunk) => chunk.id));
-    for (const id of unique) this.index.data.chunks[id].refs++;
+    for (const id of unique) {
+      const chunk = this.index.data.chunks[id];
+      chunk.refs++;
+      // Pending content's own chunks stay hidden until acceptance; the counter keeps a
+      // chunk shared with accepted content servable (refs covers every claim).
+      if (review === 'pending') chunk.pendingRefs = (chunk.pendingRefs ?? 0) + 1;
+    }
     const text = JSON.stringify(manifest);
     this.index.data.manifests[cid] = text;
     // Manifests are tiny; keeping copies next to the chunks lets another node (or a
@@ -293,12 +307,13 @@ export class ContentStore {
       downloads: 0,
       bytesServed: 0,
       creditsEarned: 0,
+      ...(review === 'pending' ? { review } : {}),
     };
     this.index.data.contents[cid] = record;
     this.index.data.order.push(cid);
     this.index.changed();
     this.options.traces?.trace('basic', 'provider.store', 'content added', {
-      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size, uploader: uploader.slice(0, 16) },
+      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size, uploader: uploader.slice(0, 16), review: review ?? 'accepted' },
     });
     return record;
   }
@@ -307,14 +322,18 @@ export class ContentStore {
    * Registers content whose bytes live in the backends (a shared bucket, a mirror,
    * another provider) without copying them first: chunks are fetched on demand.
    */
-  adopt(manifest: Manifest, uploader: string): ContentRecord {
+  adopt(manifest: Manifest, uploader: string, review?: ContentRecord['review']): ContentRecord {
     const cid = contentIdOf(manifest);
     const existing = this.index.data.contents[cid];
     if (existing) return existing;
     for (const chunk of manifest.chunks) {
       this.index.data.chunks[chunk.id] ??= { size: chunk.size, refs: 0, locations: {}, addedAt: Date.now() };
     }
-    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) this.index.data.chunks[id].refs++;
+    for (const id of new Set(manifest.chunks.map((chunk) => chunk.id))) {
+      const chunk = this.index.data.chunks[id];
+      chunk.refs++;
+      if (review === 'pending') chunk.pendingRefs = (chunk.pendingRefs ?? 0) + 1;
+    }
     this.index.data.manifests[cid] = JSON.stringify(manifest);
     const record: ContentRecord = {
       cid,
@@ -329,14 +348,56 @@ export class ContentStore {
       downloads: 0,
       bytesServed: 0,
       creditsEarned: 0,
+      ...(review === 'pending' ? { review } : {}),
     };
     this.index.data.contents[cid] = record;
     this.index.data.order.push(cid);
     this.index.changed();
     this.options.traces?.trace('basic', 'provider.store', 'content adopted', {
-      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size },
+      data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size, review: review ?? 'accepted' },
     });
     return record;
+  }
+
+  /** Content pushed from outside that the operator has not accepted yet, newest first. */
+  pendingContent(): ContentRecord[] {
+    return Object.values(this.index.data.contents)
+      .filter((record) => record.review === 'pending')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Publishes content that was waiting for review: visible, servable and job-able. */
+  acceptContent(cid: string): ContentRecord | undefined {
+    const record = this.index.data.contents[cid];
+    if (!record) return undefined;
+    if (record.review === 'pending') {
+      record.review = 'accepted';
+      for (const chunk of this.getManifest(cid)?.chunks ?? []) {
+        const entry = this.index.data.chunks[chunk.id];
+        if (entry) entry.pendingRefs = Math.max(0, (entry.pendingRefs ?? 0) - 1);
+      }
+      this.index.changed();
+      this.options.traces?.trace('basic', 'provider.store', 'content accepted', {
+        data: { cid: cid.slice(0, 16), chunks: record.chunks, bytes: record.size },
+      });
+    }
+    return record;
+  }
+
+  /** True while content pushed from outside waits for the operator's review. */
+  isPending(cid: string): boolean {
+    return this.index.data.contents[cid]?.review === 'pending';
+  }
+
+  /**
+   * Whether a chunk may be served or advertised: bytes that only pending-review
+   * content claims stay hidden, as if the node had never heard of them.
+   */
+  servesChunk(id: string): boolean {
+    const record = this.index.data.chunks[id];
+    if (!record) return false;
+    const pending = record.pendingRefs ?? 0;
+    return pending <= 0 || record.refs > pending;
   }
 
   getContent(cid: string): ContentRecord | undefined {
@@ -389,6 +450,7 @@ export class ContentStore {
   async deleteContent(cid: string): Promise<boolean> {
     const manifest = this.getManifest(cid);
     if (!manifest) return false;
+    const pending = this.index.data.contents[cid]?.review === 'pending';
     delete this.index.data.contents[cid];
     delete this.index.data.manifests[cid];
     this.index.data.order = this.index.data.order.filter((id) => id !== cid);
@@ -398,6 +460,7 @@ export class ContentStore {
       const record = this.index.data.chunks[id];
       if (!record) continue;
       record.refs--;
+      if (pending) record.pendingRefs = Math.max(0, (record.pendingRefs ?? 0) - 1);
       if (record.refs > 0) continue;
       for (const [backendId, locator] of Object.entries(record.locations)) {
         const backend = backends.find((b) => b.id === backendId);
@@ -436,13 +499,16 @@ export class ContentStore {
     return true;
   }
 
-  /** Newest first. */
+  /** Newest first. Pending-review content is invisible here until it is accepted. */
   list(offset: number, limit: number): ContentRecord[] {
     const order = this.index.data.order;
     const out: ContentRecord[] = [];
-    for (let i = order.length - 1 - offset; i >= 0 && out.length < limit; i--) {
+    let skipped = 0;
+    for (let i = order.length - 1; i >= 0 && out.length < limit; i--) {
       const record = this.index.data.contents[order[i]];
-      if (record) out.push(record);
+      if (!record || record.review === 'pending') continue;
+      if (skipped++ < offset) continue;
+      out.push(record);
     }
     return out;
   }
@@ -466,7 +532,8 @@ export class ContentStore {
   }
 
   stats(): { contents: number; bytes: number; chunks: number } {
-    const contents = Object.values(this.index.data.contents);
+    // Pending-review content is not catalog content yet — it counts once accepted.
+    const contents = Object.values(this.index.data.contents).filter((record) => record.review !== 'pending');
     return {
       contents: contents.length,
       bytes: contents.reduce((sum, record) => sum + record.size, 0),

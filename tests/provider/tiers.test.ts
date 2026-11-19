@@ -165,16 +165,26 @@ describe('content storage tiers', () => {
         const port = (server.address() as AddressInfo).port;
         const deadUrl = `http://127.0.0.1:${port}/gone/${cid}`;
         const goodUrl = `http://127.0.0.1:${port}/files/${cid}`;
-        // The dead endpoint is offered first: the test must skip past it to the good one.
+        // Both endpoints are offered. Offering one probes it in the background: the good
+        // endpoint is then known to work and sorts ahead of the dead one, so the next test
+        // starts with it instead of burning a request on the dead URL first.
         await user.json('/v1/content-urls', { body: { cid, url: deadUrl } });
         await user.json('/v1/content-urls', { body: { cid, url: goodUrl } });
+        // Wait for the offer probes to land (the good one records when it last served).
+        for (let tick = 0; tick < 100; tick++) {
+          const items = (provider as unknown as { contentUrls: { data: { items: Record<string, { url?: string; lastOkAt?: number }> } } })
+            .contentUrls.data.items;
+          const good = Object.values(items).find((record) => record.url === goodUrl);
+          if (good?.lastOkAt) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         const testing = await admin<{
           test: { ok: boolean; account?: string; endpoint?: string; chunks?: { matched: number; total: number }; checked: number; total: number };
         }>(provider.url(), `/v1/admin/storage/jobs/${job.id}/test`, { method: 'POST', body: { account: account.id } });
-        assert.equal(testing.test.ok, true, 'the first working endpoint serves the content');
+        assert.equal(testing.test.ok, true, 'the working endpoint serves the content');
         assert.equal(testing.test.account, account.id);
         assert.equal(testing.test.endpoint, goodUrl);
-        assert.equal(testing.test.checked, 2, 'the dead endpoint was tried first');
+        assert.equal(testing.test.checked, 1, 'the endpoint known to work is tried before the dead one');
         assert.equal(testing.test.chunks?.matched, testing.test.chunks?.total, 'every chunk matches the content id');
 
         // The working endpoint moved to the top of that user's list.
