@@ -196,7 +196,9 @@ export interface VvshBuildConfig {
 /** What a build gets when the user picks nothing of their own. */
 export const DEFAULT_VVSH_BUILD: VvshBuildConfig = {
   chunkSeconds: 10,
-  previewSplits: 6,
+  // Ten scrubbing previews at least: a short video is as easy to seek through as a long
+  // one (publishers who want none ask for 0 explicitly).
+  previewSplits: 10,
   bitrates: [
     { id: '2160p', label: '4K', height: 2160, kbps: 20_000 },
     { id: '1080p', label: '1080p', height: 1080, kbps: 5_000 },
@@ -309,32 +311,50 @@ export async function buildVvsh(
     { init: Uint8Array; initHash: VvshHash; chunks: { data: Uint8Array; frames: VvshFrameStats }[]; totals: VvshFrameStats }
   >();
   if (options.webm) {
-    const chunkUnits = (config.chunkSeconds * 1e9) / 1e6; // timecode units per chunk (ms by default)
     for (const rendition of config.bitrates) {
       const files = options.webm[rendition.id];
       if (!files || !files.length) throw new Error(`No encoded stream for ${rendition.id}`);
       if (files.length !== chunkCount) throw new Error(`Encoding ${rendition.id} has ${files.length} chunks, expected ${chunkCount}`);
       const first = splitWebm(files[0]);
-      const init = Uint8Array.from(first.init);
-      patchDuration(init, options.totalSeconds * 1000);
+      // Every cluster sits on the stream's timeline in the init's timecode units — the
+      // unit is the file's TimestampScale, milliseconds by convention but no promise a
+      // recording makes. One recording's clock is its own: its clusters start at zero.
+      const unit = first.timecodeScale;
+      const slotUnits = (config.chunkSeconds * 1e9) / unit;
+      let init: Uint8Array = Uint8Array.from(first.init);
+      init = patchDuration(init, options.totalSeconds * 1000);
       const initHash = vvshPayloadHash(init);
       await emit(initHash, init, 'payload');
       bytesByRendition.set(rendition.id, init.length);
       const totals: VvshFrameStats = { i: 0, p: 0, b: 0 };
       const chunks = files.map((file, index) => {
-        const { clusters } = splitWebm(file);
+        const { clusters, timecodeScale } = splitWebm(file);
         // Every chunk must fit its own time slot: one from another chunk length would sit
         // in the wrong place on the stream's timeline and break playback after it.
-        const span = Math.max(...clusters.map((cluster) => readClusterTimecode(cluster))) - Math.min(...clusters.map((cluster) => readClusterTimecode(cluster)));
-        if (span > chunkUnits * 1.5) {
-          throw new Error(`Encoding ${rendition.label || rendition.id} chunk ${index + 1} spans ${Math.round(span / 1000)}s but its slot is ${config.chunkSeconds}s — it was encoded with a different chunk length`);
+        const times = clusters.map((cluster) => readClusterTimecode(cluster));
+        const lo = Math.min(...times);
+        const span = Math.max(...times) - lo;
+        if ((span * timecodeScale) / 1e6 > config.chunkSeconds * 1.5 * 1000) {
+          throw new Error(`Encoding ${rendition.label || rendition.id} chunk ${index + 1} spans ${Math.round((span * timecodeScale) / 1e6)}ms but its slot is ${config.chunkSeconds}s — it was encoded with a different chunk length`);
         }
         const pieces: Uint8Array[] = [];
         const frames: VvshFrameStats = { i: 0, p: 0, b: 0 };
+        // A recording runs on its own clock — it starts a little before its content (the
+        // player ramps up) and stops a little after — so its clusters are fitted into
+        // the exact time slot instead of being dropped at the chunk's own coordinates:
+        // a few hundred milliseconds of overlap would otherwise regress the timeline at
+        // every chunk border and playback would stop at the first one.
+        const slotStart = index * slotUnits;
+        const fit = span <= slotUnits - 1 ? 1 : (slotUnits - 1) / span;
+        let previous = slotStart - 1;
         for (const cluster of clusters) {
+          const observed = readClusterTimecode(cluster);
+          const at = slotStart + Math.round((observed - lo) * fit);
+          const timecode = Math.max(previous + 1, Math.min(at, slotStart + slotUnits - 1));
+          previous = timecode;
           // Rebuild the Cluster if its global timestamp needs a wider EBML field. An
           // in-place write can wrap (3000 into one byte becomes 184), reordering playback.
-          const piece = withClusterTimecode(Uint8Array.from(cluster), Math.round(index * chunkUnits + readClusterTimecode(cluster)));
+          const piece = withClusterTimecode(Uint8Array.from(cluster), timecode);
           const counted = countClusterFrames(piece);
           frames.i += counted.key;
           frames.p += counted.delta;

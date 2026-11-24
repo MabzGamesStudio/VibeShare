@@ -502,6 +502,9 @@ input[type='number'],
 input[type='password'],
 input[type='search'],
 input[type='url'],
+input[type='date'],
+input[type='datetime-local'],
+input[type='file'],
 select,
 textarea {
   width: 100%;
@@ -539,6 +542,15 @@ label.field > span.hint,
   font-weight: 400;
   font-size: 12.5px;
   color: var(--text-faint);
+}
+
+/* The section labels of the search filters: readable text with weight and contrast,
+   not the faint hint style. */
+.filter-label {
+  margin-bottom: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .form-grid {
@@ -1577,11 +1589,25 @@ table.table {
   margin-bottom: 14px;
 }
 
+/* The action row pins to the dialog's bottom and the content scrolls above it. The
+   modal's bottom padding lives on the row itself: a sticky row is clamped to its
+   containing block, so with the padding still on the modal the content would peek out
+   in the band beneath the row. */
+.modal:has(.modal-actions) {
+  padding-bottom: 0;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 22px;
+  margin: 22px -24px 0;
+  padding: 14px 24px 24px;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
 }
 
 .toasts {
@@ -2050,6 +2076,16 @@ img.poster-contain {
   color: var(--accent);
 }
 
+/* The privacy placeholder's stack in the player area: centred in it, horizontally and
+   vertically (its text block would otherwise stick to the left of a wider stack). */
+.embed-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 480px;
+  padding: 6px 12px;
+}
+
 /* The algorithm node's own preview of the content, standing in for the platform's
    picture of the video on the video page when cookies are off. */
 .watch-preview {
@@ -2351,20 +2387,6 @@ button.media-poster {
   overflow: hidden;
 }
 
-.shorts-header {
-  position: absolute;
-  top: 14px;
-  left: 22px;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.shorts-header h1 {
-  font-size: 20px;
-}
-
 .shorts {
   height: 100%;
   width: 100%;
@@ -2518,18 +2540,6 @@ button.rail-button:hover {
 
 .modal.modal-wide {
   width: min(940px, 100%);
-  padding-bottom: 26px;
-}
-
-/* The buttons of long dialogs stay in reach. */
-.modal-wide .modal-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  margin: 22px -24px 0;
-  padding: 14px 24px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
 }
 
 .editor {
@@ -3508,13 +3518,6 @@ button.layout-option.on {
     background: rgba(0, 0, 0, 0.38);
   }
 
-  .shorts-header {
-    top: 10px;
-    left: 12px;
-    color: white;
-    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
-  }
-
   .shorts-nav {
     display: none;
   }
@@ -3759,22 +3762,15 @@ button.layout-option.on {
   object-position: top;
 }
 
-/* The picture's place while its full resolution is still coming in. */
+/* The picture's place until the full resolution comes in — or forever, when the preview
+   is missing. Static on purpose: a shimmer would promise movement where nothing more
+   is coming. */
 .image-skeleton {
   position: absolute;
   inset: 0;
   background: linear-gradient(100deg, var(--bg-elev-2) 35%, var(--bg-hover) 50%, var(--bg-elev-2) 65%);
   background-size: 220% 100%;
-  animation: image-shimmer 1.3s linear infinite;
-}
-
-@keyframes image-shimmer {
-  from {
-    background-position: 130% 0;
-  }
-  to {
-    background-position: -90% 0;
-  }
+  background-position: 50% 0;
 }
 
 /* Clicking a picture opens it fullscreen in place: the feed keeps its place behind it. */

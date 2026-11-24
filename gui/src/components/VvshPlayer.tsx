@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Download, FileDown, Gauge, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { chunkAt, pathToChunk, previewAt, serializeVvshFile, type VvshFile } from '../../../src/shared/vvsh.js';
+import { readClusterTimecode, webmClusters, webmStandaloneInit } from '../../../src/shared/webm';
 import { assembleVvshWebm, decodeVvshChunk, decodeVvshFrames, exportVvshStream, normalizeVvshWebmChunk } from '../../../src/shared/vvsh-encode.js';
 import { fromBase64url, base64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage, streamUrl } from '../api';
@@ -134,7 +135,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     initHash: string;
     requested: Set<number>;
     appended: Set<number>;
-    queue: Uint8Array[];
+    queue: { bytes: Uint8Array; note: string }[];
     working: boolean;
   } | null>(null);
 
@@ -144,7 +145,10 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     if (have) return have;
     const rendition = meta.bitrates.find((entry) => entry.id === id) ?? meta.bitrates[0];
     if (!segmented) return new Uint8Array(0);
-    const bytes = await fetchObject(nodeId, rendition.initHash ?? '');
+    // The stored init closes its Segment around the tracks; the clusters appended after
+    // it belong to the same Segment, so it is opened again here (the download path does
+    // the same in assembleVvshWebm).
+    const bytes = webmStandaloneInit(await fetchObject(nodeId, rendition.initHash ?? ''));
     inits.current.set(id, bytes);
     return bytes;
   };
@@ -156,16 +160,26 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     const next = st.queue.shift();
     if (!next) return;
     st.working = true;
-    st.buffer.appendBuffer(next as unknown as BufferSource);
+    try {
+      st.buffer.appendBuffer(next.bytes as unknown as BufferSource);
+      debugLog('append', `${next.note} · appended`);
+    } catch (error) {
+      // A rejected append is the end of the sparse path: the video goes on as one
+      // assembled file instead of stopping here, and the debug log says why.
+      st.working = false;
+      const v = video.current;
+      void playAssembled(v?.currentTime ?? 0, Boolean(v && !v.paused), `append rejected — ${errorMessage(error)}`);
+      return;
+    }
     st.buffer.onupdateend = () => {
       st.working = false;
       msePump();
     };
   };
-  const mseAppend = (bytes: Uint8Array) => {
+  const mseAppend = (bytes: Uint8Array, note: string) => {
     const st = mse.current;
     if (!st) return;
-    st.queue.push(bytes);
+    st.queue.push({ bytes, note });
     msePump();
   };
 
@@ -178,7 +192,16 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
       const block = await fetchChunk(nodeId, file, index, id);
       if (mse.current !== st) return;
       st.appended.add(index);
-      mseAppend(block);
+      // The debug log names every segment that reaches the browser: which chunk, how
+      // many bytes, and where it sits on the timeline — that is where a stop shows up.
+      let at = '?';
+      try {
+        const first = webmClusters(block)[0];
+        if (first) at = String(readClusterTimecode(first));
+      } catch {
+        // not a WebM segment (a frames-mode stream plays elsewhere)
+      }
+      mseAppend(block, `chunk ${index} · ${block.length} bytes · first cluster t=${at}`);
     } catch (error) {
       // A failed request is not an appended chunk: the next window may retry it.
       st.requested.delete(index);
@@ -228,7 +251,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     source.duration = meta.totalSeconds;
     st.buffer = source.addSourceBuffer(mseMime);
     st.buffer.onerror = () => setError('The browser rejected a video chunk while buffering it');
-    mseAppend(Uint8Array.from(await ensureInit(id)));
+    mseAppend(Uint8Array.from(await ensureInit(id)), 'init segment');
     await mseWant(chunkAt(meta, at), id); // the chunk being played goes first, always
     const v = video.current;
     if (v) {
@@ -256,6 +279,11 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   const [videoUrl, setVideoUrl] = useState('');
   const queue = useRef<Promise<void>>(Promise.resolve()); // (unused now that fetching runs in parallel lanes)
   const shell = useRef<HTMLDivElement | null>(null);
+  // The assembled-file fallback, once: when media segments cannot continue (a rejected
+  // append, or a chunk border the browser will not cross) the whole stream plays as one
+  // file instead — the video goes on rather than stopping at the border.
+  const fallback = useRef(false);
+  const stallTimer = useRef<number>(0);
   const [rate, setRate] = useState(1);
   const [volume, setVolume] = useState(1);
   const scrubResume = useRef(false);
@@ -278,6 +306,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     }
     return () => {
       alive.current = false;
+      window.clearTimeout(stallTimer.current);
       // Dropping the element is not enough: the browser keeps its media loader (and the
       // range requests behind it) running after the node is gone. Taking the source off
       // stops every byte of it at once — leaving the page fetches nothing further.
@@ -361,7 +390,8 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
   }, [wake]);
 
   // Streamed chunks only: the browser either range-streams the file or gets media
-  // segments appended — the video is never downloaded whole and assembled here.
+  // segments appended — and if the segments will not continue past a chunk border, the
+  // whole stream plays as one assembled file (the fallback above) rather than stopping.
 
   /** Moves playback to another encoding without stopping it. */
   const switchTo = useCallback(
@@ -454,6 +484,47 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
     },
     [meta, mseOk, prefetchSeconds]
   );
+
+  /**
+   * The fallback when media segments will not continue: every chunk of the current
+   * encoding is fetched (each one verified) and patched into one plain WebM file here,
+   * which plays from the moment that was reached. The cause goes to the debug log so a
+   * report can name why the sparse path gave up.
+   */
+  const playAssembled = async (at: number, play: boolean, cause: string) => {
+    if (fallback.current || !alive.current) return;
+    fallback.current = true;
+    window.clearTimeout(stallTimer.current);
+    debugLog('fallback', `media segments stopped (${cause}) — continuing with the assembled file`);
+    try {
+      const chosen = meta.bitrates.find((entry) => entry.id === active.current) ?? meta.bitrates[0];
+      const pieces: Uint8Array[] = [];
+      for (let index = 0; index < meta.chunkCount; index++) {
+        if (!alive.current) return;
+        const answer = await api<{ data: string }>('/api/vvsh/chunk', {
+          body: { nodeId, root: file.root, chunkCount: meta.chunkCount, index, rendition: chosen.id },
+        });
+        pieces.push(fromBase64url(answer.data));
+        debugLog('fallback', `chunk ${index} + ${pieces[pieces.length - 1].length} bytes`);
+      }
+      const whole =
+        meta.codec === 'vvsh-webm/1'
+          ? assembleVvshWebm(await fetchObject(nodeId, chosen.initHash ?? ''), pieces, {
+              chunkSeconds: meta.chunkSeconds,
+              durationSeconds: meta.totalSeconds,
+            })
+          : exportVvshStream(pieces);
+      const url = URL.createObjectURL(new Blob([Uint8Array.from(whole)], { type: meta.codec === 'vvsh-webm/1' ? 'video/webm' : (meta.sourceMime ?? 'video/mp4') }));
+      wantTime.current = at;
+      wantPlay.current = play;
+      setVideoUrl((old) => {
+        if (old) staleUrls.current.push(old);
+        return url;
+      });
+    } catch (error) {
+      setError(`This video could not keep playing: ${errorMessage(error)}`);
+    }
+  };
 
   useEffect(() => {
     // Once, on open: whatever stream this is, it opens on its own streaming path.
@@ -578,6 +649,22 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             else v.pause();
           }}
           onPlay={() => setPlaying(true)}
+          onPlaying={() => {
+            // Frames are moving again: whatever buffering was, it passed.
+            window.clearTimeout(stallTimer.current);
+            setPlaying(true);
+          }}
+          onWaiting={() => {
+            if (!mse.current || fallback.current) return;
+            // Buffering is normal at the edges of what has been fetched; if playback does
+            // not resume shortly while the video is not over, the sparse path is stuck at
+            // a chunk border — continue with the assembled file instead of stopping there.
+            window.clearTimeout(stallTimer.current);
+            stallTimer.current = window.setTimeout(() => {
+              const v = video.current;
+              if (v && !v.ended && !fallback.current) void playAssembled(v.currentTime, !v.paused, 'playback stalled at a chunk border');
+            }, 4000);
+          }}
           onPause={() => setPlaying(false)}
           onError={() => {
             // Streamed chunks only: there is no whole-file path to fall back to here.
@@ -597,6 +684,7 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
+            window.clearTimeout(stallTimer.current);
             // The thumb follows the video only while the user is not holding it.
             if (!scrubbingRef.current) setSeconds(v.currentTime);
             if (native.current) return; // the browser's readahead handles what comes next
@@ -813,14 +901,6 @@ export function VvshPlayer({ nodeId, file, name }: { nodeId: string; file: VvshF
             </div>
           </div>
         </div>
-      </div>
-      <div className="row between">
-        <span className="hint">
-          chunk {chunkAt(meta, seconds) + 1} of {meta.chunkCount} · {fetched} fetched (charged each){busy ? ' · fetching…' : ''}
-        </span>
-        <span className="hint">
-          {Math.round(meta.chunkSeconds)}s chunks · prefetching {Math.max(meta.chunkSeconds, prefetchSeconds)}s ahead
-        </span>
       </div>
       {error && <div className="banner danger small">{error}</div>}
     </div>

@@ -322,6 +322,7 @@ export class Publisher {
       language: request.language || undefined,
       creator: profile.name ? { name: profile.name, kind: profile.kind } : undefined,
       thumbnail: request.thumbnail,
+      data: request.data,
       publishedAt: library.publishedAt,
     };
     let done = 0;

@@ -475,15 +475,19 @@ export class ClientNode {
           if (/\/api\/tracing\//.test(label)) return '';
           return this.traces.recorder.start({ kind: 'api', label }, parent);
         },
+        // Payload prefixes are captured at detail level only, by the client's own
+        // trace settings (off = nothing captured anywhere).
+        payloadChars: () => (this.traces.recorder.shouldLog('detail') ? this.traces.settingsView().payloadChars : false),
         done: (traceId, info) =>
           this.traces.trace('dependency', 'api', 'request ok', {
             traceId,
-            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            // The payload prefixes are already redacted and cut to the capture limit.
+            data: { url: info.path, method: info.method, status: info.status, ms: info.ms, requestPayload: info.requestPayload, responsePayload: info.responsePayload },
           }),
         failed: (traceId, info, error) =>
           this.traces.trace('error', 'api', 'request failed', {
             traceId,
-            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            data: { url: info.path, method: info.method, status: info.status, ms: info.ms, requestPayload: info.requestPayload, responsePayload: info.responsePayload },
             error: (error as Error).message,
           }),
       },

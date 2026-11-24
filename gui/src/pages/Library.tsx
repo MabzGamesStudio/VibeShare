@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { HistoryItem, LibraryItem, SavedState } from '../../../src/shared/clientapi';
 import { api, errorMessage } from '../api';
+import { RemovalModal } from '../components/RequestRemoval';
 import { SaveCidButton } from '../components/SaveCid';
-import { CopyButton, Empty, Loading, Modal } from '../components/ui';
+import { CopyButton, Empty, Loading } from '../components/ui';
 import { useApp } from '../state';
 import { formatBytes, timeAgo, watchPath } from '../util';
 
@@ -92,91 +93,6 @@ function RemovalButtons({ onDelete, onRemove }: { onDelete: () => void; onRemove
         Request removal
       </button>
     </div>
-  );
-}
-
-/** Asking the nodes to remove or hide one content: which nodes, and why (optionally). */
-function RemovalModal({ target, onClose }: { target: { id: string; title: string }; onClose: () => void }) {
-  const { state, toast } = useApp();
-  const nodes = state?.nodes ?? [];
-  const [chosen, setChosen] = useState<string[]>(() => nodes.filter((node) => node.enabled).map((node) => node.id));
-  const [message, setMessage] = useState('');
-  const [sending, setSending] = useState(false);
-  const [results, setResults] = useState<{ node: string; name: string; ok: boolean; error?: string }[] | null>(null);
-
-  const send = async () => {
-    setSending(true);
-    try {
-      const answer = await api<{ results: { node: string; name: string; ok: boolean; error?: string }[] }>('/api/removals', {
-        method: 'POST',
-        body: { nodeIds: chosen, id: target.id, message: message.trim() || undefined },
-      });
-      setResults(answer.results);
-      const sent = answer.results.filter((result) => result.ok).length;
-      toast(`Removal requested on ${sent} of ${answer.results.length} nodes`, sent ? 'success' : 'error');
-    } catch (error) {
-      toast(errorMessage(error), 'error');
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <Modal
-      title="Request content removal"
-      onClose={onClose}
-      actions={
-        results ? (
-          <button className="primary" onClick={onClose}>
-            Close
-          </button>
-        ) : (
-          <>
-            <button onClick={onClose}>Cancel</button>
-            <button className="primary" disabled={sending || chosen.length === 0} onClick={() => void send()}>
-              {sending ? 'Sending…' : 'Send request'}
-            </button>
-          </>
-        )
-      }
-    >
-      <div className="form-stack">
-        <p className="small muted">
-          This asks the nodes you pick to remove or hide <strong>{target.title}</strong>. Each node decides for itself — the request goes out
-          on your account on it, and only the nodes that can delete or hide the content will.
-        </p>
-        <div className="field">
-          Nodes to ask
-          {nodes.map((node) => (
-            <label key={node.id} className="row small" style={{ gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={chosen.includes(node.id)}
-                onChange={(e) => setChosen((current) => (e.target.checked ? [...current, node.id] : current.filter((entry) => entry !== node.id)))}
-              />
-              {node.name} <span className="faint">· {node.type}</span>
-            </label>
-          ))}
-          {!nodes.length && <span className="hint">No nodes are configured yet.</span>}
-        </div>
-        <label className="field">
-          Message <span className="hint">(optional)</span>
-          <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={3} placeholder="Why this content should be removed" />
-        </label>
-        {results && (
-          <div className="field">
-            Results
-            {results.map((result) => (
-              <div key={result.node} className="row small" style={{ gap: 8 }}>
-                {result.ok ? <span className="badge ok">sent</span> : <span className="badge danger">failed</span>}
-                <span>{result.name}</span>
-                {result.error && <span className="faint">{result.error}</span>}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </Modal>
   );
 }
 

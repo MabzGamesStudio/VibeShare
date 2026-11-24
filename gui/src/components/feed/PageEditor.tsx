@@ -18,7 +18,7 @@ import {
   type PageSource,
   type ShortButton,
 } from '../../../../src/shared/clientapi';
-import { presetPage } from '../../../../src/shared/clientdefaults';
+import { DEFAULT_BLOCKED_TOPICS, presetPage } from '../../../../src/shared/clientdefaults';
 import type { CreatorInfo, TopicInfo } from '../../../../src/shared/protocol';
 import {
   FORMAT_LABELS,
@@ -111,9 +111,15 @@ function AddPickRow({ kind, onAdd }: { kind: 'topic' | 'creator'; onAdd: (pick: 
     setBusy(true);
     try {
       const missing = kind === 'topic' ? 'No topic matches that name' : 'No creator matches that name';
+      const topicId = query.startsWith('tp1') ? query : topicIdOf(query);
       const pick = await resolvePick(kind, query);
-      if (pick) onAdd(pick);
-      else if (kind === 'topic') onAdd({ id: query.startsWith('tp1') ? query : topicIdOf(query), name: query });
+      // A topic is added exactly as the user typed it: a resolved pick only counts when
+      // it IS that topic (its id or its name) — the fuzzy first match never replaces the
+      // user's words ("thing" is not "thingaweek"). Creators keep resolving to whatever
+      // the nodes know.
+      const exact = pick && (kind !== 'topic' || pick.id === topicId || pick.name.toLowerCase() === query.toLowerCase());
+      if (exact) onAdd(pick);
+      else if (kind === 'topic') onAdd({ id: topicId, name: query });
       else if (!/\s/.test(query) && /^[a-z0-9]+[:._~-]/i.test(query)) onAdd({ id: query, name: query });
       else toast(missing, 'error');
       setText('');
@@ -238,7 +244,11 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
   const navigate = useNavigate();
   const location = useLocation();
   const [draft, setDraft] = useState<PageConfig>(() => ({ ...page, filters: { ...page.filters }, options: { ...page.options } }));
-  const [labels, setLabels] = useState<Record<string, string>>({});
+  // The default-excluded topics carry their names from the start, so they show as
+  // "ai-slop" and "rage-bait" (in the block state) even before any node knows them.
+  const [labels, setLabels] = useState<Record<string, string>>(() =>
+    Object.fromEntries(DEFAULT_BLOCKED_TOPICS.map((name) => [topicIdOf(name), name]))
+  );
   // Topics and creators deselected in this modal: shown dimmed so a click can still cycle
   // them to blacklisted, but never written to the page — a deselected pick is forgotten.
   const [dropped, setDropped] = useState<{ topic: string[]; creator: string[] }>({ topic: [], creator: [] });
@@ -470,7 +480,7 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
           <div className="form-stack">
             <label className="field">
               Title
-              <input value={draft.title} maxLength={40} onChange={(e) => set({ title: e.target.value })} />
+              <input type="text" value={draft.title} maxLength={40} onChange={(e) => set({ title: e.target.value })} />
             </label>
             <div className="field">
               <span>Show in left panel</span>
@@ -524,7 +534,7 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
                 <>
                   <label className="field">
                     Search for
-                    <input value={draft.query ?? ''} placeholder="#topics, @creators, words" onChange={(e) => set({ query: e.target.value })} />
+                    <input type="text" value={draft.query ?? ''} placeholder="#topics, @creators, words" onChange={(e) => set({ query: e.target.value })} />
                   </label>
                   <label className="field">
                     Order

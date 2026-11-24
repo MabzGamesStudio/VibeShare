@@ -2040,10 +2040,15 @@ export class ProviderNode extends BaseNode<ProviderConfig> {
       const body = await readJson<{ manifest?: Manifest }>(ctx.req, 2 * 1024 * 1024);
       const manifest = validateManifest(body.manifest);
       if (!manifest.vvsh) throw badRequest('This manifest carries no vvsh stream');
-      await this.store.addContent(manifest, account.id);
+      // Pushed content waits for review like any other upload — the operator accepts
+      // it in the Review tab, or a trusted algorithm node's listing clears it.
+      await this.store.addContent(manifest, account.id, this.config.review.enabled ? 'pending' : undefined);
       const cid = contentIdOf(manifest);
-      if (this.config.tiers.auto) this.tiers.assign(cid, this.store.getContent(cid)?.size ?? 0, manifest.meta?.title ?? manifest.name);
-      return { cid, status: 'ready' };
+      if (this.config.tiers.auto && !this.store.isPending(cid)) {
+        this.tiers.assign(cid, this.store.getContent(cid)?.size ?? 0, manifest.meta?.title ?? manifest.name);
+      }
+      this.autoAcceptReviewed(cid);
+      return { cid, status: this.store.isPending(cid) ? 'pending' : 'ready' };
     });
 
     router.get('/v1/catalog', (ctx) => {

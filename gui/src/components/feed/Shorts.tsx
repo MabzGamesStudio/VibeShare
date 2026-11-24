@@ -166,7 +166,7 @@ function Short({
  * One short at a time, filling the screen. Swipe (or scroll, or use the arrow keys) up
  * and down; the short in view plays, the others stop. More load as you go.
  */
-export function ShortsLayout({ paged, page, ipfsGateway, header, empty }: { paged: Paged; page: PageConfig; ipfsGateway: string; header: ReactNode; empty: ReactNode }) {
+export function ShortsLayout({ paged, page, ipfsGateway, empty }: { paged: Paged; page: PageConfig; ipfsGateway: string; empty: ReactNode }) {
   const { items, loading, done, loadMore } = paged;
   const container = useRef<HTMLDivElement | null>(null);
   const [height, setHeight] = useState<number | undefined>();
@@ -177,13 +177,16 @@ export function ShortsLayout({ paged, page, ipfsGateway, header, empty }: { page
   const activeRef = useRef(active);
   activeRef.current = active;
 
-  // Fill the window below the top bar.
+  // Fill the window below the top bar — and stop at the page wrapper's bottom padding,
+  // so the cover plus that padding end exactly at the window bottom (the shorts page
+  // wears the same page padding as every other page, with no sliver left to scroll).
   useLayoutEffect(() => {
     const fit = () => {
       const element = container.current;
       if (!element) return;
       const top = element.getBoundingClientRect().top + window.scrollY;
-      setHeight(Math.max(360, window.innerHeight - top));
+      const bottom = Number.parseFloat(getComputedStyle(element.parentElement ?? element).paddingBottom) || 0;
+      setHeight(Math.max(360, window.innerHeight - top - bottom));
     };
     window.scrollTo(0, 0);
     fit();
@@ -259,7 +262,6 @@ export function ShortsLayout({ paged, page, ipfsGateway, header, empty }: { page
 
   return (
     <div className="shorts-wrap" style={{ height }}>
-      <div className="shorts-header">{header}</div>
       <div className="shorts" ref={container} onScroll={onScroll} tabIndex={-1}>
         {items.map((item, index) => {
           const distance = Math.abs(index - active);

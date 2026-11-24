@@ -62,6 +62,19 @@ export interface CrawlerConfig {
   searchCacheMinutes: number;
   /** Hours before a subscribed creator is looked up on its platform again. */
   creatorRefreshHours: number;
+  /**
+   * The bounded background subscriptions job: one run per subscriptions request works
+   * through the subscription list a few creators per tick, within these budgets. What
+   * one run does not reach stays queued for the next one.
+   */
+  subscriptionsJob: {
+    /** Most creators one run looks up (0 = the job never runs). */
+    maxCreatorsPerRun: number;
+    /** Most platform calls one run makes (one creator lookup is one call). */
+    maxCallsPerRun: number;
+    /** How many seconds one run may work before it stops and queues the rest. */
+    maxRunSeconds: number;
+  };
   /** Crawl private network addresses (only for tests and intranets). */
   allowPrivateAddresses: boolean;
   /** Spacing of official API calls to one host (their own rate limits apply too). */
@@ -144,6 +157,7 @@ export function crawlerDefaults(): CrawlerConfig {
     searchTimeoutMs: 3000,
     searchCacheMinutes: 30,
     creatorRefreshHours: 6,
+    subscriptionsJob: { maxCreatorsPerRun: 24, maxCallsPerRun: 48, maxRunSeconds: 20 },
     allowPrivateAddresses: false,
     apiDelayMs: 250,
     blockedSources: [],
@@ -212,6 +226,8 @@ interface CrawlerState {
   creatorChecks: Record<string, number>;
   /** Creators whose refresh did not finish: looked up first the next time. */
   creatorPending: string[];
+  /** The subscriptions job's queue: creators still to look up (its persisted progress). */
+  subscriptionsQueue: string[];
 }
 
 /** Hands discovered content to the registry; returns how many entries were new. */
@@ -220,6 +236,8 @@ export type Ingest = (items: Discovered[]) => number;
 const MAX_FRONTIER = 20_000;
 const MAX_IDENTIFY = 5_000;
 const MAX_SEEN = 50_000;
+/** Creators the subscriptions job works through per tick. */
+const SUBSCRIPTIONS_BATCH = 4;
 
 /**
  * The algorithm node's crawler. It cycles through units of work — a PeerTube instance,
@@ -240,6 +258,11 @@ export class Crawler {
   /** The operator's own adapter modules (crawler.modules), loaded once and cached. */
   private external: Adapter[] | null = null;
   private loading: Promise<Adapter[]> | null = null;
+  /** The bounded background subscriptions job: one run at a time (requestSubscriptionsJob). */
+  private jobRun: Promise<void> | null = null;
+  private jobSummary: CreatorRefreshSummary = { checked: 0, added: 0, pending: 0 };
+  private jobTick: NodeJS.Timeout | null = null;
+  private jobCancelled = false;
 
   constructor(
     private readonly config: () => CrawlerConfig,
@@ -264,12 +287,24 @@ export class Crawler {
     this.ctx = this.contextFor(null, 'crawl');
     this.store = new JsonFile<CrawlerState>(
       statePath,
-      () => ({ usage: {}, cursors: {}, frontier: [], identify: [], seen: [], searches: {}, stats: {}, creatorChecks: {}, creatorPending: [] }),
+      () => ({
+        usage: {},
+        cursors: {},
+        frontier: [],
+        identify: [],
+        seen: [],
+        searches: {},
+        stats: {},
+        creatorChecks: {},
+        creatorPending: [],
+        subscriptionsQueue: [],
+      }),
       5000
     );
     this.store.data.usage ??= {};
     this.store.data.creatorChecks ??= {};
     this.store.data.creatorPending ??= [];
+    this.store.data.subscriptionsQueue ??= [];
     this.seen = new Set(this.store.data.seen);
   }
 
@@ -291,6 +326,11 @@ export class Crawler {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    // A subscriptions run in flight stops cleanly at its next tick; a request after
+    // that starts a fresh run (tests drive the job by request with the ticker off).
+    this.jobCancelled = true;
+    if (this.jobTick) clearTimeout(this.jobTick);
+    this.jobTick = null;
     this.flush();
   }
 
@@ -777,6 +817,160 @@ export class Crawler {
     return { found: items.length, added };
   }
 
+  /**
+   * The bounded background subscriptions job: when a client loads its subscriptions
+   * tab, every subscription is queued and worked through a few creators per tick —
+   * within one run's budgets (creators looked up, platform calls, wall clock) — while
+   * the page answers with whatever has landed within `wait()`. The queue persists, so
+   * a huge subscription list continues across requests instead of restarting; the
+   * creatorRefreshHours throttle skips recently checked creators, and the ones a run
+   * could not finish come first in the next one. One run at a time: concurrent
+   * requests merge into the queue the running job is working through.
+   */
+  requestSubscriptionsJob(ids: string[]): { wait: (ms: number) => Promise<CreatorRefreshSummary> } {
+    const queue = this.state.subscriptionsQueue;
+    // Unfinished creators come first, new ones behind whatever is already queued (the
+    // persisted progress continues where the last run stopped). Creators with no look
+    // due (the refresh throttle) or no platform to ask never enter the queue.
+    const fresh = [...new Set(ids.map(String).filter(Boolean))].filter((id) => !queue.includes(id) && this.creatorDue(id));
+    fresh.sort((a, b) => Number(this.state.creatorPending.includes(b)) - Number(this.state.creatorPending.includes(a)));
+    queue.push(...fresh);
+    this.store.changed();
+    this.jobCancelled = false;
+    if (!this.jobRun) {
+      this.jobSummary = { checked: 0, added: 0, pending: 0 };
+      this.jobRun = this.runSubscriptions(this.jobSummary)
+        .catch((error) => {
+          // Best-effort all the way: an unexpected failure is traced and swallowed.
+          this.traces?.trace('error', 'algorithm.crawler', 'function:runSubscriptions', { error: (error as Error).message });
+        })
+        .finally(() => {
+          this.jobRun = null;
+        });
+    }
+    return {
+      wait: async (ms) => {
+        await Promise.race([
+          this.jobRun ?? Promise.resolve(),
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.max(0, ms));
+            timer.unref?.();
+          }),
+        ]);
+        return { ...this.jobSummary };
+      },
+    };
+  }
+
+  /** Whether any platform look is due for this creator (the creatorRefreshHours throttle). */
+  private creatorDue(id: string): boolean {
+    const now = Date.now();
+    const ttl = Math.max(0, Number(this.config().creatorRefreshHours ?? 6)) * 3_600_000;
+    return creatorQueries(id, this.resolveCreator?.(id), this.enabledAdapters(), (adapter) => this.adapterConfig(adapter.id)).some(
+      (query) => (this.state.creatorChecks[`${id}|${query.adapter.id}`] ?? 0) + ttl <= now
+    );
+  }
+
+  /** The subscriptions job's per-run budgets (0 turns the job off for that part). */  private subscriptionJobLimits(): { maxCreatorsPerRun: number; maxCallsPerRun: number; maxRunSeconds: number } {
+    const job = (this.config().subscriptionsJob ?? {}) as Record<string, unknown>;
+    const num = (value: unknown, fallback: number) => (Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : fallback);
+    return {
+      maxCreatorsPerRun: Math.floor(num(job.maxCreatorsPerRun, 24)),
+      maxCallsPerRun: Math.floor(num(job.maxCallsPerRun, 48)),
+      maxRunSeconds: num(job.maxRunSeconds, 20),
+    };
+  }
+
+  /**
+   * One bounded run of the subscriptions job: batches of a few creators at a time
+   * within the run's budgets, until the queue empties or a budget runs out. Creators
+   * that failed go back to the front of the queue for the next run; creators whose
+   * adapters have no budget left today are skipped quietly (the per-adapter daily
+   * limits are the outer bound), and one failing creator never stops the batch.
+   */
+  private async runSubscriptions(summary: CreatorRefreshSummary): Promise<void> {
+    const limits = this.subscriptionJobLimits();
+    if (!this.config().enabled || !limits.maxCreatorsPerRun || !limits.maxCallsPerRun || !limits.maxRunSeconds) return;
+    await this.loadModules();
+    const startedAt = Date.now();
+    const ttl = Math.max(0, Number(this.config().creatorRefreshHours ?? 6)) * 3_600_000;
+    const failed = new Set<string>();
+    let creators = 0;
+    let calls = 0;
+    while (this.state.subscriptionsQueue.length && !this.jobCancelled) {
+      if (creators >= limits.maxCreatorsPerRun || calls >= limits.maxCallsPerRun || Date.now() - startedAt >= limits.maxRunSeconds * 1000) break;
+      // A few creators per tick: one batch is planned within what is left of the run's
+      // budgets, and what does not fit stays queued for the next run.
+      const batch = this.state.subscriptionsQueue.splice(0, SUBSCRIPTIONS_BATCH);
+      const work: { creatorId: string; pair: string; query: CreatorQuery }[] = [];
+      const rest: string[] = [];
+      for (const creatorId of batch) {
+        const now = Date.now();
+        const queries = creatorQueries(creatorId, this.resolveCreator?.(creatorId), this.enabledAdapters(), (adapter) => this.adapterConfig(adapter.id)).filter(
+          (query) => {
+            // Recently checked creators and spent adapters are skipped quietly.
+            const pair = `${creatorId}|${query.adapter.id}`;
+            return (this.state.creatorChecks[pair] ?? 0) + ttl <= now && this.budgetLeft(query.adapter.id, 'search');
+          }
+        );
+        if (!queries.length) continue; // checked recently, no platform to ask, or no budget left
+        if (creators >= limits.maxCreatorsPerRun) {
+          rest.push(creatorId);
+          continue;
+        }
+        creators++;
+        let planned = 0;
+        for (const query of queries) {
+          if (calls >= limits.maxCallsPerRun) break;
+          calls++;
+          planned++;
+          work.push({ creatorId, pair: `${creatorId}|${query.adapter.id}`, query });
+        }
+        // Its remaining platform lookups wait for the next run (they stay unchecked).
+        if (planned < queries.length) rest.push(creatorId);
+      }
+      await runPool(work, SUBSCRIPTIONS_BATCH, async (job) => {
+        if (this.jobCancelled) return;
+        try {
+          const result = await this.runCreatorLookup(job.query);
+          summary.checked++;
+          summary.added += result.added;
+          // Only a lookup that completed counts as checked: a failed one is retried.
+          this.state.creatorChecks[job.pair] = Date.now();
+          this.store.changed();
+        } catch (error) {
+          // One failing creator never stops the batch (a spent budget is not a failure).
+          failed.add(job.creatorId);
+          if (!(error instanceof BudgetUsed)) {
+            this.traces?.trace('error', 'algorithm.crawler', 'subscriptions job', {
+              message: `${job.query.adapter.id} · ${job.creatorId.slice(0, 32)}`,
+              error: (error as Error).message,
+              data: { adapter: job.query.adapter.id, creator: job.creatorId.slice(0, 32) },
+            });
+          }
+        }
+      });
+      if (rest.length) this.state.subscriptionsQueue.unshift(...rest.filter((id) => !this.state.subscriptionsQueue.includes(id)));
+      this.store.changed();
+      // Yield to the event loop between ticks; the timer is unref'd and cleared on stop.
+      await new Promise<void>((resolve) => {
+        this.jobTick = setTimeout(resolve, 0);
+        this.jobTick.unref?.();
+      });
+      this.jobTick = null;
+    }
+    // Unfinished creators come first in the next run.
+    const queue = this.state.subscriptionsQueue;
+    const front = [...failed].filter((id) => !queue.includes(id));
+    if (front.length) queue.unshift(...front);
+    summary.pending = queue.length;
+    this.store.changed();
+    this.traces?.trace('basic', 'algorithm.crawler', 'function:runSubscriptions', {
+      message: `${summary.checked} checked · ${summary.added} added · ${summary.pending} still queued`,
+      data: { checked: summary.checked, added: summary.added, queued: summary.pending, creators, calls, ms: Date.now() - startedAt },
+    });
+  }
+
   /** An error, with a hint when an API refused the credentials. */
   private explain(error: unknown): string {
     const message = (error as Error).message;
@@ -850,6 +1044,7 @@ export class Crawler {
         },
       ],
       queues: { frontier: this.state.frontier.length, identify: this.state.identify.length, seen: this.seen.size },
+      subscriptionsJob: { queued: this.state.subscriptionsQueue.length, running: Boolean(this.jobRun) },
       queries: this.queries(),
       recentSearches: Object.entries(this.state.searches)
         .sort((a, b) => b[1].last - a[1].last)

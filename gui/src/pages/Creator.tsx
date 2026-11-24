@@ -4,8 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { CreatorView } from '../../../src/shared/clientapi';
 import type { AccountLinkProposal, AlgorithmInfo, CreatorAccount, CreatorContentSuggestion, CreatorIconSuggestion, CreatorInfo } from '../../../src/shared/protocol';
-import { CREATOR_KIND_LABELS } from '../../../src/shared/taxonomy';
-import { creatorRefOf, sourceSchemeLabel } from '../../../src/shared/sources';
+import { creatorRefOf, sourceSchemeLabel, sourceSchemeOf } from '../../../src/shared/sources';
 import { api, errorMessage } from '../api';
 import { GridLayout } from '../components/feed/Cards';
 import { compact } from '../components/feed/Fields';
@@ -17,6 +16,58 @@ import { creatorPath, groupPath } from '../util';
 /** Only VibeShare key ids (vk1…) can receive credits; platform ids cannot. */
 const canReceiveCredits = (id: string) => /^vk1[a-z2-7]{52}$/i.test(id);
 
+// The page a platform gives a creator, for the id shapes the crawler writes into creator
+// ids (`youtube:UC3…`, `bluesky:handle`). The source registry's pageFor builds content
+// pages (watch?v=…), not channels, so the channel pages are built here and the registry
+// only covers what this table does not.
+const CREATOR_PAGE: Record<string, (handle: string) => string | undefined> = {
+  youtube: (handle) => `https://www.youtube.com/${handle.startsWith('@') ? handle : `channel/${handle}`}`,
+  x: (handle) => `https://x.com/${handle.replace(/^@/, '')}`,
+  instagram: (handle) => `https://www.instagram.com/${handle.replace(/^@/, '')}/`,
+  tiktok: (handle) => `https://www.tiktok.com/@${handle.replace(/^@/, '')}`,
+  bluesky: (handle) => `https://bsky.app/profile/${handle.replace(/^@/, '')}`,
+  twitch: (handle) => `https://www.twitch.tv/${handle.replace(/^@/, '')}`,
+  reddit: (handle) => `https://www.reddit.com/user/${handle.replace(/^@/, '')}`,
+  mastodon: (handle) => {
+    const [user, host] = handle.replace(/^@/, '').split('@');
+    return host ? `https://${host}/@${user}` : undefined;
+  },
+};
+
+// Short scheme ids of the source registry map onto the account catalog's platform keys.
+const PLATFORM_OF_SCHEME: Record<string, string> = {
+  yt: 'youtube',
+  dm: 'dailymotion',
+  ig: 'instagram',
+  ia: 'archive',
+  bsky: 'bluesky',
+  masto: 'mastodon',
+  sc: 'soundcloud',
+};
+
+/**
+ * The platform link a creator id carries (`youtube:UC3…`, `yt:…`, `x:…`): platform and
+ * handle from the id itself, and the canonical page when one can be built for it.
+ */
+function accountFromId(id: string): { platform: string; handle: string; url?: string } | null {
+  const at = id.indexOf(':');
+  if (at <= 0) return null;
+  const scheme = id.slice(0, at).toLowerCase();
+  const handle = id.slice(at + 1).trim();
+  // `name:…` ids name a creator, not a platform account — only platform schemes count.
+  if (!handle || scheme === 'name' || (!SOURCE_CATALOG.some((source) => source.key === scheme) && !sourceSchemeOf(scheme))) return null;
+  const platform = SOURCE_CATALOG.some((source) => source.key === scheme) ? scheme : (PLATFORM_OF_SCHEME[scheme] ?? scheme);
+  const build = CREATOR_PAGE[platform];
+  return { platform, handle, url: build?.(handle) ?? sourceSchemeOf(scheme)?.pageFor(handle, {}) };
+}
+
+/** Whether an account row already carries this platform link. */
+function sameAccount(a: { platform: string; handle: string; url?: string }, b: { platform: string; handle: string; url?: string }): boolean {
+  const handle = (value: string) => value.trim().replace(/^@/, '').toLowerCase();
+  const platform = (value: string) => (PLATFORM_OF_SCHEME[value.toLowerCase()] ?? value.toLowerCase());
+  return (a.url && b.url && a.url === b.url) || (platform(a.platform) === platform(b.platform) && handle(a.handle) === handle(b.handle));
+}
+
 /**
  * The creator's related creators and their links elsewhere. Related creators — accounts
  * that name a VibeShare creator — are a horizontal scroll of fixed-width cards clicking
@@ -25,9 +76,11 @@ const canReceiveCredits = (id: string) => /^vk1[a-z2-7]{52}$/i.test(id);
  * outside-platform links (platform and handle only) are listed below and stay with this
  * page; the external channel links themselves live next to the page's main row instead.
  */
-function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]; creatorName: string }) {
+function RelatedAccounts({ accounts, creatorName, shown }: { accounts: CreatorAccount[]; creatorName: string; shown: Set<string> }) {
   const related = accounts.filter((account) => account.creator);
-  const elsewhere = accounts.filter((account) => !account.creator);
+  // The hyperlinks live in the right-hand list of the creator row only — the row below
+  // keeps just what that list does not show (platforms without a link).
+  const elsewhere = accounts.filter((account) => !account.creator && !shown.has(account.url ?? ''));
   return (
     <>
       {related.length > 0 && (
@@ -82,15 +135,77 @@ function RelatedAccounts({ accounts, creatorName }: { accounts: CreatorAccount[]
   );
 }
 
+/** The name a user suggests for the creator — with its key it takes at once. */
+function SuggestName({ creator, nodeId }: { creator: CreatorInfo; nodeId: string }) {
+  const { state, toast } = useApp();
+  const [name, setName] = useState(creator.name);
+  const [busy, setBusy] = useState(false);
+  const identity = state?.identity.id;
+  const isCreator = Boolean(identity && (creator.id === identity || creator.keys?.includes(identity)));
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      // The account-links route carries the name as well ("Name and kind, when the
+      // proposal would start the creator's record"): signed with the creator's key it
+      // takes at once, otherwise the operator decides with the proposal. A signed send
+      // repeats the known accounts — that route replaces the list.
+      const result = await api<{ linked: boolean }>('/api/creators/accounts', {
+        method: 'PUT',
+        body: {
+          nodeId,
+          creator: creator.id,
+          accounts: isCreator
+            ? (creator.accounts ?? []).map((a) => ({ platform: a.platform, handle: a.handle, url: a.url, creator: a.creator, subscribers: a.subscribers }))
+            : [],
+          name: name.trim(),
+          sign: isCreator,
+        },
+      });
+      toast(result.linked ? 'Name saved' : 'Sent to the node’s operator, who decides whether to use it', 'success');
+    } catch (error) {
+      toast(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card form-stack">
+      <h3>Suggest a name</h3>
+      <span className="hint">
+        What {creator.name} should be called on VibeShare. With the creator’s key it takes at once; otherwise the node’s operator decides.
+      </span>
+      <label className="field">
+        Name
+        <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Name for this creator" />
+      </label>
+      <div className="row">
+        <button className="primary small" disabled={busy || !name.trim()} onClick={() => void submit()}>
+          {busy ? 'Sending…' : isCreator ? 'Save name' : 'Suggest name'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Accounts on other platforms: linked by the creator at once, or suggested by anyone. */
 function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; nodeId: string; onSaved: () => void }) {
   const { state, toast } = useApp();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   type Row = { platform: string; handle: string; url?: string; creator?: string; subscribers?: number; custom?: boolean };
-  const [rows, setRows] = useState<Row[]>(() =>
-    (creator.accounts ?? []).map((a) => ({ ...a, custom: a.platform !== '' && !SOURCE_CATALOG.some((source) => source.key === a.platform) }))
-  );
+  // The list starts with the creator's accounts plus the platform link the creator id
+  // itself carries (`youtube:UC3…`) — never a second copy of an account already there.
+  const startRows = (): Row[] => {
+    const rows: Row[] = (creator.accounts ?? []).map((a) => ({ ...a, custom: a.platform !== '' && !SOURCE_CATALOG.some((source) => source.key === a.platform) }));
+    const own = accountFromId(creator.id);
+    if (own && !rows.some((row) => sameAccount(row, own))) {
+      rows.unshift({ ...own, custom: !SOURCE_CATALOG.some((source) => source.key === own.platform) });
+    }
+    return rows;
+  };
+  const [rows, setRows] = useState<Row[]>(startRows);
   const [proposals, setProposals] = useState<AccountLinkProposal[]>([]);
   const [symmetric, setSymmetric] = useState(true);
   const node = state?.nodes.find((n) => n.id === nodeId);
@@ -99,7 +214,7 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
   const identity = state?.identity.id;
   const isCreator = Boolean(identity && (creator.id === identity || creator.keys?.includes(identity)));
   useEffect(() => {
-    setRows((creator.accounts ?? []).map((a) => ({ ...a, custom: a.platform !== '' && !SOURCE_CATALOG.some((source) => source.key === a.platform) })));
+    setRows(startRows());
   }, [creator.id, creator.accounts?.length]);
   const load = useCallback(() => {
     api<{ proposals: AccountLinkProposal[] }>(`/api/account-links/${encodeURIComponent(nodeId)}`)
@@ -241,7 +356,7 @@ function LinkAccounts({ creator, nodeId, onSaved }: { creator: CreatorInfo; node
   );
 }
 
-/** Content the user suggests for this creator: a modal for the link, title and numbers. */
+/** Content the user suggests for this creator: an inline form for the link, title and numbers. */
 function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: string }) {
   const { toast } = useApp();
   const [open, setOpen] = useState(false);
@@ -298,8 +413,8 @@ function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: str
     <div className="card form-stack">
       <div className="row between">
         <h3>Suggest content for {creator.name}</h3>
-        <button className="small" onClick={() => setOpen(true)}>
-          + Suggest content
+        <button className="small" onClick={() => setOpen(!open)}>
+          {open ? 'Close' : '+ Suggest content'}
         </button>
       </div>
       <span className="hint">
@@ -307,66 +422,59 @@ function SuggestContent({ creator, nodeId }: { creator: CreatorInfo; nodeId: str
         When the node accepts, it joins the creator and you earn credits.
       </span>
       {open && (
-        <Modal
-          title={`Suggest content for ${creator.name}`}
-          onClose={() => setOpen(false)}
-          actions={
-            <>
-              <button onClick={() => setOpen(false)}>Cancel</button>
-              <button className="primary" disabled={busy || !id.trim()} onClick={() => void submit()}>
-                {busy ? 'Sending…' : 'Suggest'}
-              </button>
-            </>
-          }
-        >
-          <div className="form-stack">
+        <div className="form-stack">
+          <label className="field">
+            Link (content id or URL)
+            <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="vs1… or yt:…" autoFocus />
+          </label>
+          <div className="form-grid">
             <label className="field">
-              Link (content id or URL)
-              <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder="vs1… or yt:…" autoFocus />
+              Title
+              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} />
             </label>
-            <div className="form-grid">
-              <label className="field">
-                Title
-                <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} />
-              </label>
-              <label className="field">
-                Platform
-                <input type="text" value={platform} onChange={(e) => setPlatform(e.target.value)} placeholder="youtube, tiktok…" />
-              </label>
-            </div>
-            <div className="field">
-              <span>
-                Platform metrics <span className="hint">What the page shows: views, likes, comments…</span>
-              </span>
-              {metrics.map((row, index) => (
-                <div key={index} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
-                  <input
-                    type="text"
-                    placeholder="views"
-                    value={row.name}
-                    onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, name: e.target.value } : m)))}
-                  />
-                  <input
-                    type="number"
-                    placeholder="0"
-                    value={row.value}
-                    onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, value: e.target.value } : m)))}
-                  />
-                  <button className="small danger" onClick={() => setMetrics(metrics.filter((_, i) => i !== index))} aria-label="Remove">
-                    ×
-                  </button>
-                </div>
-              ))}
-              <button className="small" onClick={() => setMetrics([...metrics, { name: '', value: '' }])}>
-                + Add metric
-              </button>
-            </div>
             <label className="field">
-              Message for the operator (optional)
-              <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Why this belongs to the creator" />
+              Platform
+              <input type="text" value={platform} onChange={(e) => setPlatform(e.target.value)} placeholder="youtube, tiktok…" />
             </label>
           </div>
-        </Modal>
+          <div className="field">
+            <span>
+              Platform metrics <span className="hint">What the page shows: views, likes, comments…</span>
+            </span>
+            {metrics.map((row, index) => (
+              <div key={index} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                <input
+                  type="text"
+                  placeholder="views"
+                  value={row.name}
+                  onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, name: e.target.value } : m)))}
+                />
+                <input
+                  type="number"
+                  placeholder="0"
+                  value={row.value}
+                  onChange={(e) => setMetrics(metrics.map((m, i) => (i === index ? { ...m, value: e.target.value } : m)))}
+                />
+                <button className="small danger" onClick={() => setMetrics(metrics.filter((_, i) => i !== index))} aria-label="Remove">
+                  ×
+                </button>
+              </div>
+            ))}
+            <button className="small" onClick={() => setMetrics([...metrics, { name: '', value: '' }])}>
+              + Add metric
+            </button>
+          </div>
+          <label className="field">
+            Message for the operator (optional)
+            <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Why this belongs to the creator" />
+          </label>
+          <div className="row">
+            <button onClick={() => setOpen(false)}>Cancel</button>
+            <button className="primary small" disabled={busy || !id.trim()} onClick={() => void submit()}>
+              {busy ? 'Sending…' : 'Suggest'}
+            </button>
+          </div>
+        </div>
       )}
       {mine.length > 0 && (
         <div className="page-list">
@@ -528,13 +636,11 @@ export function CreatorPage() {
             </Link>
           </h1>
           <div className="row small muted" style={{ marginTop: 6 }}>
-            <span className="badge">{CREATOR_KIND_LABELS[creator.kind]}</span>
             {creator.kind === 'group' && (
               <Link to={groupPath(creator.id)} className="badge accent" title="The group page: who is in it, and their content">
                 {(creator.members ?? []).length} creator{(creator.members ?? []).length === 1 ? '' : 's'} in the group
               </Link>
             )}
-            {creator.keys?.length ? <span className="badge ok">Verified key</span> : <span className="badge">Name only</span>}
             <span>{view.items.length} item{view.items.length === 1 ? '' : 's'}</span>
           </div>
           {creator.description && <p className="muted" style={{ marginTop: 10 }}>{creator.description}</p>}
@@ -573,23 +679,27 @@ export function CreatorPage() {
           </div>
         )}
       </div>
-      <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} />
+      <RelatedAccounts accounts={creator.accounts ?? []} creatorName={creator.name} shown={seenUrls} />
       {/* The account linking, icon and content suggestions moved into one modal (opened
           from the action row) so the page itself stays short. */}
       {view.via && suggesting && (
         <Modal title="Creator suggestions" onClose={() => setSuggesting(false)} wide>
+          <SuggestName creator={creator} nodeId={view.via} />
           <LinkAccounts creator={creator} nodeId={view.via} onSaved={load} />
           <SuggestIcon creator={creator} nodeId={view.via} />
           <SuggestContent creator={creator} nodeId={view.via} />
         </Modal>
       )}
-      {view.items.length ? (
-        <GridLayout items={view.items} page={CARD_PAGE} />
-      ) : (
-        <Empty title="No content listed">
-          <p>None of your algorithm nodes lists content by this creator.</p>
-        </Empty>
-      )}
+      {/* Space between the header and the creator's recent content. */}
+      <div style={{ marginTop: 18 }}>
+        {view.items.length ? (
+          <GridLayout items={view.items} page={CARD_PAGE} />
+        ) : (
+          <Empty title="No content listed">
+            <p>None of your algorithm nodes lists content by this creator.</p>
+          </Empty>
+        )}
+      </div>
     </div>
   );
 }

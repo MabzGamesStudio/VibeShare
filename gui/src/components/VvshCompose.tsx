@@ -12,7 +12,7 @@ import type { VvshRendition } from '../../../src/shared/vvsh.js';
 import { buildVvsh, vvshPlan } from '../../../src/shared/vvsh-encode.js';
 import { base64url } from '../../../src/shared/encoding.js';
 import { api, errorMessage } from '../api';
-import { emptyMeta, MetaFields, mergeTopics, NodePicker, describeAlgorithm, describeProvider, SignCard, ThumbPicker, type MetaState } from './PublishFields';
+import { ContentDataFields, emptyMeta, MetaFields, mergeTopics, NodePicker, describeAlgorithm, describeProvider, SignCard, ThumbPicker, type MetaState } from './PublishFields';
 import { useApp } from '../state';
 import { splitList } from '../util';
 import {
@@ -134,6 +134,8 @@ export function VvshCompose() {
   // the algorithm nodes are told about it.
   const [meta, setMeta] = useState<MetaState>(emptyMeta);
   const [links, setLinks] = useState('');
+  // Free-form content data: optional short key/value pairs kept on the content.
+  const [pairs, setPairs] = useState<Record<string, string>>({});
   const [thumbnail, setThumbnail] = useState<string | undefined>();
   const [sign, setSign] = useState(true);
   // The nodes to upload to, picked one by one in the column on the right.
@@ -270,9 +272,10 @@ export function VvshCompose() {
         ]);
       }
       // Sensible defaults, filled in for the user: 5-second chunks and one preview every
-      // ten seconds of video (never more than 100), small and light images.
+      // ten seconds of video — never fewer than 10 (a short video is as easy to seek
+      // through as a long one), never more than 100 — small and light images.
       setChunkSeconds('5');
-      setPreviews(String(Math.min(100, Math.max(1, Math.ceil(probe.seconds / 10)))));
+      setPreviews(String(Math.min(100, Math.max(10, Math.ceil(probe.seconds / 10)))));
       setPreviewWidth('256');
       setPreviewQuality('0.5');
     } catch {
@@ -289,6 +292,7 @@ export function VvshCompose() {
     topics: mergeTopics(meta),
     language: meta.language.trim() || undefined,
     durationSeconds: totalSeconds,
+    data: Object.keys(pairs).length ? pairs : undefined,
   });
 
   /** Piece uploads get one explicit retry. The finish runs the rest as a background job
@@ -657,6 +661,7 @@ export function VvshCompose() {
         <textarea value={links} onChange={(e) => setLinks(e.target.value)} rows={2} placeholder="https://www.youtube.com/watch?v=…" />
       </label>
       <MetaFields meta={meta} setMeta={setMeta} hideFormat />
+      <ContentDataFields pairs={pairs} onChange={setPairs} />
       <details className="field">
         <summary style={{ cursor: 'pointer' }}>Advanced settings — chunks and previews (filled in with sensible defaults)</summary>
         <div className="form-grid" style={{ marginTop: 10 }}>
@@ -681,7 +686,7 @@ export function VvshCompose() {
               onChange={(e) => setPreviews(e.target.value)}
             />
             <span className="hint">
-              0 or more · 0 = no previews · one every 10 seconds of video, never more than 100 ·{' '}
+              0 or more · 0 = no previews · one every 10 seconds of video by default, at least 10 and never more than 100 ·{' '}
               {previewWidthValue}px at quality {previewQualityValue} ≈{' '}
               {previewEstimateMb > 0.01 ? `${previewEstimateMb.toFixed(2)} MB` : '0 MB'} total
             </span>
@@ -735,7 +740,7 @@ export function VvshCompose() {
         </div>
       </details>
       <div className="field">
-        <span>Encodings — one row per quality: resolution and frame rate</span>
+        <span style={{ display: 'block', marginBottom: 10 }}>Encodings — one row per quality: resolution and frame rate</span>
         {rows.map((row, index) => {
           const report = fitReport(source, row.width, row.height, row.fit);
           const change = row.fit === 'crop' ? report.cropPct : report.squishPct;
@@ -885,11 +890,12 @@ export function VvshCompose() {
         })}
         <button
           className="small"
+          style={{ marginTop: 10 }}
           onClick={() => setRows((current) => [...current, { id: rowId(720, 30), height: 720, width: 1280, fit: 'crop', fps: 30, kbps: defaultKbps(720, 30) }])}
         >
           + Add encoding
         </button>
-        <span className="hint">Each row is really encoded to its resolution and frame rate, so the sizes and sharpness differ.</span>
+
         {/* Both banners sit in slots that are always the same height, so a warning coming
             or going never shifts the form or steals the focus from the field being typed. */}
         <span

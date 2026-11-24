@@ -350,8 +350,39 @@ function EventRow({ event, onOpen }: { event: TraceEvent; onOpen: () => void }) 
       </span>
       <span className="trace-main">{event.action}</span>
       {subtext ? <span className="trace-sub">{subtext}</span> : null}
+      <PayloadLines data={event.data} />
     </button>
   );
+}
+
+/** The captured request/response payload prefixes, as readable lines in the row. */
+function PayloadLines({ data }: { data: unknown }) {
+  const payloads = payloadsOf(data);
+  const rows = [
+    ['req', payloads.requestPayload],
+    ['res', payloads.responsePayload],
+  ] as const;
+  const shown = rows.filter((entry): entry is readonly ['req' | 'res', string] => typeof entry[1] === 'string');
+  if (!shown.length) return null;
+  return (
+    <span style={{ display: 'block' }}>
+      {shown.map(([label, text]) => (
+        <span key={label} className="tiny mono" style={{ display: 'block', opacity: 0.85, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '3.6em', overflow: 'hidden' }}>
+          {label} › {text}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The captured payload prefixes of one event's data, when it has them. */
+function payloadsOf(data: unknown): { requestPayload?: string; responsePayload?: string } {
+  const record = data as { requestPayload?: unknown; responsePayload?: unknown } | undefined;
+  if (!record || typeof record !== 'object') return {};
+  return {
+    requestPayload: typeof record.requestPayload === 'string' ? record.requestPayload : undefined,
+    responsePayload: typeof record.responsePayload === 'string' ? record.responsePayload : undefined,
+  };
 }
 
 function LevelBadge({ level }: { level: TraceLevel }) {
@@ -465,6 +496,7 @@ function TimelineModal({ timeline, onClose }: { timeline: TraceTimeline; onClose
 
 /** Every field of one event, labels in their own column, values beside them. */
 function EventFields({ event }: { event: TraceEvent }) {
+  const payloads = payloadsOf(event.data);
   return (
     <div className="form-stack" style={{ gap: 4 }}>
       <Field label="id" value={<span className="mono tiny">{event.id}</span>} />
@@ -476,10 +508,21 @@ function EventFields({ event }: { event: TraceEvent }) {
       <Field label="action" value={event.action} />
       <Field label="message" value={event.message ?? '—'} />
       <Field label="dependency" value={<DependencyLine data={event.data} />} />
-      <Field label="data" value={event.data === undefined ? '—' : <pre className="mono tiny" style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{prettyJson(event.data)}</pre>} />
+      {payloads.requestPayload !== undefined && <Field label="requestPayload" value={<PayloadBlock text={payloads.requestPayload} />} />}
+      {payloads.responsePayload !== undefined && <Field label="responsePayload" value={<PayloadBlock text={payloads.responsePayload} />} />}
+      <Field label="data" value={event.data === undefined ? '—' : <pre className="mono tiny" style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 240, overflow: 'auto' }}>{prettyJson(event.data)}</pre>} />
       <Field label="error" value={event.error ?? '—'} />
       <Field label="initiator" value={event.initiator ? `${event.initiator.kind} · ${event.initiator.label}` : '—'} />
     </div>
+  );
+}
+
+/** One captured payload, decoded and wrapped: long lines break, tall ones scroll. */
+function PayloadBlock({ text }: { text: string }) {
+  return (
+    <pre className="mono tiny" style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 240, overflow: 'auto' }}>
+      {text}
+    </pre>
   );
 }
 

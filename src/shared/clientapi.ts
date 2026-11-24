@@ -660,6 +660,8 @@ export interface ExternalPublishRequest {
   language?: string;
   algorithms: string[];
   thumbnail?: string;
+  /** Free-form content data to keep on the entry (short string pairs). */
+  data?: Record<string, string>;
 }
 
 export interface ServiceStatus {

@@ -489,6 +489,7 @@ export class Publishing {
             tags: manifest.meta?.tags,
             language: manifest.meta?.language,
             durationSeconds: manifest.meta?.durationSeconds,
+            data: manifest.meta?.data,
             creator: sign ? { id: this.core.store.identity.id, name: profile.name || undefined, kind: profile.kind } : undefined,
             thumbnail: options.thumbnail,
             providers: [provider.ref],

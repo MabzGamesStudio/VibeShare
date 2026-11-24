@@ -572,15 +572,19 @@ button,a.button{margin-top:12px;background:var(--accent);color:#fff;border:0;bor
       // method, URL and response time — what the call actually was.
       trace: {
         request: (label) => this.traces.recorder.start({ kind: 'api', label }),
+        // Payload prefixes are captured at detail level only, by this node's own
+        // settings (off = nothing captured anywhere).
+        payloadChars: () => (this.traces.recorder.shouldLog('detail') ? this.traces.settingsView().payloadChars : false),
         done: (traceId, info) =>
           this.traces.trace('dependency', 'api', 'request ok', {
             traceId,
-            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            // The payload prefixes are already redacted and cut to the capture limit.
+            data: { url: info.path, method: info.method, status: info.status, ms: info.ms, requestPayload: info.requestPayload, responsePayload: info.responsePayload },
           }),
         failed: (traceId, info, error) =>
           this.traces.trace('error', 'api', 'request failed', {
             traceId,
-            data: this.traces.summarize({ url: info.path, method: info.method, status: info.status, ms: info.ms }),
+            data: { url: info.path, method: info.method, status: info.status, ms: info.ms, requestPayload: info.requestPayload, responsePayload: info.responsePayload },
             error: (error as Error).message,
           }),
       },

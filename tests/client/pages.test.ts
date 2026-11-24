@@ -11,6 +11,7 @@ import {
   shareBase,
   shareLink,
 } from '../../src/shared/clientdefaults.js';
+import { topicIdOf } from '../../src/shared/taxonomy.js';
 import { admin, startAlgorithm, startClient, tempDir } from '../helpers.js';
 
 describe('page configurations', () => {
@@ -75,6 +76,26 @@ describe('page configurations', () => {
     assert.deepEqual(narrowed.topics, ['art']);
     assert.equal(narrowed.onlyTopics, true);
     assert.deepEqual(pagePreferences(preferences, { formats: [], topics: [], onlyTopics: false, creatorKinds: [] }).formats, ['music']);
+  });
+
+  it('excludes ai-slop and rage-bait by default in every topic customization', () => {
+    const blocked = ['ai-slop', 'rage-bait'].map(topicIdOf);
+    // Fresh settings hide them, and every page customization starts with them blocked.
+    assert.deepEqual(defaultSettings().preferences.blockedTopics, ['ai-slop', 'rage-bait']);
+    for (const page of defaultSettings().pages) assert.deepEqual(page.filters.blockedTopicIds, blocked);
+    // They ride along in every page's request, whatever the page itself picks.
+    assert.deepEqual(pagePreferences(defaultSettings().preferences, undefined).blockedTopics, ['ai-slop', 'rage-bait']);
+    // Older settings gain them once, keeping whatever else the user hid.
+    const old = { ...defaultSettings(), revision: 3, preferences: { ...defaultSettings().preferences, blockedTopics: ['spoilers'] } };
+    assert.deepEqual(normalizeSettings(old).preferences.blockedTopics, ['spoilers', 'ai-slop', 'rage-bait']);
+    // After that the user's list stands on its own: taking them out stays out.
+    const kept = normalizeSettings({ ...normalizeSettings(old), preferences: { ...defaultSettings().preferences, blockedTopics: [] } });
+    assert.deepEqual(kept.preferences.blockedTopics, []);
+    // A page whose own block list the user ever changed keeps exactly their list.
+    const customized = normalizeSettings({
+      pages: [{ id: 'videos', preset: 'videos', filters: { blockedTopicIds: [] } } as unknown as PageConfig],
+    });
+    assert.deepEqual(customized.pages.find((page) => page.id === 'videos')!.filters.blockedTopicIds, []);
   });
 
   it('share links open the hosted web client on the content', () => {

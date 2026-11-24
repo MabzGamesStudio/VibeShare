@@ -11,6 +11,7 @@ import { api, errorMessage, uploadFile } from '../api';
 import {
   describeAlgorithm,
   describeProvider,
+  ContentDataFields,
   emptyMeta,
   imageThumbnail,
   inspectMedia,
@@ -176,8 +177,6 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   const [sources, setSources] = useState('');
   // Free-form content data: optional short key/value pairs kept on the content.
   const [pairs, setPairs] = useState<Record<string, string>>({});
-  const [pairKey, setPairKey] = useState('');
-  const [pairValue, setPairValue] = useState('');
   const [chosenProviders, setChosenProviders] = useState<string[]>([]);
   const [chosenAlgorithms, setChosenAlgorithms] = useState<string[]>([]);
   const [sign, setSign] = useState(true);
@@ -430,63 +429,7 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
             />
           </div>
         )}
-        <details className="field">
-          <summary style={{ cursor: 'pointer' }}>
-            Content data <span className="hint">Optional key/value pairs kept on the content (up to 200)</span>
-          </summary>
-          <div className="form-stack" style={{ gap: 6, marginTop: 8 }}>
-            {Object.entries(pairs).map(([key, value]) => (
-              <div key={key} className="card row between" style={{ padding: '6px 10px', margin: 0 }}>
-                <span className="small mono">{key}</span>
-                <span className="small" style={{ flex: 1 }}>{value}</span>
-                <button
-                  type="button"
-                  className="small"
-                  onClick={() => {
-                    const next = { ...pairs };
-                    delete next[key];
-                    setPairs(next);
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-            <div className="row" style={{ gap: 6 }}>
-              <input
-                type="text"
-                className="mono"
-                value={pairKey}
-                placeholder="Key"
-                aria-label="Content data key"
-                style={{ flex: 1 }}
-                onChange={(e) => setPairKey(e.target.value)}
-              />
-              <input
-                type="text"
-                value={pairValue}
-                placeholder="Value"
-                aria-label="Content data value"
-                style={{ flex: 2 }}
-                onChange={(e) => setPairValue(e.target.value)}
-              />
-              <button
-                type="button"
-                className="small"
-                disabled={!pairKey.trim() || Object.hasOwn(pairs, pairKey.trim())}
-                onClick={() => {
-                  const key = pairKey.trim().slice(0, 80);
-                  if (!key) return;
-                  setPairs({ ...pairs, [key]: pairValue.slice(0, 1000) });
-                  setPairKey('');
-                  setPairValue('');
-                }}
-              >
-                Add
-              </button>
-            </div>
-          </div>
-        </details>
+        <ContentDataFields pairs={pairs} onChange={setPairs} />
         <label className="field">
           Fallback links <span className="hint">Copies elsewhere (YouTube, archive.org, IPFS…), shown when no provider has the file. One per line.</span>
           <textarea value={sources} onChange={(e) => setSources(e.target.value)} rows={2} placeholder="https://www.youtube.com/watch?v=…" />
@@ -519,14 +462,42 @@ function FileTab({ onVideo }: { onVideo?: () => void }) {
   );
 }
 
+/** The title a pasted link starts from: the page's own title when the source knows one,
+ *  else a humanised form of the URL. Only ever fills an empty title box. */
+function suggestedTitle(link: string, detected: { id: string; title?: string } | null): string {
+  const fromPage = detected?.title?.trim();
+  if (fromPage) return fromPage;
+  try {
+    const at = new URL(link.trim());
+    const segment = decodeURIComponent(at.pathname.split('/').filter(Boolean).pop() ?? '');
+    const words = segment.replace(/\.[a-z0-9]+$/i, '').replace(/[-_+]+/g, ' ').trim();
+    if (words && !/^(watch|video|videos|embed|details|item|index|home|v)$/i.test(words)) return words.charAt(0).toUpperCase() + words.slice(1);
+    return at.hostname.replace(/^www\./, '');
+  } catch {
+    return detected?.id ?? '';
+  }
+}
+
 function LinkTab() {
   const { algorithms, toast } = useApp();
   const enabledAlgorithms = algorithms.filter((n) => n.enabled);
   const [url, setUrl] = useState('');
-  const [detected, setDetected] = useState<{ id: string; source: ExternalSource; embed: Embed } | null>(null);
+  // /api/source answers with the source id and its embeddable form — the embed is absent
+  // for a link that has none, so everything here reads it as optional.
+  const [detected, setDetected] = useState<{ id: string; source: ExternalSource; embed?: Embed; title?: string } | null>(null);
   const [meta, setMeta] = useState<MetaState>(emptyMeta);
+  const [thumbnail, setThumbnail] = useState<string | undefined>();
+  // Free-form content data: optional short key/value pairs kept on the content.
+  const [pairs, setPairs] = useState<Record<string, string>>({});
   const [chosen, setChosen] = useState<string[]>(() => enabledAlgorithms.map((n) => n.id));
   const [job, watchJob] = useJob();
+
+  // The node list can arrive after this tab mounts (the state loads around it): fill the
+  // choices once it does — without ever overriding what the user picked by hand.
+  useEffect(() => {
+    if (!chosen.length && enabledAlgorithms.length) setChosen(enabledAlgorithms.map((n) => n.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [algorithms.length]);
 
   useEffect(() => {
     if (!url.trim()) {
@@ -534,8 +505,13 @@ function LinkTab() {
       return;
     }
     const timer = setTimeout(() => {
-      api<{ id: string; source: ExternalSource; embed: Embed }>(`/api/source?url=${encodeURIComponent(url.trim())}`)
-        .then(setDetected)
+      api<{ id: string; source: ExternalSource; embed?: Embed; title?: string }>(`/api/source?url=${encodeURIComponent(url.trim())}`)
+        .then((found) => {
+          setDetected(found);
+          // The tab is usable right after pasting: an empty title starts from the link —
+          // a title the user typed is never touched.
+          setMeta((m) => (m.title.trim() ? m : { ...m, title: suggestedTitle(url, found) }));
+        })
         .catch(() => setDetected(null));
     }, 300);
     return () => clearTimeout(timer);
@@ -553,6 +529,8 @@ function LinkTab() {
           topics: mergeTopics(meta),
           language: meta.language || undefined,
           algorithms: chosen,
+          thumbnail,
+          data: Object.keys(pairs).length ? pairs : undefined,
         },
       });
       watchJob(created.id);
@@ -573,17 +551,33 @@ function LinkTab() {
           </span>
         </label>
         <MetaFields meta={meta} setMeta={setMeta} />
+        <ContentDataFields pairs={pairs} onChange={setPairs} />
       </div>
       <div className="form-stack">
-        <div className="preview-thumb">
-          {detected?.embed.kind === 'iframe' ? (
-            <iframe src={detected.embed.src} title="Preview" style={{ width: '100%', height: '100%', border: 0 }} sandbox="allow-scripts allow-same-origin" />
-          ) : detected?.embed.kind === 'image' ? (
-            <img src={detected.embed.src} alt="" />
-          ) : (
-            <Link2 size={32} className="faint" />
-          )}
-        </div>
+        {/* Exactly one thumbnail/picture slot: whatever the link offers shows in the
+            picker slot itself (the picked thumbnail wins over the preview). */}
+        <ThumbPicker
+          value={thumbnail}
+          onChange={setThumbnail}
+          preview={
+            detected?.embed?.kind === 'image' ? (
+              <img src={detected.embed.src} alt="" />
+            ) : detected?.embed?.kind === 'iframe' ? (
+              <iframe
+                src={detected.embed.src}
+                title="Preview"
+                style={{ width: '100%', height: '100%', border: 0, pointerEvents: 'none' }}
+                sandbox="allow-scripts allow-same-origin"
+              />
+            ) : detected?.embed?.kind === 'video' ? (
+              <video src={detected.embed.src} muted style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            ) : detected?.embed?.kind === 'audio' ? (
+              <audio src={detected.embed.src} controls style={{ width: '100%' }} />
+            ) : detected ? (
+              <span className="small muted">No preview available</span>
+            ) : undefined
+          }
+        />
         <div className="field">
           <span>Submit to algorithm nodes</span>
           <NodePicker nodes={enabledAlgorithms} selected={chosen} setSelected={setChosen} describe={describeAlgorithm} />

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { FeedItem } from '../../src/shared/clientapi';
 import { embedFor, parseContentId, sourceSchemeOf } from '../../src/shared/sources';
 import { needsResolving, resolveStream, streamUrl } from './api';
+import { embedsAllowed, loadConsent, onConsentChange, platformKeyOf, type ConsentRecord } from './consent';
 
 export interface Playable {
   kind: 'video' | 'audio' | 'image' | 'iframe' | 'none';
@@ -30,6 +31,17 @@ const AUDIO_FORMATS = new Set(['music', 'audio', 'podcast']);
  */
 let blockExternal = false;
 let contentPreviews = true;
+// The consent record at most once per change: item rendering asks per item, and each
+// platform's own answer decides whether its embeds, players and previews may load.
+let consent: ConsentRecord | null = null;
+onConsentChange(() => {
+  consent = loadConsent();
+});
+
+/** Whether this item's platform may load its third-party content right now. */
+function platformAllowed(id: string): boolean {
+  return embedsAllowed(consent ?? (consent = loadConsent()), platformKeyOf(id));
+}
 
 export function setBlockExternalEmbeds(blocked: boolean): void {
   blockExternal = blocked;
@@ -49,13 +61,13 @@ export function embedsBlocked(): boolean {
   return blockExternal;
 }
 
-/** True when this item is external (no cid) and external content is disabled. */
+/** True when this item is external (no cid) and its platform's content is disabled. */
 export function placeholderFor(item: Pick<FeedItem, 'id'>): boolean {
-  return blockExternal && !parseContentId(item.id)?.native;
+  return (blockExternal || !platformAllowed(item.id)) && !parseContentId(item.id)?.native;
 }
 
 export function embedPlayable(item: Pick<FeedItem, 'id'>, options: PlayOptions = {}): Playable {
-  if (blockExternal) return { kind: 'none', src: '' };
+  if (blockExternal || !platformAllowed(item.id)) return { kind: 'none', src: '' };
   const source = parseContentId(item.id)?.sources[0];
   if (!source) return { kind: 'none', src: '' };
   const embed = embedFor(source, { ...options, parentHost: location.hostname });
@@ -70,7 +82,7 @@ export function playableFor(item: Pick<FeedItem, 'id' | 'format' | 'media' | 'pa
     const kind = item.format === 'image' ? 'image' : AUDIO_FORMATS.has(item.format) ? 'audio' : 'video';
     return { kind, src: streamUrl(parsed.base), fallback: embed.kind !== 'none' ? embed : undefined };
   }
-  if (blockExternal) return { kind: 'none', src: '', page: item.pageUrl };
+  if (blockExternal || !platformAllowed(item.id)) return { kind: 'none', src: '', page: item.pageUrl };
   if (item.media && /^https?:\/\//.test(item.media.url)) {
     return { kind: item.media.type, src: item.media.url, page: item.pageUrl ?? embed.page, fallback: embed.kind !== 'none' ? embed : undefined };
   }

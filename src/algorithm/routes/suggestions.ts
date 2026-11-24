@@ -17,8 +17,8 @@ export function suggest(node: AlgorithmNode, account: Account, body: SuggestionR
   if (!entry) throw notFound('The node does not know this content');
   if (!SUGGESTION_KINDS.includes(body.kind)) throw badRequest(`kind is one of ${SUGGESTION_KINDS.join(', ')}`);
   const value = validateSuggestion(body.kind, String(body.value ?? ''));
+  // The reason is optional: a correction can speak for itself.
   const reason = String(body.reason ?? '').trim().slice(0, 1000);
-  if (reason.length < 3) throw badRequest('Say why (reason)');
   const timestamp =
     body.timestamp !== undefined && Number.isFinite(Number(body.timestamp)) && Number(body.timestamp) >= 0
       ? Math.round(Number(body.timestamp) * 10) / 10
@@ -65,6 +65,15 @@ export function suggest(node: AlgorithmNode, account: Account, body: SuggestionR
   const { votes, ...rest } = suggestion;
   return { ...rest, agreeing: votes.length };
 }
+/** The JSON a validated suggestion value carries (`data`, `topics`), with a fallback. */
+function parsedJson<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export function acceptSuggestion(node: AlgorithmNode, suggestion: Suggestion): void {
   if (suggestion.status !== 'pending') return;
   const entry = node.registry.get(suggestion.contentId);
@@ -72,6 +81,11 @@ export function acceptSuggestion(node: AlgorithmNode, suggestion: Suggestion): v
     switch (suggestion.kind) {
       case 'topic':
         if (!entry.topics.includes(suggestion.value)) entry.topics.push(suggestion.value);
+        break;
+      case 'tag':
+        // A tag (a content warning, say) is kept as a tag note on the entry — the same
+        // place the operator's own tag corrections land; the generic note push below
+        // records it with the reason the client gave.
         break;
       case 'format':
         entry.format = suggestion.value as Format;
@@ -100,13 +114,38 @@ export function acceptSuggestion(node: AlgorithmNode, suggestion: Suggestion): v
         break;
       case 'report':
         break;
+      case 'title':
+        // A corrected field: what the content now says (an empty one clears it).
+        node.registry.upsert({ id: entry.id, title: suggestion.value });
+        break;
+      case 'description':
+        node.registry.upsert({ id: entry.id, description: suggestion.value });
+        break;
+      case 'topics':
+        // The corrected topic list: what it now says — additions, moves and deletes.
+        node.registry.upsert({ id: entry.id, topics: parsedJson<string[]>(suggestion.value, []) });
+        break;
+      case 'data':
+        // The corrected content data: the whole corrected map replaces the old one.
+        node.registry.upsert({ id: entry.id, data: parsedJson<Record<string, string>>(suggestion.value, {}) });
+        break;
+      case 'thumbnail':
+        if (suggestion.value) node.registry.setThumbnail(entry.id, suggestion.value);
+        else node.registry.upsert({ id: entry.id, thumbnail: false });
+        break;
     }
+    // upsert() rebuilds the record: take the stored one before adding the evidence.
+    const fresh = node.registry.get(suggestion.contentId) ?? entry;
     const first = suggestion.votes[0];
     if (first && suggestion.kind !== 'report') {
-      entry.notes = entry.notes.filter((note) => !(note.kind === suggestion.kind && note.value === suggestion.value));
-      entry.notes.push({ kind: suggestion.kind, value: suggestion.value, reason: first.reason, timestamp: first.timestamp });
+      // The note is evidence, not storage: a thumbnail's bytes or a whole data map
+      // are named rather than kept, so one accepted correction never bloats every
+      // answer that carries the content's notes.
+      const value = suggestion.kind === 'thumbnail' ? '(image)' : suggestion.value.slice(0, 2000);
+      fresh.notes = fresh.notes.filter((note) => !(note.kind === suggestion.kind && note.value === value));
+      fresh.notes.push({ kind: suggestion.kind, value, reason: first.reason, timestamp: first.timestamp });
     }
-    entry.updatedAt = new Date().toISOString();
+    fresh.updatedAt = new Date().toISOString();
     node.registry.changed();
   }
   suggestion.status = 'accepted';
@@ -135,10 +174,18 @@ export function report(node: AlgorithmNode, ctx: Ctx, account: Account, raw: str
   if (!existing) {
     node.registry.upsert({ id: key, contentId, link, status: 'pending', origin: 'report' });
     newInfo = true;
-  } else if ((contentId && !existing.contentId) || (link && !existing.link)) {
-    // The node knew the content, but not the content id (or the link) it was played from.
-    node.registry.upsert({ id: existing.id, contentId: contentId ?? existing.contentId, link: link ?? existing.link });
-    newInfo = true;
+  } else {
+    // The report adds information only when the entry does not already carry what it
+    // says: the link can be the entry's own id (or one of its sources), and the same
+    // goes for the content id — then the node knew the content already and the report
+    // is worth nothing new.
+    const knows = (value: string | undefined) =>
+      value !== undefined && (existing.id === value || existing.link === value || existing.contentId === value || existing.sources.includes(value));
+    if ((contentId && !knows(contentId)) || (link && !knows(link))) {
+      // The node knew the content, but not the content id (or the link) it was played from.
+      node.registry.upsert({ id: existing.id, contentId: contentId ?? existing.contentId, link: link ?? existing.link });
+      newInfo = true;
+    }
   }
   let credited = 0;
   const rewards = node.config.rewards;

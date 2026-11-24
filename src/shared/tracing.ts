@@ -43,7 +43,8 @@ export function normalizeTraceSettings(saved: unknown): TraceSettings {
   return {
     enabled: value.enabled === true,
     expirationHours: Number.isFinite(Number(value.expirationHours)) && Number(value.expirationHours) > 0 ? Math.round(Number(value.expirationHours)) : defaults.expirationHours,
-    payloadChars: Number.isFinite(Number(value.payloadChars)) && Number(value.payloadChars) >= 0 ? Math.round(Number(value.payloadChars)) : defaults.payloadChars,
+    // Capped so one trace line can never grow past a sane size whatever the config says.
+    payloadChars: Math.min(MAX_PAYLOAD_CHARS, Number.isFinite(Number(value.payloadChars)) && Number(value.payloadChars) >= 0 ? Math.round(Number(value.payloadChars)) : defaults.payloadChars),
     levels: {
       basic: levels.basic === true,
       detail: levels.detail === true,
@@ -55,6 +56,9 @@ export function normalizeTraceSettings(saved: unknown): TraceSettings {
 
 /** The default payload capture limit (matches defaultTraceSettings; handy at call sites). */
 export const DEFAULT_PAYLOAD_CHARS = 256;
+
+/** The largest payloadChars any settings allow — the hard cap on a captured payload. */
+export const MAX_PAYLOAD_CHARS = 20_000;
 
 /**
  * Keeps a detail payload small enough to store (function data, request/response
@@ -72,6 +76,39 @@ export function summarize(value: unknown, maxChars: number = DEFAULT_PAYLOAD_CHA
   } catch {
     return cap(String(value).slice(0, 500));
   }
+}
+
+/**
+ * Key-name fragments whose values never make it into a trace: authorization headers,
+ * cookies, passwords and passphrases, session/admin/view tokens (x-vs-token,
+ * x-admin-token included), seeds, private keys, API keys and payment secrets. Matched
+ * case-insensitively as substrings of the key name (`secretAccessKey`, `client_secret`,
+ * `private_key` and friends all hit), so an unknown secret-shaped key is redacted too.
+ */
+const SECRET_KEY = String.raw`[A-Za-z0-9_.-]*(?:authorization|cookie|password|passwd|pass[_-]?phrase|secret|seed|private[_-]?key|mnemonic|view[_-]?key|token|api[_-]?key)[A-Za-z0-9_.-]*`;
+
+/** What a redacted value is replaced with — the key stays, the value never lands. */
+export const REDACTED = '[redacted]';
+
+/**
+ * Redacts secrets by key name (case-insensitive) in a payload excerpt: JSON members
+ * (`"key": …`, one nesting level deep) and query/form pairs (`key=…`) alike. It runs
+ * on already-cut text, so it never walks a whole request or response.
+ */
+export function redactPayloadText(text: string): string {
+  return text
+    .replace(new RegExp(`"(${SECRET_KEY})"\\s*:\\s*(\\{[^{}]*\\}|\\[[^\\[\\]]*\\]|"(?:[^"\\\\]|\\\\.)*"?|[^,}\\]\\s]+)`, 'gi'), `"$1":"${REDACTED}"`)
+    .replace(new RegExp(`(${SECRET_KEY})=([^&\\s"']+)`, 'gi'), `$1=${REDACTED}`);
+}
+
+/**
+ * The trace-safe prefix of one payload: secrets redacted by key name, cut at
+ * `maxChars` characters with an ellipsis when there was more. What the detail-level
+ * tracing stores as requestPayload/responsePayload.
+ */
+export function payloadPrefix(text: string, maxChars: number): string {
+  const redacted = redactPayloadText(text);
+  return redacted.length > maxChars ? `${redacted.slice(0, maxChars)}…` : redacted;
 }
 
 /** Who started a timeline: a user action in a GUI, or an incoming API call. */

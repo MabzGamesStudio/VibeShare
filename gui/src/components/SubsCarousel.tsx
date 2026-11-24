@@ -1,19 +1,74 @@
 import { LayoutGrid } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Subscription } from '../../../src/shared/clientapi';
+import type { CreatorView, Subscription } from '../../../src/shared/clientapi';
+import { api } from '../api';
 import { useApp } from '../state';
 import { profilePath } from '../util';
 import { Avatar } from './ui';
 
+// The icons the subscription records do not all keep, looked up one creator at a time
+// (the creator search only answers a handful of ids at once, so one batch lookup misses
+// most of a long list) and cached for the session — "has none" included, so a re-render
+// or the next mount never repeats a lookup.
+const iconCache = new Map<string, string | null>();
+const iconLoads = new Map<string, Promise<string | null>>();
+
+/** One creator's icon, fetched at most once per session; null when the creator has none. */
+function loadIcon(id: string): Promise<string | null> {
+  const cached = iconCache.get(id);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const running = iconLoads.get(id);
+  if (running) return running;
+  const load = api<CreatorView>(`/api/creators/${encodeURIComponent(id)}`)
+    .then((view) => {
+      const icon = view.creator?.icon || null;
+      iconCache.set(id, icon);
+      return icon;
+    })
+    // A failed lookup is not remembered: the next page load may find better luck.
+    .catch(() => null)
+    .finally(() => iconLoads.delete(id));
+  iconLoads.set(id, load);
+  return load;
+}
+
 /**
  * The creators you follow, as a carousel. The first button on the left is "all
  * subscriptions": it opens the page where every subscription is listed, searched
- * through, removed and added.
+ * through, removed and added. A tile shows the creator's icon when there is one and
+ * falls back to the letter avatar.
  */
 export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] }) {
   const { state } = useApp();
   const order = state?.settings.subscriptionOrder ?? 'subscribed';
+  // Creator icons the subscription records do not all keep: the missing ones are fetched
+  // a few at a time from the session cache's worker pool. Anything arriving after this
+  // carousel goes away is ignored (the cache keeps it for the next mount).
+  const [icons, setIcons] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let live = true;
+    const wanted = [...new Set(subscriptions.filter((subscription) => !subscription.icon).map((subscription) => subscription.id))];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (live && next < wanted.length) {
+        const id = wanted[next++];
+        const icon = await loadIcon(id);
+        if (!live) return;
+        if (icon) {
+          setIcons((old) => (old.get(id) === icon ? old : new Map(old).set(id, icon)));
+          // Cache it on the subscription record as well: the next visit renders the icon
+          // at once, without asking the nodes again (the session map stays the fallback).
+          void api(`/api/subscriptions/${encodeURIComponent(id)}`, { method: 'PATCH', body: { icon } }).catch(() => undefined);
+        }
+      }
+    };
+    // A small pool, not one request per tile: a long subscription list stays polite.
+    void Promise.all([worker(), worker(), worker(), worker()]);
+    return () => {
+      live = false;
+    };
+  }, [subscriptions]);
   // Random reshuffles once per page load: the tiles keep their places while the page is
   // open, and every load draws a new order.
   const salt = useMemo(() => Math.random().toString(36).slice(2), []);
@@ -48,7 +103,7 @@ export function SubsCarousel({ subscriptions }: { subscriptions: Subscription[] 
         </Link>
         {ordered.map((subscription) => (
           <Link key={subscription.id} to={profilePath(subscription.kind, subscription.id)} className="carousel-tile" aria-label={subscription.name}>
-            <Avatar name={subscription.name} id={subscription.id} icon={subscription.icon} />
+            <Avatar name={subscription.name} id={subscription.id} icon={subscription.icon ?? icons.get(subscription.id)} />
             <span className="carousel-name">{subscription.name}</span>
           </Link>
         ))}

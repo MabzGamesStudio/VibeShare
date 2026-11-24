@@ -338,7 +338,7 @@ export function pageLimit(collection: keyof typeof PAGE_LIMITS, requested: unkno
   return Math.min(cap, Math.max(1, Number.isFinite(want) ? want : (fallback ?? cap)));
 }
 
-export const SUGGESTION_KINDS = ['topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate'] as const;
+export const SUGGESTION_KINDS = ['topic', 'format', 'rating', 'creator', 'published', 'report', 'source', 'duplicate', 'tag', 'title', 'description', 'thumbnail', 'data', 'topics'] as const;
 export type SuggestionKind = (typeof SUGGESTION_KINDS)[number];
 
 /**
@@ -467,7 +467,14 @@ export interface CreatorIconResponse {
 export interface SuggestionRequest {
   id: string;
   kind: SuggestionKind;
+  /**
+   * The suggested value. Plain text for most kinds (an empty `title`, `description` or
+   * `thumbnail` value means "clear it"); `data` carries a JSON string→string map and
+   * `topics` a JSON list of the corrected topic names — each replaces what the content
+   * has when the operator accepts.
+   */
   value: string;
+  /** Why the client thinks so — optional; a correction can speak for itself. */
   reason: string;
   timestamp?: number;
   /** For kind `source`: the platform the suggested link points at (youtube, twitch…). */

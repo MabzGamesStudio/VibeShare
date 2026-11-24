@@ -125,6 +125,17 @@ export class Feeds {
     return [...shown, ...demoted];
   }
 
+  /**
+   * The "*watched" mark on its own — for feeds no seen-content filter touches. The same
+   * rule as everywhere else: only what the selected filter shows was opened before counts
+   * as watched (a preview is not a watch).
+   */
+  private markWatched(items: FeedItem[]): FeedItem[] {
+    return items.map((item) =>
+      this.core.blooms.sees('selected', { id: item.id, contentId: item.contentId, link: item.link }) ? { ...item, seen: true } : item
+    );
+  }
+
   /** Native content stays ahead of external results after blending or local ranking. */
   private nativeFirst(items: FeedItem[]): FeedItem[] {
     return [...items.filter((item) => item.id.startsWith('vs1')), ...items.filter((item) => !item.id.startsWith('vs1'))];
@@ -149,9 +160,11 @@ export class Feeds {
     const path = kind === 'feed' ? '/v1/feed' : kind === 'search' ? '/v1/search' : '/v1/creators/latest';
     const priceKind = kind === 'search' ? 'search' : 'feed';
     // The subscriptions feed ("latest") leads with native suggestions and otherwise lists
-    // the newest followed content: seen-content filters do not touch it. No filter travels along,
-    // and nothing is hidden, demoted or marked locally — it lists what is recent, seen
-    // or not. Every other feed and search results are filtered as the user chose.
+    // the newest followed content: seen-content filters do not touch it. No filter travels
+    // along, and nothing is hidden or demoted — it lists what is recent, seen or not — but
+    // what was opened before still carries the "*watched" mark, the same way the other
+    // feeds mark it (the selected filter only). Every other feed and search results are
+    // filtered as the user chose.
     const seenContent = kind !== 'latest';
     // Nodes filter by language too; this covers nodes that do not, and content they pass on.
     const languages = ((body.preferences ?? body.filters) as Preferences | undefined)?.languages ?? this.core.settings.preferences.languages;
@@ -186,7 +199,7 @@ export class Feeds {
           const shown = this.nativeFirst(
             seenContent
               ? this.applySeenFilters(page.items.filter(wanted).map((item) => this.feedItem(node, item)), imageMedium)
-              : page.items.filter(wanted).map((item) => this.feedItem(node, item))
+              : this.markWatched(page.items.filter(wanted).map((item) => this.feedItem(node, item)))
           );
           this.core.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
           return {
@@ -230,7 +243,7 @@ export class Feeds {
     const next: Record<string, string | null> = { ...cursors };
     for (const { node, page } of pages) next[node.id] = page ? (page.cursor ?? null) : (cursors[node.id] ?? null);
     const more = Object.values(next).some((value) => value !== null);
-    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items, imageMedium) : items);
+    const shown = this.nativeFirst(seenContent ? this.applySeenFilters(items, imageMedium) : this.markWatched(items));
     this.core.traces.trace('basic', component, `${kind} page → done`, { data: { items: shown.length, errors: errors.length } });
     return {
       items: shown,

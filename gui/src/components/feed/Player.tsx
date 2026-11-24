@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { FeedItem } from '../../../../src/shared/clientapi';
 import { platformOf } from '../../../../src/shared/sources';
-import { controlEmbed, embedsBlocked, nodePreviewOf, placeholderFor, playableFor, previewsEnabled, useMediaSrc, type Playable } from '../../media';
+import { controlEmbed, nodePreviewOf, placeholderFor, playableFor, previewsEnabled, useMediaSrc, type Playable } from '../../media';
 import { gradientFor } from '../../util';
 import { FormatIcon } from '../ContentCard';
 
@@ -22,7 +22,7 @@ export function Poster({ item, src, fit = 'cover' }: { item: FeedItem; src?: str
           <div className="poster-placeholder">
             <span className="poster-placeholder-title">{item.title}</span>
             {item.creator && <span className="poster-placeholder-creator">{item.creator.name}</span>}
-            <span className="poster-placeholder-note">External preview hidden</span>
+            <span className="poster-placeholder-note">{platformOf(item.id).name} preview hidden — third-party content is off</span>
           </div>
         )}
       </div>
@@ -90,9 +90,9 @@ export function MediaView({ item, active, paused = false, muted, loop = true, co
     return (
       <div className="media-view">
         <Poster item={item} src={posterSrc} fit="cover" />
-        {embedsBlocked() && (
+        {placeholderFor(item) && (
           <p className="small faint embed-placeholder-text" style={{ position: 'absolute', bottom: 8, left: 10, right: 10, textAlign: 'center' }}>
-            Third-party embeds are off (they carry third-party tracking cookies) — allow them in{' '}
+            {platformOf(item.id).name} embeds are off (third-party embeds carry tracking cookies) — allow them in{' '}
             <Link className="link" to="/settings?tab=privacy">
               Settings → Privacy
             </Link>

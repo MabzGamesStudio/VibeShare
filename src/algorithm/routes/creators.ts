@@ -213,11 +213,13 @@ export function registerCreatorsRoutes(node: AlgorithmNode): void {
         creators.add(id);
       }
       node.charge(ctx, node.config.pricing.feed, 'subscriptions');
-      // Look for what is new on the subscribed creators' own platforms too, in the
-      // background: the page answers with whatever has landed within a short wait,
-      // and later requests see the rest (each creator is re-checked only every
-      // crawler.creatorRefreshHours).
-      await node.crawler.refreshCreators([...creators]).wait(1500);
+      // The background subscriptions job looks for what is new on the subscribed
+      // creators' own platforms: bounded batches, a few creators per tick, within one
+      // run's budgets (creators, platform calls, wall clock). The page answers with
+      // whatever has landed within a short wait; the job keeps working after it and
+      // the next request continues where it stopped (each creator is re-checked only
+      // every crawler.creatorRefreshHours).
+      await node.crawler.requestSubscriptionsJob([...creators]).wait(1500);
       // The subscriptions feed is simply the newest content of the creators you follow:
       // seen-content filters do not apply here — it lists what is recent, seen or not.
       const preferences = node.preferencesOf(body.preferences);

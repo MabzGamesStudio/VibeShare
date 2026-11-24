@@ -3,7 +3,7 @@
 // kept for the session, and the seed and trace id the algorithm search node needs to
 // repeat the very same search.
 import { SlidersHorizontal } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { SOURCE_CATALOG } from '../../../src/algorithm/sources';
 import type { FeedItem, FeedResponse } from '../../../src/shared/clientapi';
@@ -209,56 +209,99 @@ export function SearchPage() {
   }, [settings]);
   const set = (patch: Partial<SearchSettings>) => setSettings((current) => ({ ...current, ...patch }));
 
-  const [showFilters, setShowFilters] = useState(false);
+  const [showFilters, setShowFilters] = useState(() => !query);
   const [matches, setMatches] = useState<CreatorInfo[]>([]);
   const [topics, setTopics] = useState<TopicInfo[]>([]);
   const [suggested, setSuggested] = useState<CreatorInfo[]>([]);
   const [page, setPage] = useState(0);
+  // The query being typed — the search box is repeated at the top and the bottom of the
+  // filter card and both show this one value.
+  const [text, setText] = useState(query);
+  // The search runs when the user asks for it: arriving on Explore (no query in the URL)
+  // waits for the Search button, while a query from the top search bar runs at once.
+  const [armed, setArmed] = useState(() => Boolean(query));
+  // True while the empty search was asked for here (Search with an empty box browses):
+  // a URL that loses its query afterwards means the user went back to Explore.
+  const browseAfterSearch = useRef(false);
+  useEffect(() => {
+    setText(query);
+    if (query) {
+      setArmed(true);
+      browseAfterSearch.current = false;
+    } else if (!browseAfterSearch.current) {
+      setArmed(false);
+    }
+  }, [query]);
 
-  // The creators, groups and topics that match the query, and a few suggested creators
-  // and groups the search offers as picks when nothing is typed yet.
+  const runSearch = () => {
+    const q = text.trim();
+    browseAfterSearch.current = !q;
+    setArmed(true);
+    setParams(q ? { q } : {});
+  };
+
+  // The creators, groups and topics that match the query — a part of the search, so they
+  // load with it and stay quiet until the user runs one.
   useEffect(() => {
     let live = true;
+    if (!armed) {
+      setMatches([]);
+      setTopics([]);
+      return () => {
+        live = false;
+      };
+    }
     api<{ creators: CreatorInfo[] }>(`/api/creators?q=${encodeURIComponent(query)}`)
       .then((result) => live && setMatches(result.creators))
       .catch(() => live && setMatches([]));
     api<{ topics: TopicInfo[] }>(`/api/topics?q=${encodeURIComponent(query)}`)
       .then((result) => live && setTopics(result.topics))
       .catch(() => live && setTopics([]));
+    return () => {
+      live = false;
+    };
+  }, [query, armed]);
+
+  // A few creators and groups the filters offer as picks before anything is typed.
+  useEffect(() => {
+    let live = true;
     api<{ creators: CreatorInfo[] }>('/api/creators?q=')
       .then((result) => live && setSuggested(result.creators.slice(0, 8)))
       .catch(() => live && setSuggested([]));
     return () => {
       live = false;
     };
-  }, [query]);
-
+  }, []);
   const load = useCallback(
     (cursor?: string) =>
-      api<FeedResponse>('/api/search', {
-        body: {
-          query,
-          sort: settings.sort,
-          cursor,
-          seed: settings.seed.trim() || undefined,
-          trace: settings.trace.trim() || undefined,
-          filters: {
-            formats: settings.formats.length ? settings.formats : undefined,
-            maxRating: settings.rating || undefined,
-            disregard: settings.disregard.length ? settings.disregard : undefined,
-            topics: settings.topics.length ? settings.topics : undefined,
-            onlyTopics: settings.topics.length ? true : undefined,
-            blockedTopics: settings.blockedTopics.length ? settings.blockedTopics : undefined,
-            creatorIds: settings.creators.length ? settings.creators : undefined,
-            onlyCreators: settings.creators.length ? true : undefined,
-            blockedCreators: settings.blockedCreators.length ? settings.blockedCreators : undefined,
-            preferredPlatforms: settings.platforms.length ? settings.platforms : undefined,
-            platformLevel: settings.platforms.length ? 'only' : undefined,
-            blockedPlatforms: settings.blockedPlatforms.length ? settings.blockedPlatforms : undefined,
-          },
-        },
-      }),
-    [query, settings]
+      // Nothing hits the node before the user asks for a search — arriving on Explore
+      // waits for the Search button (an empty answer keeps the list quiet).
+      armed
+        ? api<FeedResponse>('/api/search', {
+            body: {
+              query,
+              sort: settings.sort,
+              cursor,
+              seed: settings.seed.trim() || undefined,
+              trace: settings.trace.trim() || undefined,
+              filters: {
+                formats: settings.formats.length ? settings.formats : undefined,
+                maxRating: settings.rating || undefined,
+                disregard: settings.disregard.length ? settings.disregard : undefined,
+                topics: settings.topics.length ? settings.topics : undefined,
+                onlyTopics: settings.topics.length ? true : undefined,
+                blockedTopics: settings.blockedTopics.length ? settings.blockedTopics : undefined,
+                creatorIds: settings.creators.length ? settings.creators : undefined,
+                onlyCreators: settings.creators.length ? true : undefined,
+                blockedCreators: settings.blockedCreators.length ? settings.blockedCreators : undefined,
+                preferredPlatforms: settings.platforms.length ? settings.platforms : undefined,
+                platformLevel: settings.platforms.length ? 'only' : undefined,
+                blockedPlatforms: settings.blockedPlatforms.length ? settings.blockedPlatforms : undefined,
+              },
+            },
+          })
+        : Promise.resolve({ items: [], errors: [] }),
+    [armed, query, settings]
   );
 
   const size = Math.min(50, Math.max(3, Number(settings.pageSize) || 24));
@@ -325,17 +368,18 @@ export function SearchPage() {
       <div className="page-header">
         <div>
           <h1>{query ? `“${query}”` : 'Explore'}</h1>
-          <p className="small muted">Creators, groups, topics and content — mixed together by how well they match.</p>
         </div>
         <div className="row">
-          <label className="field" style={{ marginBottom: 0 }}>
-            <span className="hint">Sort</span>
-            <select value={settings.sort} onChange={(e) => set({ sort: e.target.value as SearchSettings['sort'] })}>
-              <option value="relevance">Relevance</option>
-              <option value="new">Newest</option>
-              <option value="top">Top</option>
-            </select>
-          </label>
+          {/* Plain row items — the dropdown and the Filters button line up on one baseline. */}
+          <select
+            aria-label="Sort results"
+            value={settings.sort}
+            onChange={(e) => set({ sort: e.target.value as SearchSettings['sort'] })}
+          >
+            <option value="relevance">Relevance</option>
+            <option value="new">Newest</option>
+            <option value="top">Top</option>
+          </select>
           <button onClick={() => setShowFilters(!showFilters)}>
             <SlidersHorizontal size={16} /> Filters
           </button>
@@ -343,16 +387,25 @@ export function SearchPage() {
       </div>
       {showFilters && (
         <div className="card form-stack" style={{ marginBottom: 24 }}>
+          {/* The search box, repeated at the top and the bottom of this card: both show
+              the same query and either one starts the search. */}
+          <input
+            type="search"
+            value={text}
+            placeholder="Search — #tag, @creator, format:music, topic:science"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+          />
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Show</div>
+            <div className="filter-label">Show</div>
             <Chips options={SHOW_KINDS} selected={settings.show} labels={SHOW_LABELS} onToggle={(v) => set({ show: toggle(settings.show, v) })} />
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Format</div>
+            <div className="filter-label">Format</div>
             <Chips options={FORMATS} selected={settings.formats} labels={FORMAT_LABELS} onToggle={(v) => set({ formats: toggle(settings.formats, v) })} />
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Suggested creators and groups — click to search only them</div>
+            <div className="filter-label">Suggested creators and groups — click to search only them</div>
             <div className="chips">
               {suggested.map((creator) => (
                 <button
@@ -371,7 +424,7 @@ export function SearchPage() {
             <ListField label="Creators or groups to hide" value={settings.blockedCreators} onChange={(blockedCreators) => set({ blockedCreators })} placeholder="ids, comma separated" />
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Suggested topics — click to search only them</div>
+            <div className="filter-label">Suggested topics — click to search only them</div>
             <Chips options={[...TOPICS].slice(0, 12)} selected={settings.topics} onToggle={(v) => set({ topics: toggle(settings.topics, v) })} />
           </div>
           <div className="form-grid">
@@ -392,11 +445,11 @@ export function SearchPage() {
             </label>
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Content warnings — leave these out entirely</div>
+            <div className="filter-label">Content warnings — leave these out entirely</div>
             <Chips options={[...RATING_REASONS]} selected={settings.disregard} onToggle={(v) => set({ disregard: toggle(settings.disregard, v) })} />
           </div>
           <div>
-            <div className="hint" style={{ marginBottom: 8 }}>Platforms — click to search one, click again to leave it out</div>
+            <div className="filter-label">Platforms — click to search one, click again to leave it out</div>
             <PlatformPicker
               included={settings.platforms}
               excluded={settings.blockedPlatforms}
@@ -429,13 +482,18 @@ export function SearchPage() {
               </label>
             </div>
           </details>
-          {query && (
-            <div>
-              <button className="small" onClick={() => setParams({})}>
-                Clear search
-              </button>
-            </div>
-          )}
+          <input
+            type="search"
+            value={text}
+            placeholder="Search — #tag, @creator, format:music, topic:science"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+          />
+          <div>
+            <button className="primary" onClick={runSearch}>
+              Search
+            </button>
+          </div>
         </div>
       )}
       {pageNav}

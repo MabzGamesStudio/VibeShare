@@ -5,14 +5,26 @@ import { defaultTraceSettings, normalizeTraceSettings } from './tracing.js';
 import { BLOOM_EXPECTED_ITEMS, BLOOM_EXPECTED_MAX } from './bloom.js';
 import type { Preferences } from './protocol.js';
 import { baseLanguage } from './language.js';
-import { RATINGS, type Rating } from './taxonomy.js';
+import { RATINGS, topicIdOf, type Rating } from './taxonomy.js';
 
 /** Where shared links point unless the user (or the web build) configures another hosted client. */
 export const DEFAULT_SHARE_BASE_URL = 'https://mabzgamesstudio.github.io/WebPages/pages/vibeShare/web';
 /** Earlier defaults, moved to the current one when settings are loaded. */
 const OLD_SHARE_BASE_URLS = ['https://mabzgamesstudio.github.io/webpages/vibeshare'];
 
-const NO_FILTERS: PageFilters = { formats: [], topics: [], onlyTopics: false, creatorKinds: [] };
+/** Topics excluded by default in every customization; the user can take them out. */
+export const DEFAULT_BLOCKED_TOPICS = ['ai-slop', 'rage-bait'];
+
+// Every page customization starts with the default exclusions blocked. A page whose own
+// block list the user ever changed keeps exactly their list (normalizePage lets a saved
+// blockedTopicIds win over this), so a topic unblocked on one page stays unblocked there.
+const NO_FILTERS: PageFilters = {
+  formats: [],
+  topics: [],
+  onlyTopics: false,
+  creatorKinds: [],
+  blockedTopicIds: DEFAULT_BLOCKED_TOPICS.map(topicIdOf),
+};
 
 export function presetPage(preset: PagePreset): PageConfig {
   switch (preset) {
@@ -68,14 +80,22 @@ export function defaultPages(): PageConfig[] {
 }
 
 /** Current settings format; older settings get the newer defaults once (normalizeSettings). */
-export const SETTINGS_REVISION = 3;
+export const SETTINGS_REVISION = 4;
 
 export function defaultSettings(): Settings {
   return {
     revision: SETTINGS_REVISION,
     pages: defaultPages(),
     shareBaseUrl: DEFAULT_SHARE_BASE_URL,
-    preferences: { maxRating: '16+', formats: [], topics: [], blockedTopics: [], blockedCreators: [], creatorKinds: [], languages: ['en'] },
+    preferences: {
+      maxRating: '16+',
+      formats: [],
+      topics: [],
+      blockedTopics: [...DEFAULT_BLOCKED_TOPICS],
+      blockedCreators: [],
+      creatorKinds: [],
+      languages: ['en'],
+    },
     feedMode: 'blend',
     unknownContent: 'warn',
     blockExternalEmbeds: false,
@@ -184,6 +204,12 @@ export function normalizeSettings(saved: Partial<Settings> | undefined, base: Se
     merged.preferences.blockedTopics = [
       ...new Set([...(merged.preferences.blockedTopics ?? []), ...(((saved.preferences as { blockedTags?: string[] } | undefined)?.blockedTags ?? []))]),
     ];
+  }
+  if (saved && (saved.revision ?? 1) < 4) {
+    // Revision 4: ai-slop and rage-bait are excluded by default. Existing settings gain
+    // them once (the same one-time union as the tags above); after this runs the user's
+    // list stands on its own, so taking either out afterwards stays out.
+    merged.preferences.blockedTopics = [...new Set([...(merged.preferences.blockedTopics ?? []), ...DEFAULT_BLOCKED_TOPICS])];
   }
   // The preview filter's old hide/demote choice became the seen-content mode.
   const legacyMode = (saved?.previewBloom as { mode?: string } | undefined)?.mode;

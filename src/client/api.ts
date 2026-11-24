@@ -394,6 +394,16 @@ export function clientRoutes(core: ClientCore): ApiRoute[] {
   on('GET', '/api/subscriptions', () => ({ subscriptions: core.store.data.data.subscriptions }));
   on('POST', '/api/subscriptions', async (request) => core.subscribe(await request.json()));
   on('DELETE', '/api/subscriptions/:id', (request) => core.unsubscribe(request.params.id));
+  // A creator icon cached onto its subscription record: the carousel shows it on every
+  // later visit without asking the nodes for it again.
+  on('PATCH', '/api/subscriptions/:id', async (request) => {
+    const body = await request.json<{ icon?: string }>();
+    const entry = core.store.data.data.subscriptions.find((subscription) => subscription.id === request.params.id);
+    if (!entry) throw notFound('No such subscription');
+    if (body.icon) entry.icon = String(body.icon).slice(0, 400_000);
+    core.store.changed();
+    return { subscription: entry };
+  });
 
   // Publishing (uploads arrive through a route of each host: files or browser memory)
   on('POST', '/api/publish', async (request) => core.publisher.publish(await request.json<PublishRequest>(2 * MiB)));

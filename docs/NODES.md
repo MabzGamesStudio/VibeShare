@@ -146,9 +146,15 @@ never set are reported as *unknown*.
   addresses. Finds land in *Review* or are listed right away; the operator's
   decisions are never overridden. The *Crawler* tab turns adapters on and off,
   runs them, adds seed sites and shows what robots.txt blocked. Loading a
-  subscriptions feed also looks for each subscribed creator's new content on
-  their own platform (background, best-effort, at most once per creator every
-  `crawler.creatorRefreshHours` — 6 by default).
+  subscriptions feed also starts a bounded **subscriptions job** in the
+  background: it works through the subscription list a few creators per tick,
+  asking each creator's own platform for what is new (at most once per creator
+  every `crawler.creatorRefreshHours` — 6 by default), without blocking the
+  page. One run stays within `crawler.subscriptionsJob` — `maxCreatorsPerRun`
+  (24), `maxCallsPerRun` (48) and `maxRunSeconds` (20) by default; 0 turns the
+  job off — and respects each API's daily budget. The queue of creators still
+  to look at is persisted, so a huge subscription list continues where the last
+  run stopped (creators that failed come first) instead of restarting.
 - **Platform APIs** — the *API keys* tab holds credentials from the operator's
   own developer accounts (Vimeo, Twitch, YouTube, Flickr, Unsplash, Pexels,
   GIPHY, Tenor, Imgur, DeviantArt, Europeana, Reddit, Tumblr, X, Instagram,

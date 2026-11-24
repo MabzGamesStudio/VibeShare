@@ -58,6 +58,12 @@ export function validateSuggestion(kind: SuggestionKind, raw: string): string {
       if (!tag) throw badRequest('Empty tag');
       return tag;
     }
+    case 'tag': {
+      // A content warning or a plain tag: kept as written (readable warnings keep their
+      // spaces), at most 100 characters.
+      if (!value) throw badRequest('Empty tag');
+      return value.slice(0, 100);
+    }
     case 'creator': {
       if (!value || value.length > 120) throw badRequest('A creator name is required (at most 120 characters)');
       return value;
@@ -78,7 +84,61 @@ export function validateSuggestion(kind: SuggestionKind, raw: string): string {
       const identity = identityOf({ id: value });
       return identity.key || value.slice(0, 4096);
     }
+    case 'title':
+      // A corrected title; an empty one clears it.
+      return value.slice(0, 300);
+    case 'description':
+      // A corrected description; an empty one clears it.
+      return value.slice(0, 5000);
+    case 'thumbnail': {
+      // A corrected thumbnail: a small JPEG, PNG or WebP data URL — or empty to
+      // remove the one the content has. The same bounds the registry stores by.
+      if (!value) return '';
+      const match = value.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+      if (!match) throw badRequest('The thumbnail must be a JPEG, PNG or WebP data: URL');
+      if (Buffer.from(match[2], 'base64').length > 200 * 1024) throw badRequest('The thumbnail must be at most 200 kB');
+      return value;
+    }
+    case 'data':
+      // The corrected content data: a JSON string→string map (an empty one clears).
+      return JSON.stringify(dataMapOf(value));
+    case 'topics':
+      // The corrected topics: the exact names as a JSON list — no fuzzy matching.
+      return JSON.stringify(topicsOf(value));
   }
+}
+
+/** The corrected content data: up to 200 short string pairs, canonicalized for dedup. */
+function dataMapOf(raw: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw badRequest('Content data is a JSON object of string pairs');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw badRequest('Content data is a JSON object of string pairs');
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(parsed as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 200) break;
+    const name = String(key).trim().slice(0, 80);
+    if (!name) continue;
+    if (typeof item !== 'string') throw badRequest('Content data values are strings');
+    out[name] = item.slice(0, 1000);
+  }
+  // One canonical order, so one corrected map is one suggestion however it was typed.
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+/** The corrected topics: the names as written, normalized the way topics are kept. */
+function topicsOf(raw: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw badRequest('Topics are a JSON list of names');
+  }
+  if (!Array.isArray(parsed)) throw badRequest('Topics are a JSON list of names');
+  return [...new Set(parsed.map((item) => normalizeTag(String(item))).filter(Boolean))].slice(0, 64);
 }
 /** Platform numbers a client saw (views, likes, comments…), cleaned for keeping. */
 export function metricsOf(raw: unknown): Record<string, number> | undefined {

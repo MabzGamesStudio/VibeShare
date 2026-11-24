@@ -217,6 +217,22 @@ describe('trusted algorithm search nodes', async () => {
     assert.equal(contentIdOf(served), cid, 'the next fetch is served');
   });
 
+  it('never accepts on the word of an untrusted algorithm node', async () => {
+    const untrusted = await startAlgorithm({ name: 'Untrusted node' });
+    try {
+      await admin(provider.url(), '/v1/admin/algorithms', { method: 'PUT', body: { refs: [algorithm.reference()], autoAccept: true } });
+      const { cid } = await pushUpload(provider, 'stranger-listed.bin', randomBytesOf(3000, 47));
+      // The untrusted node lists it at once — the trusted one never does.
+      await admin(untrusted.url(), '/v1/admin/content/bulk', { body: { ids: [cid], status: 'listed' } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(provider.store.isPending(cid), true, 'the untrusted listing changes nothing');
+      await admin(provider.url(), '/v1/admin/content/review/sync', { method: 'POST', body: {} });
+      assert.equal(provider.store.isPending(cid), true, 'not even the sync accepts on an untrusted word');
+    } finally {
+      await untrusted.stop();
+    }
+  });
+
   it('leaves pushed content in review when auto-accept is off', async () => {
     await admin(provider.url(), '/v1/admin/algorithms', { method: 'PUT', body: { autoAccept: false } });
     const { cid } = await pushUpload(provider, 'manual.bin', randomBytesOf(3000, 29), (id) =>

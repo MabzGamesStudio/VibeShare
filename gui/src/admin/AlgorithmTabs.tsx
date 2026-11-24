@@ -3,7 +3,6 @@ import type { CensoredSet, CensoredWordsChange, CensoredWordsPage } from '../../
 import { formatSource, parseContentId, sourceFromUrl } from '../../../src/shared/sources';
 import {
   CREATOR_KIND_LABELS,
-  CREATOR_KINDS,
   FORMAT_LABELS,
   FORMATS,
   RATING_LABELS,
@@ -13,7 +12,8 @@ import {
   type Rating,
 } from '../../../src/shared/taxonomy';
 import { ContentDataTab } from '../components/AboutContent';
-import { CopyButton, Loading, Modal } from '../components/ui';
+import { Chips, CopyButton, Loading, Modal, Spinner, toggle } from '../components/ui';
+import { ThumbPicker } from '../components/PublishFields';
 import { formatDuration, splitList, timeAgo } from '../util';
 import { Groups, Topics } from './GroupsTopics';
 import { ListControls, Pager, Sentinel, useConsoleList, type Paging } from './paging';
@@ -459,6 +459,317 @@ function stampWithAgo(value?: string): string {
   return `${new Date(value).toLocaleString()} (${timeAgo(value) || 'just now'})`;
 }
 
+/** The correction items "Correct the metadata" covers: what one correction touches. */
+const CORRECT_ITEMS: { id: string; label: string }[] = [
+  { id: 'title', label: 'Correct the title' },
+  { id: 'description', label: 'Correct the content description' },
+  { id: 'topics', label: 'Correct the topics' },
+  { id: 'thumbnail', label: 'Correct the thumbnail' },
+  { id: 'data', label: 'Correct the content data' },
+  { id: 'format', label: 'Correct the format' },
+  { id: 'rating', label: 'Correct the age rating' },
+  { id: 'creator', label: 'Add the creator' },
+  { id: 'published', label: 'Add the publish time' },
+  { id: 'tag', label: 'Add a tag' },
+];
+
+/**
+ * Correcting one thing about a catalog entry: the correction item to apply, and why
+ * (optional — the reason is kept as a note on the entry). Each item saves through the
+ * ordinary content edit; the content-data pairs save through their own route as they
+ * are edited.
+ */
+function CorrectModal({ entry, onClose, onChanged }: { entry: Entry; onClose: () => void; onChanged?: () => void }) {
+  const [item, setItem] = useState('title');
+  const [reason, setReason] = useState('');
+  const [title, setTitle] = useState(entry.title ?? '');
+  const [description, setDescription] = useState(entry.description ?? '');
+  const [topics, setTopics] = useState<string[]>(entry.topics ?? []);
+  const topicSuggestions = useTopicSuggestions();
+  const [thumbnail, setThumbnail] = useState<string | undefined>(undefined);
+  const [format, setFormat] = useState<Format>(entry.format);
+  const [rating, setRating] = useState<Rating>(entry.rating);
+  const [creator, setCreator] = useState(entry.creatorId ?? '');
+  const [published, setPublished] = useState(entry.publishedAt ? new Date(entry.publishedAt).toISOString().slice(0, 16) : '');
+  const [tag, setTag] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, show] = useToast();
+
+  const ready =
+    (item !== 'title' || Boolean(title.trim())) &&
+    (item !== 'tag' || Boolean(tag.trim())) &&
+    (item !== 'thumbnail' || Boolean(thumbnail)) &&
+    (item !== 'published' || Boolean(published));
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const patch: Partial<Entry> & { id: string; thumbnail?: string | boolean } = { id: entry.id };
+      const notes = [...(entry.notes ?? [])];
+      if (reason.trim()) notes.push({ kind: 'correction', value: item, reason: reason.trim() });
+      switch (item) {
+        case 'title':
+          patch.title = title.trim();
+          break;
+        case 'description':
+          // Empty clears the description (a missing field keeps it).
+          patch.description = description.trim();
+          break;
+        case 'topics':
+          patch.topics = topics.map((topic) => topic.trim()).filter(Boolean);
+          break;
+        case 'thumbnail':
+          patch.thumbnail = thumbnail;
+          break;
+        case 'format':
+          patch.format = format;
+          break;
+        case 'rating':
+          patch.rating = rating;
+          break;
+        case 'creator':
+          patch.creatorId = creator.trim();
+          break;
+        case 'published':
+          patch.publishedAt = new Date(published).toISOString();
+          break;
+        case 'tag':
+          notes.push({ kind: 'tag', value: tag.trim(), reason: reason.trim() || 'tagged by the operator' });
+          break;
+        case 'data':
+          break; // the pairs table below saves itself
+      }
+      patch.notes = notes;
+      await admin('/v1/admin/content', { method: 'PUT', body: patch });
+      show('Corrected.');
+      onChanged?.();
+      onClose();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Correct the metadata"
+      onClose={onClose}
+      wide
+      actions={
+        <button className="primary" disabled={busy || !ready} onClick={() => void save()}>
+          {busy ? <Spinner /> : 'Save correction'}
+        </button>
+      }
+    >
+      <div className="form-stack">
+        <label className="field">
+          What
+          <select value={item} onChange={(e) => setItem(e.target.value)}>
+            {CORRECT_ITEMS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {item === 'title' && (
+          <label className="field">
+            Title
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+        )}
+        {item === 'description' && (
+          <label className="field">
+            Content description
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} placeholder="Empty removes the description" />
+          </label>
+        )}
+        {item === 'topics' && (
+          <div className="field">
+            Topics
+            <TopicsEditor topics={topics} onChange={setTopics} suggestions={topicSuggestions} />
+          </div>
+        )}
+        {item === 'thumbnail' && <ThumbPicker value={thumbnail ?? entry.thumbnail} onChange={setThumbnail} />}
+        {item === 'data' && (
+          <div className="field">
+            Content data
+            <ContentDataTab
+              data={entry.data}
+              onSave={async (next) => {
+                await admin(`/v1/admin/content/${encodeURIComponent(entry.id)}/data`, { body: { data: next } });
+                onChanged?.();
+              }}
+            />
+            <span className="hint">Pairs save as they are edited.</span>
+          </div>
+        )}
+        {item === 'format' && (
+          <label className="field">
+            Format
+            <select value={format} onChange={(e) => setFormat(e.target.value as Format)}>
+              {FORMATS.map((f) => (
+                <option key={f} value={f}>
+                  {FORMAT_LABELS[f]}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {item === 'rating' && (
+          <label className="field">
+            Rating
+            <select value={rating} onChange={(e) => setRating(e.target.value as Rating)}>
+              {RATINGS.map((x) => (
+                <option key={x} value={x}>
+                  {RATING_LABELS[x]}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {item === 'creator' && (
+          <label className="field">
+            Creator <span className="hint">A key id, `name:…` or a link id — empty removes it</span>
+            <input type="text" className="mono" value={creator} onChange={(e) => setCreator(e.target.value)} />
+          </label>
+        )}
+        {item === 'published' && (
+          <label className="field">
+            Published
+            <input type="datetime-local" value={published} onChange={(e) => setPublished(e.target.value)} />
+          </label>
+        )}
+        {item === 'tag' && (
+          <label className="field">
+            Tag
+            <input type="text" value={tag} onChange={(e) => setTag(e.target.value)} placeholder="e.g. jump-scares" />
+          </label>
+        )}
+        <label className="field">
+          Why <span className="hint">(optional)</span>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} placeholder="Describe what in the content shows this." />
+        </label>
+        {error && <div className="banner danger small">{error}</div>}
+      </div>
+    </Modal>
+  );
+}
+
+/** The topics this node already knows, offered as suggestions (a topic's id is its name's hash). */
+function useTopicSuggestions(): string[] {
+  const [names, setNames] = useState<string[]>([]);
+  useEffect(() => {
+    admin<{ topics: { name: string }[] }>('/v1/admin/topics')
+      .then((r) => setNames(r.topics.map((topic) => topic.name)))
+      .catch(() => undefined);
+  }, []);
+  return names;
+}
+
+/**
+ * The topics editor, the way the client's page customization does it: every topic is a
+ * chip the operator clicks to remove, a typed name adds exactly that topic — the id is
+ * the hash of its name, never a near-match — and the node's own topics are offered as
+ * un-highlighted suggestions to click in.
+ */
+function TopicsEditor({
+  topics,
+  onChange,
+  suggestions,
+}: {
+  topics: string[];
+  onChange: (topics: string[]) => void;
+  suggestions: string[];
+}) {
+  const [draft, setDraft] = useState('');
+  const add = (name: string) => {
+    const topic = name.trim();
+    if (!topic) return;
+    // Exact add: the typed name is the topic itself ("thing" never becomes "thingaweek").
+    if (!topics.some((one) => one.toLowerCase() === topic.toLowerCase())) onChange([...topics, topic]);
+    setDraft('');
+  };
+  const offered = [...topics, ...suggestions.filter((one) => !topics.some((topic) => topic.toLowerCase() === one.toLowerCase()))];
+  return (
+    <div className="form-stack" style={{ gap: 8 }}>
+      <Chips options={offered} selected={topics} onToggle={(topic) => onChange(toggle(topics, topic))} />
+      <div className="row" style={{ gap: 6 }}>
+        <input
+          type="text"
+          value={draft}
+          placeholder="Add a topic"
+          aria-label="New topic"
+          style={{ flex: 1 }}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') add(draft);
+          }}
+        />
+        <button type="button" className="small" disabled={!draft.trim()} onClick={() => add(draft)}>
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The topics of one catalog entry and its content warnings: the topics editor, and one
+ * row per warning the operator turns on or off. A warning lives twice over — as a topic
+ * and as a tag note — so the entry stays consistent however it got there (client
+ * suggestions, tag corrections, this toggle); every change saves through the content
+ * edit, which keeps the topic ids in step with the names.
+ */
+function TopicsWarnings({ entry, onChanged }: { entry: Entry; onChanged?: () => void }) {
+  const suggestions = useTopicSuggestions();
+  const [topics, setTopics] = useState<string[]>(entry.topics ?? []);
+  const [notes, setNotes] = useState(entry.notes ?? []);
+  const [toast, show] = useToast();
+  const active = (warning: string) =>
+    topics.some((topic) => topic.toLowerCase() === warning) || notes.some((note) => note.kind === 'tag' && note.value.toLowerCase() === warning);
+
+  const save = async (nextTopics: string[], nextNotes: NonNullable<Entry['notes']>) => {
+    setTopics(nextTopics);
+    setNotes(nextNotes);
+    await admin('/v1/admin/content', { method: 'PUT', body: { id: entry.id, topics: nextTopics, notes: nextNotes } }).catch((e) => show(message(e)));
+    onChanged?.();
+  };
+
+  // Warnings are topics like any other — shown as their own toggle rows instead of
+  // chips, while the chips row carries the rest of the topics.
+  const isWarning = (topic: string) => RATING_REASONS.some((warning) => warning.toLowerCase() === topic.toLowerCase());
+
+  return (
+    <div className="form-stack">
+      <h3>Topics</h3>
+      <TopicsEditor
+        topics={topics.filter((topic) => !isWarning(topic))}
+        onChange={(next) => void save([...next, ...topics.filter(isWarning)], notes)}
+        suggestions={suggestions.filter((topic) => !isWarning(topic))}
+      />
+      <h3 style={{ marginTop: 8 }}>Content warnings</h3>
+      {/* The same chip buttons as the topics: highlighted when the warning is on, and
+          the click flips it — adding or removing the topic and its tag note. */}
+      <Chips
+        options={RATING_REASONS}
+        selected={RATING_REASONS.filter((warning) => active(warning))}
+        onToggle={(warning) => {
+          const on = active(warning);
+          const nextTopics = on ? topics.filter((topic) => topic.toLowerCase() !== warning) : [...topics, warning];
+          const nextNotes = on
+            ? notes.filter((note) => !(note.kind === 'tag' && note.value.toLowerCase() === warning))
+            : [...notes, { kind: 'tag', value: warning, reason: `Content warning: ${warning}` }];
+          void save(nextTopics, nextNotes);
+        }}
+      />
+    </div>
+  );
+}
+
 /** Everything the node knows about one entry, opened by clicking it in the catalog. */
 function EntryDetails({
   entry,
@@ -473,7 +784,10 @@ function EntryDetails({
 }) {
   const fullId = [entry.id, ...entry.sources].join('~');
   const [toast, show] = useToast();
+  const [correcting, setCorrecting] = useState(false);
   return (
+    <>
+      {correcting && <CorrectModal entry={entry} onClose={() => setCorrecting(false)} onChanged={onChanged} />}
     <Modal
       title="Content details"
       onClose={onClose}
@@ -485,6 +799,7 @@ function EntryDetails({
             <button className="primary" onClick={onEdit}>
               Edit
             </button>
+            <button onClick={() => setCorrecting(true)}>Correct the metadata</button>
           </div>
           <div className="row">
             {entry.status === 'listed' ? (
@@ -556,8 +871,6 @@ function EntryDetails({
           </dd>
           <dt>Topics</dt>
           <dd>{entry.topics?.length ? entry.topics.join(', ') : '—'}</dd>
-          <dt>Tags</dt>
-          <dd>{entry.tags?.length ? entry.tags.map((tag) => `#${tag}`).join(' ') : '—'}</dd>
           <dt>Creator</dt>
           <dd className="mono tiny">{entry.creatorId ?? '—'}</dd>
           <dt>Published</dt>
@@ -593,21 +906,7 @@ function EntryDetails({
           </dd>
         </dl>
         {entry.description && <p className="small">{entry.description}</p>}
-        {entry.notes && entry.notes.filter((note) => note.kind !== 'rating').length > 0 && (
-          <div>
-            <h3>Why it is tagged</h3>
-            {entry.notes
-              .filter((note) => note.kind !== 'rating')
-              .map((note) => (
-              <div key={note.kind + note.value} className="note small">
-                <strong>
-                  {note.kind}: {note.value}
-                </strong>
-                <div className="muted">{note.reason}</div>
-              </div>
-            ))}
-          </div>
-        )}
+        <TopicsWarnings entry={entry} onChanged={onChanged} />
         <div>
           <h3>Content data</h3>
           <ContentDataTab
@@ -620,13 +919,14 @@ function EntryDetails({
         </div>
       </div>
     </Modal>
+    </>
   );
 }
-
 const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', rating: 'all', topics: [], tags: [], status: 'listed' });
 
 function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClose: () => void; onSaved: () => void }) {
   const [draft, setDraft] = useState(entry);
+  const topicSuggestions = useTopicSuggestions();
   const ratingNote = (draft.notes ?? []).find((note) => note.kind === 'rating') ?? null;
   // The age-rating reason: a preset tag from the dropdown, or “other” with a custom text.
   const setRatingNote = (value: string, reason: string) => {
@@ -657,6 +957,9 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
           dislikes: undefined,
           updatedAt: undefined,
           thumbnail: undefined,
+          // Tags are no longer tracked (topics replaced them): never write the legacy
+          // fold again, it would drag stale tags back into the topics.
+          tags: undefined,
         },
       });
       onSaved();
@@ -747,11 +1050,7 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
         </div>
         <label className="field">
           Topics
-          <input type="text" defaultValue={(draft.topics ?? []).join(', ')} onBlur={(e) => setDraft({ ...draft, topics: splitList(e.target.value) })} />
-        </label>
-        <label className="field">
-          Tags
-          <input type="text" defaultValue={(draft.tags ?? []).join(', ')} onBlur={(e) => setDraft({ ...draft, tags: splitList(e.target.value) })} />
+          <TopicsEditor topics={draft.topics ?? []} onChange={(topics) => setDraft({ ...draft, topics })} suggestions={topicSuggestions} />
         </label>
         <label className="field">
           Creator id
@@ -1173,16 +1472,6 @@ function Creators() {
               <input type="text" value={editing.name ?? ''} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
             </label>
             <div className="form-grid">
-              <label className="field">
-                Kind
-                <select value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value as CreatorKind })}>
-                  {CREATOR_KINDS.map((k) => (
-                    <option key={k} value={k}>
-                      {CREATOR_KIND_LABELS[k]}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label className="field">
                 Status
                 <select value={editing.status} onChange={(e) => setEditing({ ...editing, status: e.target.value as Creator['status'] })}>

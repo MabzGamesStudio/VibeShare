@@ -2,7 +2,7 @@
 // node pickers and the sign-as-the-creator card. Publish's tabs and the video stream
 // composer all use these, so the forms stay the same everywhere.
 import { ImagePlus } from 'lucide-react';
-import { useRef } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { NodeEntry } from '../../../src/shared/clientapi';
 import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
@@ -172,13 +172,125 @@ export function MetaFields({ meta, setMeta, hideFormat }: { meta: MetaState; set
   );
 }
 
-export function ThumbPicker({ value, onChange }: { value: string | undefined; onChange: (value: string | undefined) => void }) {
+/** The "Content data" fold: optional short key/value pairs kept on the content. */
+export function ContentDataFields({ pairs, onChange }: { pairs: Record<string, string>; onChange: (next: Record<string, string>) => void }) {
+  const [key, setKey] = useState('');
+  const [value, setValue] = useState('');
+  return (
+    <details className="field">
+      <summary style={{ cursor: 'pointer' }}>
+        Content data <span className="hint">Optional key/value pairs kept on the content (up to 200)</span>
+      </summary>
+      <div className="form-stack" style={{ gap: 6, marginTop: 8 }}>
+        {Object.entries(pairs).map(([pairKey, pairValue]) => (
+          <div key={pairKey} className="card row between" style={{ padding: '6px 10px', margin: 0 }}>
+            <span className="small mono">{pairKey}</span>
+            <span className="small" style={{ flex: 1 }}>{pairValue}</span>
+            <button
+              type="button"
+              className="small"
+              onClick={() => {
+                const next = { ...pairs };
+                delete next[pairKey];
+                onChange(next);
+              }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <div className="row" style={{ gap: 6 }}>
+          <input type="text" className="mono" value={key} placeholder="Key" aria-label="Content data key" style={{ flex: 1 }} onChange={(e) => setKey(e.target.value)} />
+          <input type="text" value={value} placeholder="Value" aria-label="Content data value" style={{ flex: 2 }} onChange={(e) => setValue(e.target.value)} />
+          <button
+            type="button"
+            className="small"
+            disabled={!key.trim() || Object.hasOwn(pairs, key.trim())}
+            onClick={() => {
+              const name = key.trim().slice(0, 80);
+              if (!name) return;
+              onChange({ ...pairs, [name]: value.slice(0, 1000) });
+              setKey('');
+              setValue('');
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+export function ThumbPicker({
+  value,
+  onChange,
+  preview,
+}: {
+  value: string | undefined;
+  onChange: (value: string | undefined) => void;
+  /** What to show in the slot before a thumbnail is picked (the link's own preview). */
+  preview?: ReactNode;
+}) {
   const input = useRef<HTMLInputElement>(null);
+  const [note, setNote] = useState('');
+  const [awaitPaste, setAwaitPaste] = useState(false);
+
+  /** A clipboard picture becomes the thumbnail, in the same shape the picker stores. */
+  const take = async (blob: Blob) => {
+    const thumb = await imageThumbnail(new File([blob], 'clipboard', { type: blob.type }));
+    if (thumb) {
+      setNote('');
+      onChange(thumb);
+    } else {
+      setNote('That picture could not be read.');
+    }
+  };
+
+  const paste = async () => {
+    setNote('');
+    // The clipboard's own image items first.
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const type = item.types.find((entry) => entry.startsWith('image/'));
+        if (type) return void (await take(await item.getType(type)));
+      }
+      setNote('There is no image on the clipboard — copy a picture first.');
+      return;
+    } catch {
+      // Reads are denied in some browsers: fall back to a copied data: URL…
+    }
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (/^data:image\//i.test(text)) return void (await take(await (await fetch(text)).blob()));
+    } catch {
+      // …and then to the paste event below.
+    }
+    setNote('Clipboard access was denied — allow it in the browser, or press Ctrl+V here to paste the picture.');
+    setAwaitPaste(true);
+  };
+
+  // The last resort when the browser refuses clipboard reads: the user pastes by hand
+  // and the paste event carries the picture (one attempt).
+  useEffect(() => {
+    if (!awaitPaste) return;
+    const onPaste = (event: ClipboardEvent) => {
+      const file = [...(event.clipboardData?.files ?? [])].find((entry) => entry.type.startsWith('image/'));
+      setAwaitPaste(false);
+      if (file) void take(file);
+      else setNote('The pasted content has no picture.');
+    };
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitPaste]);
+
   return (
     <div className="field">
       <span>Thumbnail</span>
       <div className="preview-thumb" onClick={() => input.current?.click()} style={{ cursor: 'pointer' }}>
-        {value ? <img src={value} alt="" /> : <ImagePlus size={32} className="faint" />}
+        {value ? <img src={value} alt="" /> : (preview ?? <ImagePlus size={32} className="faint" />)}
       </div>
       <input
         ref={input}
@@ -191,11 +303,17 @@ export function ThumbPicker({ value, onChange }: { value: string | undefined; on
           e.target.value = '';
         }}
       />
-      {value && (
-        <button type="button" className="small" style={{ alignSelf: 'flex-start' }} onClick={() => onChange(undefined)}>
-          Remove
+      <div className="row" style={{ gap: 6, alignSelf: 'flex-start' }}>
+        <button type="button" className="small" onClick={() => void paste()}>
+          Paste image from clipboard
         </button>
-      )}
+        {value && (
+          <button type="button" className="small" onClick={() => onChange(undefined)}>
+            Remove
+          </button>
+        )}
+      </div>
+      {note && <span className="hint">{note}</span>}
     </div>
   );
 }
@@ -243,7 +361,7 @@ export function describeAlgorithm(node: NodeEntry): string {
 
 /** Signing as the creator: the name is all the form asks for — the key is the identity. */
 export function SignCard({ sign, setSign }: { sign: boolean; setSign: (sign: boolean) => void }) {
-  const { state, updateSettings } = useApp();
+  const { state } = useApp();
   const profile = state?.settings.profile ?? { name: '', kind: 'unknown' as CreatorKind };
   return (
     <div className="card form-stack" style={{ padding: 16 }}>
@@ -251,12 +369,11 @@ export function SignCard({ sign, setSign }: { sign: boolean; setSign: (sign: boo
       {sign ? (
         <>
           <p className="tiny faint">Your public key proves you made it, so people can subscribe to you.</p>
-          <input
-            type="text"
-            defaultValue={profile.name}
-            placeholder="Creator name"
-            onBlur={(e) => e.target.value !== profile.name && void updateSettings({ profile: { ...profile, name: e.target.value } })}
-          />
+          {/* Read-only: the name comes from the creator profile, not from here. */}
+          <div className="small">
+            {profile.name || <span className="faint">No creator name set</span>}
+            <div className="hint">Change it in Settings → Creator profile.</div>
+          </div>
         </>
       ) : (
         <p className="tiny faint">Published without a creator identity.</p>

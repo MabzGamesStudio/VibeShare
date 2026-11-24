@@ -75,7 +75,18 @@ function children(bytes: Uint8Array, from: number, to: number): WebmElement[] {
   let at = from;
   while (at < to) {
     const element = readWebmElement(bytes, at);
-    if (!element || element.total <= 0) break;
+    if (!element || element.total <= 0) {
+      // Zero padding between elements (recorders align their fragments with it). It is
+      // not a Matroska element and never contains one — real element ids carry a marker
+      // bit, so a zero byte can only be padding: skip it and keep reading. Stopping
+      // here instead silently dropped every cluster after the first gap, which played
+      // as "a second of video, then nothing".
+      if (bytes[at] === 0) {
+        at++;
+        continue;
+      }
+      break;
+    }
     out.push(element);
     at += Math.min(element.total, to - at);
   }
@@ -128,7 +139,14 @@ export function webmClusters(bytes: Uint8Array): Uint8Array[] {
     let at = from;
     while (at < to) {
       const element = readWebmElement(bytes, at);
-      if (!element || element.total <= 0) throw new Error('Invalid WebM media segment');
+      if (!element || element.total <= 0) {
+        // Zero padding between clusters is not an element — skip it like the reader above.
+        if (bytes[at] === 0) {
+          at++;
+          continue;
+        }
+        throw new Error('Invalid WebM media segment');
+      }
       if (element.id === ID_CLUSTER) clusters.push(bytes.slice(element.start, element.at + element.size));
       else if (element.id === ID_SEGMENT && !insideSegment) walk(element.at, Math.min(to, element.at + element.size), true);
       at += element.total;
@@ -158,7 +176,7 @@ export function webmStandaloneInit(init: Uint8Array, durationSeconds?: number): 
     }
     at += element.total;
   }
-  if (durationSeconds !== undefined) patchDuration(out, Math.max(0, durationSeconds * 1000));
+  if (durationSeconds !== undefined) return patchDuration(out, Math.max(0, durationSeconds * 1000));
   return out;
 }
 
@@ -283,22 +301,74 @@ export function webmCodecString(init: Uint8Array): string {
   return codecs.join(',');
 }
 
-/** Rewrites the Duration in a WebM init part, so players show the whole stream's length. */
-export function patchDuration(init: Uint8Array, totalMs: number): void {
+/**
+ * Rewrites the Duration of a WebM init part (the whole stream's length, in
+ * milliseconds), so players show it whole. The element is written in the file's own
+ * timecode units and inserted when a recording never had one — real recorders leave it
+ * out. Returns the init to use: inserting may resize it.
+ */
+export function patchDuration(init: Uint8Array, totalMs: number): Uint8Array {
   const top = children(init, 0, init.length);
   const segment = top.find((element) => element.id === ID_SEGMENT);
-  if (!segment) return;
+  if (!segment) return init;
   for (const part of children(init, segment.at, segment.at + segment.size)) {
     if (part.id !== ID_INFO) continue;
+    // Duration is in TimestampScale multiples, not always milliseconds.
+    const scale = readUint(init, part.at, part.at + part.size, ID_TIMECODE_SCALE) ?? 1_000_000;
+    const value = (totalMs * 1_000_000) / scale;
     for (const field of children(init, part.at, part.at + part.size)) {
       if (field.id !== ID_DURATION) continue;
-      // A float element: 4 or 8 bytes, big-endian IEEE 754.
       const view = new DataView(init.buffer, init.byteOffset + field.at, field.size);
-      if (field.size === 4) view.setFloat32(0, totalMs);
-      else if (field.size === 8) view.setFloat64(0, totalMs);
-      return;
+      if (field.size === 4) view.setFloat32(0, value);
+      else if (field.size === 8) view.setFloat64(0, value);
+      return init;
     }
+    // No Duration element to patch: write one at the end of Info. When the Segment's
+    // size field is the fixed eight bytes splitWebm writes it is re-written in place;
+    // an open-ended (unknown) size already covers whatever follows.
+    const durationBytes = new Uint8Array(8);
+    new DataView(durationBytes.buffer).setFloat64(0, value);
+    const added = encodeElement([0x44, 0x89], durationBytes);
+    const info = init.slice(part.start, part.at + part.size);
+    const head = init.slice(0, part.start);
+    const tail = init.slice(part.at + part.size);
+    const rebuiltInfo = encodeElement([0x15, 0x49, 0xa9, 0x66], joinBytes(info.slice(part.at - part.start), added));
+    const out = joinBytes(head, rebuiltInfo, tail);
+    const outSegment = children(out, 0, out.length).find((element) => element.id === ID_SEGMENT);
+    if (outSegment && outSegment.at - outSegment.start === 12) {
+      const known = out.slice(outSegment.at - 7, outSegment.at).some((byte) => byte !== 0xff);
+      if (known) {
+        const inner = out.length - outSegment.at;
+        for (let shift = 6; shift >= 0; shift--) out[outSegment.at - 7 + (6 - shift)] = Math.floor(inner / 256 ** shift) % 256;
+      }
+    }
+    return out;
   }
+  return init;
+}
+
+function joinBytes(...pieces: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(pieces.reduce((size, piece) => size + piece.length, 0));
+  let at = 0;
+  for (const piece of pieces) {
+    out.set(piece, at);
+    at += piece.length;
+  }
+  return out;
+}
+
+/** One EBML element: its id bytes, the smallest size VINT that fits, then the payload. */
+function encodeElement(id: number[], payload: Uint8Array): Uint8Array {
+  let width = 1;
+  while (payload.length >= 2 ** (7 * width) - 1) width++;
+  const size = new Uint8Array(width);
+  let value = payload.length;
+  for (let i = width - 1; i >= 0; i--) {
+    size[i] = value % 256;
+    value = Math.floor(value / 256);
+  }
+  size[0] |= 0x80 >> (width - 1);
+  return joinBytes(Uint8Array.from(id), size, payload);
 }
 
 /** Whether this browser can play WebM segments through MediaSource, best-effort. */

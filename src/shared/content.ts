@@ -27,6 +27,8 @@ export interface ManifestMeta {
   durationSeconds?: number;
   /** The images of a list-of-images content (their content ids or links), in order. */
   gallery?: string[];
+  /** Free-form content data kept on the content: short string pairs. */
+  data?: Record<string, string>;
   /**
    * Namespaced extension bag: arbitrary members a fork or app adds without a protocol
    * change. Like every other manifest field it is covered by the content id (the

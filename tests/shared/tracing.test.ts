@@ -60,4 +60,31 @@ describe('the client daemon trace log', () => {
       cleanup();
     }
   });
+
+  it('captures redacted payload prefixes at detail level, and nothing when off', async () => {
+    const { dir, cleanup } = tempDir();
+    const { client, api } = await startClient(join(dir, 'client'));
+    try {
+      // Off: the request goes through, but nothing at all is recorded about it.
+      await api('/api/toasts', { body: { text: 'quiet', password: 'hunter2' } });
+      const off = await api<{ events: unknown[] }>('/api/tracing/events');
+      assert.equal(off.events.length, 0, 'tracing off records nothing');
+
+      // Detail level with a small capture limit.
+      await api('/api/tracing/settings', { method: 'PUT', body: { enabled: true, payloadChars: 12, levels: { detail: true } } });
+      await api('/api/toasts', { body: { text: 'a'.repeat(200), password: 'hunter2', token: 'sekret' } });
+
+      const events = await api<{ events: { action: string; data?: { requestPayload?: string; responsePayload?: string } }[] }>('/api/tracing/events');
+      const line = events.events.find((event) => event.action === 'request ok');
+      assert.ok(line, 'the API call is traced');
+      assert.ok(line.data?.requestPayload, 'the request payload is captured');
+      assert.ok(line.data.requestPayload.length <= 13, 'cut to payloadChars + ellipsis');
+      assert.ok(line.data.requestPayload.endsWith('…'), 'truncation is marked');
+      assert.ok(!line.data.requestPayload.includes('hunter2') && !line.data.requestPayload.includes('sekret'), 'secrets are redacted');
+      assert.ok(line.data?.responsePayload, 'the response payload is captured');
+    } finally {
+      await client.stop();
+      cleanup();
+    }
+  });
 });

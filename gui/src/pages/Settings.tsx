@@ -24,7 +24,7 @@ import { TraceSettingsForm } from '../components/Tracing';
 import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
 import { HOSTING_PLATFORMS } from '../earn/hosting';
 import { useApp } from '../state';
-import { chooseConsent, loadConsent } from '../consent';
+import { chooseConsent, choosePlatform, loadConsent, platformChoices } from '../consent';
 import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
 import { HistorySection } from './History';
 import { TracingSection } from './Tracing';
@@ -978,10 +978,11 @@ function LogsCard() {
 }
 
 /** Third-party embeds and their tracking cookies: the consent choice, as easy to
- *  withdraw as it was to make. */
+ *  withdraw as it was to make — whole, or one platform at a time. */
 function EmbedsCard() {
   const { updateSettings } = useApp();
   const [choice, setChoice] = useState(() => loadConsent()?.choice ?? null);
+  const [overrides, setOverrides] = useState<Record<string, boolean>>(() => loadConsent()?.platforms ?? {});
   const record = loadConsent();
   return (
     <div className="card form-stack">
@@ -996,6 +997,7 @@ function EmbedsCard() {
         onChange={(allow) => {
           chooseConsent(allow ? 'accepted' : 'rejected');
           setChoice(loadConsent()?.choice ?? null);
+          setOverrides({});
           void updateSettings?.({ blockExternalEmbeds: !allow });
         }}
         label="Allow third-party embeds (they carry third-party tracking cookies)"
@@ -1005,6 +1007,21 @@ function EmbedsCard() {
           ? `Chosen ${new Date(record.at).toLocaleString()} — change it here at any time.`
           : 'No choice made yet: embeds stay off until you choose.'}
       </span>
+      <div className="field">
+        <span>Per platform</span>
+        <span className="hint">The switch above decides for every platform; a switch below overrides it for that one alone.</span>
+        {platformChoices().map((platform) => (
+          <Switch
+            key={platform.id}
+            checked={overrides[platform.id] ?? choice === 'accepted'}
+            onChange={(allow) => {
+              choosePlatform(platform.id, allow);
+              setOverrides(loadConsent()?.platforms ?? {});
+            }}
+            label={platform.label}
+          />
+        ))}
+      </div>
     </div>
   );
 }

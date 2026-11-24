@@ -137,25 +137,27 @@ export function PageView({ page, embedded }: { page: PageConfig; embedded?: bool
   const editor = editing && <PageEditor page={page} onClose={closeEditor} />;
 
   if (page.layout === 'shorts') {
+    // The same wrapper the Videos and Images pages use: its padding and header spacing
+    // are the page padding, so the shorts page sits in the page exactly like they do.
     return (
-      <div className="page-shorts">
+      <div className="page page-shorts">
+        {/* The same header the Videos and Images pages use: the title on the left and
+            the refresh and Customize buttons on the right of one normal page row. */}
+        {!embedded && (
+          <div className="page-header">
+            <div>
+              <h1 className="row" style={{ gap: 10 }}>
+                <PageIconView icon={page.icon} size={24} /> {page.title}
+              </h1>
+            </div>
+            {actions}
+          </div>
+        )}
         <ShortsLayout
           paged={paged}
           page={page}
           ipfsGateway={ipfsGateway}
           empty={paged.failure ? <div className="banner danger">{paged.failure}</div> : empty}
-          header={
-            embedded ? null : (
-              <>
-                <h1 className="row" style={{ gap: 8 }}>
-                  <PageIconView icon={page.icon} size={20} /> {page.title}
-                </h1>
-                <button className="small" onClick={openEditor}>
-                  <Settings2 size={14} /> Customize
-                </button>
-              </>
-            )
-          }
         />
         {editor}
       </div>

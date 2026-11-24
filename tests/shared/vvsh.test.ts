@@ -3,7 +3,7 @@ import { after, describe, it } from 'node:test';
 import { chunkIdOf, contentIdOf, validateManifest, type Manifest } from '../../src/shared/content.js';
 import { defaultSettings, normalizeSettings } from '../../src/shared/clientdefaults.js';
 import type { SavedState } from '../../src/shared/clientapi.js';
-import { buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../../src/shared/vvsh-encode.js';
+import { DEFAULT_VVSH_BUILD, buildVvsh, decodeVvshChunk, encodeVvshFrames, exportVvshStream, frameStats, vvshPlan, type VvshBuildConfig } from '../../src/shared/vvsh-encode.js';
 import { chunkAt, parseVvshFile, parseVvshNode, pathToChunk, previewAt, serializeVvshFile, treeLeaves, unpackVvshNode, vvshFileJson, walkToChunk, type VvshHash } from '../../src/shared/vvsh.js';
 import { base64url, fromBase64url } from '../../src/shared/encoding.js';
 import { clientFor, randomBytesOf, startClient, startProvider, tempDir, waitFor } from '../helpers.js';
@@ -35,6 +35,11 @@ describe('the .vvsh verifiable video stream format', async () => {
   const objects = new Map<VvshHash, Uint8Array>();
   const { file } = await buildVvsh(source, { totalSeconds: 60, config: CONFIG }, (hash, data) => { objects.set(hash, data); });
   const fetchObject = async (hash: VvshHash) => objects.get(hash) ?? null;
+
+  it('defaults to at least ten scrubbing previews, however short the video', () => {
+    assert.ok((DEFAULT_VVSH_BUILD.previewSplits ?? 0) >= 10, 'ten previews at least by default');
+    assert.equal(vvshPlan(5, DEFAULT_VVSH_BUILD).previewCount, DEFAULT_VVSH_BUILD.previewSplits, 'a five-second video gets the same default');
+  });
 
   it('takes the metadata the format names: version, bitrates, chunk length, counts and length', () => {
     const plan = vvshPlan(60, CONFIG);

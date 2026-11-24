@@ -196,6 +196,7 @@ const API_TYPES: Record<string, RouteTypes> = {
   'GET /api/subscriptions': { request: 'void', response: '{ subscriptions: Subscription[] }' },
   'POST /api/subscriptions': { request: '{ id?: string; name?: string; kind?: string; icon?: string }', response: 'unknown' },
   'DELETE /api/subscriptions/:id': { request: 'void', response: 'unknown' },
+  'PATCH /api/subscriptions/:id': { request: '{ icon?: string }', response: '{ subscription: Subscription }' },
   'POST /api/publish': { request: 'PublishRequest', response: 'unknown' },
   'POST /api/publish/preview': { request: 'PublishRequest', response: 'PublishPreview' },
   'POST /api/upload/url': { request: '{ url?: string }', response: '{ fileId: string; size: number; name: string; mime: string }' },

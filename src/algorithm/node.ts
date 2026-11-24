@@ -387,6 +387,12 @@ export class AlgorithmNode extends BaseNode<AlgorithmConfig> {
       throw badRequest('crawler.modules is a list of module paths');
     }
     if (!(Number(crawler.creatorRefreshHours) >= 0)) throw badRequest('crawler.creatorRefreshHours is a number of hours (0 or more)');
+    const subscriptionsJob = (crawler.subscriptionsJob ?? {}) as Record<string, unknown>;
+    for (const key of ['maxCreatorsPerRun', 'maxCallsPerRun', 'maxRunSeconds']) {
+      if (subscriptionsJob[key] !== undefined && !(Number(subscriptionsJob[key]) >= 0)) {
+        throw badRequest(`crawler.subscriptionsJob.${key} is a number (0 or more)`);
+      }
+    }
     for (const [id, adapter] of Object.entries(crawler.adapters) as [string, { dailyLimit?: unknown; searchShare?: unknown }][]) {
       if (adapter.dailyLimit !== undefined && !(Number(adapter.dailyLimit) >= 0)) throw badRequest(`${id}: daily limit must be 0 or more`);
       if (adapter.searchShare !== undefined && !(Number(adapter.searchShare) >= 0 && Number(adapter.searchShare) <= 1)) {

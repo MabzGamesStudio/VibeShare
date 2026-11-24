@@ -182,7 +182,12 @@ describe('a client using a provider and an algorithm node', async () => {
     const chunkId = manifest.chunks[1].id;
     for (const backend of provider.backends()) await backend.delete(chunkId);
     (provider.store as unknown as { cache: { delete(id: string): void } }).cache.delete(chunkId);
-    const data = await provider.store.getChunk(chunkId);
+    // The holder must be counted as online (it learns that from its poll) before the
+    // provider can ask it for a chunk — waiting here keeps the test from racing that
+    // bookkeeping under load. A retrieval that misses simply retries: once the chunk is
+    // here it is cached, so retries never charge twice.
+    await waitFor(async () => provider.service.stats().onlineHolders > 0);
+    const data = await waitFor(async () => (await provider.store.getChunk(chunkId)) ?? undefined);
     assert.ok(data);
     assert.equal(provider.ledger.get(accountId)!.balance, before + 2);
   });

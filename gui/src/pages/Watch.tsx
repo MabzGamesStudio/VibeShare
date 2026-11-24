@@ -26,9 +26,11 @@ import { VvshPlayer } from '../components/VvshPlayer';
 import { parseNodeRef } from '../../../src/shared/noderef';
 import { SUGGESTION_KINDS, type SuggestionKind } from '../../../src/shared/protocol';
 import { IMAGE_LIST_MIME } from '../../../src/shared/image-list';
-import { baseId } from '../../../src/shared/sources';
+import { baseId, platformOf } from '../../../src/shared/sources';
 import { ContentDataTab } from '../components/AboutContent';
+import { RequestRemoval } from '../components/RequestRemoval';
 import { ImageListView, UnverifiedImage, useVerified } from '../components/ImageList';
+import { ThumbPicker } from '../components/PublishFields';
 import {
   CREATOR_KIND_LABELS,
   FORMAT_LABELS,
@@ -53,8 +55,9 @@ import { Avatar, Chips, CopyButton, Loading, Modal, Spinner, WatchedBadge, toggl
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, groupPath, profilePath, timeAgo, topicPath } from '../util';
 
-const KIND_LABELS: Record<SuggestionKind, string> = {
-  topic: 'Add a topic',
+// The corrections the dropdown offers. `tag` and `topic` have no editor of their own:
+// content warnings post tags on their own and topics are edited as one corrected list.
+const KIND_LABELS: Partial<Record<SuggestionKind, string>> = {
   format: 'Correct the format',
   rating: 'Correct the age rating',
   creator: 'Add the creator',
@@ -62,7 +65,17 @@ const KIND_LABELS: Record<SuggestionKind, string> = {
   report: 'Report a problem',
   source: 'Add a source link',
   duplicate: 'Mark as duplicate of other content',
+  title: 'Correct the title',
+  description: 'Correct the content description',
+  thumbnail: 'Correct the thumbnail',
+  data: 'Correct the content data',
+  topics: 'Edit topics',
 };
+
+/** A few of the standard topics to offer as picks in the editor — never the whole list. */
+function suggestedTopics(shown: string[]): string[] {
+  return TOPICS.filter((name) => !shown.includes(name)).slice(0, 6);
+}
 
 function TextViewer({ url: src, markdown }: { url: string; markdown: boolean }) {
   const [text, setText] = useState<string | null>(null);
@@ -133,8 +146,11 @@ function NativePlayer({
   // Images gate on the algorithm nodes' say-so: an image nobody has listed never loads.
   const verified = useVerified(view.item ? baseId(view.item.id) : undefined);
   // A .vvsh verifiable video stream plays chunk by chunk: seeking fetches only the chunk
-  // under the playhead (each verified, each charged), never the whole file.
+  // under the playhead (each verified, each charged), never the whole file. It plays —
+  // and its preview images show — only after the algorithm nodes vouch for the content.
   if (view.manifest?.vvsh) {
+    if (verified === false) return <div className="player"><UnverifiedImage /></div>;
+    if (verified === null) return <div className="player"><span className="image-skeleton" /></div>;
     return <VvshPlayer nodeId={view.provider?.id ?? ''} file={view.manifest.vvsh} name={view.manifest.name} />;
   }
   if (mime.startsWith('video/')) {
@@ -663,13 +679,21 @@ function SuggestDialog({
   const [tab, setTab] = useState<'provider' | 'algorithm'>(view.decidedBy ? 'algorithm' : 'provider');
   const [providerId, setProviderId] = useState(providers.find((node) => node.enabled)?.id ?? providers[0]?.id ?? '');
   const [algorithmId, setAlgorithmId] = useState(nodeId || algorithms.find((node) => node.enabled)?.id || algorithms[0]?.id || '');
-  const [open, setOpen] = useState<Record<string, boolean>>({ sources: true });
+  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [rows, setRows] = useState<SourceRow[]>([{ platform: 'youtube', url: '' }]);
   const [duplicateOf, setDuplicateOf] = useState('');
   const [notes, setNotes] = useState<Record<string, string>>({ sources: '', duplicate: '', upload: '', meta: '', warnings: '' });
   const [kind, setKind] = useState<SuggestionKind>('topic');
   const [value, setValue] = useState('');
   const [reason, setReason] = useState('');
+  // The corrected fields: the current pairs and topics the form edits into the
+  // corrected map/list it sends, and the picked replacement thumbnail.
+  const [dataRows, setDataRows] = useState<{ key: string; value: string }[]>(() =>
+    Object.entries(view.item?.data ?? {}).map(([key, item]) => ({ key, value: item }))
+  );
+  const [topics, setTopics] = useState<string[]>(() => [...(view.item?.topics ?? [])]);
+  const [topicInput, setTopicInput] = useState('');
+  const [thumb, setThumb] = useState<string | undefined>(undefined);
   const [warnings, setWarnings] = useState<string[]>([]);
   const media = mediaRef.current;
   const [atTime, setAtTime] = useState(Boolean(media && media.currentTime > 0));
@@ -677,6 +701,41 @@ function SuggestDialog({
   const [busy, setBusy] = useState(false);
   const setNote = (key: string, note: string) => setNotes((current) => ({ ...current, [key]: note }));
   const fold = (key: string) => () => setOpen((current) => ({ ...current, [key]: !current[key] }));
+  // Adds exactly the typed topic — no near-match ever replaces the user's words.
+  const addTopic = () => {
+    const name = topicInput.trim();
+    if (name && !topics.includes(name)) setTopics([...topics, name]);
+    setTopicInput('');
+  };
+
+  // The corrected value of the picked item: plain text for the fields (empty clears
+  // title, description and thumbnail), the corrected map/list as JSON for content data
+  // and topics. Undefined means there is nothing to correct.
+  const correctionValue = (): string | undefined => {
+    switch (kind) {
+      case 'title':
+      case 'description':
+        return value;
+      case 'thumbnail':
+        return thumb ?? '';
+      case 'data': {
+        const map: Record<string, string> = {};
+        for (const row of dataRows) {
+          const key = row.key.trim();
+          if (key) map[key] = row.value;
+        }
+        return JSON.stringify(map);
+      }
+      case 'topics':
+        return JSON.stringify(topics);
+      case 'report':
+        return value.trim() ? value || 'other' : undefined;
+      case 'published':
+        return value.trim() ? new Date(value).toISOString() : undefined;
+      default:
+        return value.trim() ? value : undefined;
+    }
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -701,18 +760,18 @@ function SuggestDialog({
         const statuses: string[] = [];
         const suggest = async (body: Record<string, unknown>, note: string) => {
           const result = await api<{ status: string; agreeing: number }>('/api/suggest', {
-            body: { nodeId: algorithmId, id: view.id, reason: note.trim() || reason.trim() || 'Suggested from the content page', ...body },
+            body: { nodeId: algorithmId, id: view.id, reason: note.trim() || reason.trim() || undefined, ...body },
           });
           statuses.push(result.status);
         };
         for (const row of sources) await suggest({ kind: 'source', value: row.url.trim(), platform: row.platform }, notes.sources);
         for (const warning of warnings) await suggest({ kind: 'tag', value: warning }, notes.warnings || `Content warning: ${warning}`);
-        if (value.trim()) {
-          if (reason.trim().length < 3 && notes.meta.trim().length < 3) throw new Error('Say why (at least a few words)');
+        const correction = correctionValue();
+        if (correction !== undefined) {
           await suggest(
             {
               kind,
-              value: kind === 'report' ? value || 'other' : kind === 'published' ? new Date(value).toISOString() : value,
+              value: correction,
               timestamp: atTime ? time : undefined,
             },
             notes.meta
@@ -765,7 +824,7 @@ function SuggestDialog({
       </label>
       <SuggestFold
         title="Missing sources"
-        open={open.sources ?? true}
+        open={open.sources ?? false}
         onToggle={fold('sources')}
         description="Links to this content on other platforms — one content id can carry several sources. Pick the platform and paste the link."
         note={notes.sources}
@@ -810,14 +869,14 @@ function SuggestDialog({
             title="Correct the metadata"
             open={open.meta ?? false}
             onToggle={fold('meta')}
-            description="Algorithm nodes reward accepted suggestions with credits. Say why, and point to the moment that shows it."
+            description="Algorithm nodes reward accepted suggestions with credits. Say why (optional), and point to the moment that shows it."
             note={notes.meta}
             onNote={(note) => setNote('meta', note)}
           >
             <label className="field">
               What
               <select value={kind} onChange={(e) => (setKind(e.target.value as SuggestionKind), setValue(''))}>
-                {SUGGESTION_KINDS.filter((k) => k !== 'source' && k !== 'duplicate' && k !== 'rating').map((k) => (
+                {SUGGESTION_KINDS.filter((k) => k !== 'source' && k !== 'duplicate' && k !== 'rating' && k !== 'tag' && k !== 'topic').map((k) => (
                   <option key={k} value={k}>
                     {KIND_LABELS[k]}
                   </option>
@@ -836,16 +895,6 @@ function SuggestDialog({
                   ))}
                 </select>
               </label>
-            ) : kind === 'topic' ? (
-              <label className="field">
-                Topic
-                <input list="topics" value={value} onChange={(e) => setValue(e.target.value)} />
-                <datalist id="topics">
-                  {TOPICS.map((t) => (
-                    <option key={t} value={t} />
-                  ))}
-                </datalist>
-              </label>
             ) : kind === 'report' ? (
               <label className="field">
                 Problem
@@ -861,21 +910,104 @@ function SuggestDialog({
             ) : kind === 'creator' ? (
               <label className="field">
                 Creator
-                <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Who made this" />
+                <input type="text" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Who made this" />
               </label>
             ) : kind === 'published' ? (
               <label className="field">
                 Published
                 <input type="datetime-local" value={value} onChange={(e) => setValue(e.target.value)} />
               </label>
-            ) : (
+            ) : kind === 'title' ? (
               <label className="field">
-                Tag
-                <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. jump-scares" />
+                Title
+                <input type="text" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Empty removes the title" />
               </label>
-            )}
+            ) : kind === 'description' ? (
+              <label className="field">
+                Content description
+                <textarea value={value} onChange={(e) => setValue(e.target.value)} rows={4} placeholder="Empty removes the description" />
+              </label>
+            ) : kind === 'thumbnail' ? (
+              <div className="field">
+                Thumbnail
+                <ThumbPicker value={thumb} onChange={setThumb} />
+                <span className="hint">Pick the right picture. Sending with an empty picker removes the current thumbnail.</span>
+              </div>
+            ) : kind === 'topics' ? (
+              <div className="field">
+                Topics
+                {/* The topics as toggles, like the customization modal: a click drops or
+                    keeps one, and Add takes exactly what was typed. */}
+                <div className="chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {[...new Set([...(view.item?.topics ?? []), ...topics, ...suggestedTopics([...(view.item?.topics ?? []), ...topics])])].map(
+                    (name) => {
+                      const on = topics.includes(name);
+                      return (
+                        <button
+                          key={name}
+                          type="button"
+                          className={`chip ${on ? 'on' : ''}`}
+                          title={on ? 'In the corrected list — click to drop it' : 'Not in the corrected list — click to add it'}
+                          onClick={() => setTopics(on ? topics.filter((entry) => entry !== name) : [...topics, name])}
+                        >
+                          {name}
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+                <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                  <input
+                    type="text"
+                    placeholder="Add a topic"
+                    value={topicInput}
+                    onChange={(e) => setTopicInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && addTopic()}
+                  />
+                  <button type="button" className="small" onClick={addTopic}>
+                    Add
+                  </button>
+                </div>
+                <span className="hint">
+                  The corrected list: a click drops or keeps a topic, Add takes it exactly as typed. Sending replaces the topics the content has.
+                </span>
+              </div>
+            ) : kind === 'data' ? (
+              <div className="field">
+                Content data
+                <div className="form-stack" style={{ gap: 6 }}>
+                  {dataRows.map((row, at) => (
+                    <div key={at} className="row" style={{ gap: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Key"
+                        aria-label={`Key ${at + 1}`}
+                        style={{ flex: 1 }}
+                        value={row.key}
+                        onChange={(e) => setDataRows(dataRows.map((entry, index) => (index === at ? { ...entry, key: e.target.value } : entry)))}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        aria-label={`Value ${at + 1}`}
+                        style={{ flex: 1 }}
+                        value={row.value}
+                        onChange={(e) => setDataRows(dataRows.map((entry, index) => (index === at ? { ...entry, value: e.target.value } : entry)))}
+                      />
+                      <button type="button" className="small" onClick={() => setDataRows(dataRows.filter((_, index) => index !== at))}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="small" onClick={() => setDataRows([...dataRows, { key: '', value: '' }])}>
+                    + Add pair
+                  </button>
+                </div>
+                <span className="hint">The corrected pairs: edit, remove or add. Sending replaces the content data the content has.</span>
+              </div>
+            ) : null}
             <label className="field">
-              Why
+              Why <span className="hint">(optional)</span>
               <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Describe what in the content shows this." />
             </label>
             {media && (
@@ -902,7 +1034,7 @@ function SuggestDialog({
 }
 /** Where the content comes from and how it is stored — behind the (i) next to the video. */
 function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedIndex: number; onClose: () => void }) {
-  const [tab, setTab] = useState<'from' | 'tier' | 'data'>('from');
+  const [tab, setTab] = useState<'from' | 'tier' | 'data' | 'remove'>('from');
   return (
     <Modal title="About this content" onClose={onClose} wide>
       <div className="tabs" style={{ marginBottom: 14 }}>
@@ -915,8 +1047,13 @@ function InfoDialog({ view, embedIndex, onClose }: { view: ContentView; embedInd
         <button className={`tab ${tab === 'data' ? 'on' : ''}`} onClick={() => setTab('data')}>
           Content data
         </button>
+        <button className={`tab ${tab === 'remove' ? 'on' : ''}`} onClick={() => setTab('remove')}>
+          Request content removal
+        </button>
       </div>
-      {tab === 'data' ? (
+      {tab === 'remove' ? (
+        <RequestRemoval target={{ id: view.item ? baseId(view.item.id) : view.id, title: view.item?.title }} />
+      ) : tab === 'data' ? (
         <ContentDataTab data={view.item?.data} />
       ) : tab === 'from' ? (
         <dl className="kv" style={{ marginTop: 12 }}>
@@ -1109,7 +1246,7 @@ export function WatchPage() {
             <ExternalPlayer view={view} index={embedIndex} setIndex={setEmbedIndex} />
           ) : view.embedsDisabled && !view.native ? (
             <div className="player file">
-              <div>
+              <div className="embed-placeholder">
                 {/* Cookies off: the preview the algorithm node keeps of the content is
                     ours, and stands in for the platform's picture of the video. */}
                 {view.item && nodePreviewOf(view.item) ? (
@@ -1122,8 +1259,9 @@ export function WatchPage() {
                 <p style={{ marginTop: 14, fontWeight: 600 }}>{title}</p>
                 {creator && <p className="small muted">{creator.name}</p>}
                 <p className="small faint embed-placeholder-text" style={{ marginTop: 10, maxWidth: 340 }}>
-                  This is a placeholder standing in for the platform's player. Third-party embeds are turned off: an embedded player from another
-                  platform brings <strong>third-party tracking cookies</strong> with it. You can allow them — and change your mind at any time — in{' '}
+                  This is a placeholder standing in for {platformOf(view.item?.id ?? view.id).name}'s player. Third-party embeds are turned off for it: an
+                  embedded player from another platform brings <strong>third-party tracking cookies</strong> with it. You can allow it — and change your
+                  mind at any time — in{' '}
                   <Link className="link" to="/settings?tab=privacy">
                     Settings → Privacy
                   </Link>

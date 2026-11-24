@@ -76,6 +76,7 @@ export interface ClientApiSpec {
   'get-subscriptions': { method: 'GET'; path: '/api/subscriptions'; request: void; response: { subscriptions: Subscription[] } };
   'post-subscriptions': { method: 'POST'; path: '/api/subscriptions'; request: { id?: string; name?: string; kind?: string; icon?: string }; response: unknown };
   'delete-subscriptions-id': { method: 'DELETE'; path: '/api/subscriptions/:id'; request: void; response: unknown };
+  'patch-subscriptions-id': { method: 'PATCH'; path: '/api/subscriptions/:id'; request: { icon?: string }; response: { subscription: Subscription } };
   'post-publish': { method: 'POST'; path: '/api/publish'; request: PublishRequest; response: unknown };
   'post-publish-preview': { method: 'POST'; path: '/api/publish/preview'; request: PublishRequest; response: PublishPreview };
   'post-upload-url': { method: 'POST'; path: '/api/upload/url'; request: { url?: string }; response: { fileId: string; size: number; name: string; mime: string } };
@@ -200,6 +201,7 @@ export const CLIENT_API: { [K in keyof ClientApiSpec]: { method: ClientApiSpec[K
   'get-subscriptions': { method: 'GET', path: '/api/subscriptions' },
   'post-subscriptions': { method: 'POST', path: '/api/subscriptions' },
   'delete-subscriptions-id': { method: 'DELETE', path: '/api/subscriptions/:id' },
+  'patch-subscriptions-id': { method: 'PATCH', path: '/api/subscriptions/:id' },
   'post-publish': { method: 'POST', path: '/api/publish' },
   'post-publish-preview': { method: 'POST', path: '/api/publish/preview' },
   'post-upload-url': { method: 'POST', path: '/api/upload/url' },
