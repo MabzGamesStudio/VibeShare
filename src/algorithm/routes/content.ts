@@ -134,7 +134,8 @@ export function submit(node: AlgorithmNode, account: Account, body: SubmissionRe
   };
   node.contributions.data.submissions[submission.id] = submission;
   node.contributions.changed();
-  if (node.config.policy.autoListSubmissions) acceptSubmission(node, submission, {});
+  // The operator's auto-accept answers the queue directly: no review needed.
+  if (node.config.policy.autoAccept || node.config.policy.autoListSubmissions) acceptSubmission(node, submission, {});
   node.traces.trace('basic', 'algorithm.submissions', 'function:submit', {
     message: `${submission.id} · ${identity.key.slice(0, 24)} · ${submission.status}`,
     data: {

@@ -36,12 +36,13 @@ import {
   FORMAT_LABELS,
   FORMATS,
   RATING_LABELS,
-  RATING_REASONS,
   RATINGS,
   TOPICS,
   topicIdOf,
   type CreatorKind,
 } from '../../../src/shared/taxonomy';
+import { isAgeRatingTopic } from '../../../src/shared/age-rating';
+import { AgeRatingPicker } from '../components/AgeRatingPicker';
 import { api, errorMessage, uploadFile } from '../api';
 import { FormatIcon } from '../components/ContentCard';
 import { Comments } from '../components/Comments';
@@ -51,7 +52,7 @@ import { DownloadButton } from '../components/Download';
 import { SaveCidButton } from '../components/SaveCid';
 import { ShareButton } from '../components/Share';
 import { StorageTierCard } from '../components/StorageTier';
-import { Avatar, Chips, CopyButton, Loading, Modal, Spinner, WatchedBadge, toggle } from '../components/ui';
+import { Avatar, CopyButton, Loading, Modal, Spinner, WatchedBadge } from '../components/ui';
 import { useApp } from '../state';
 import { creatorPath, formatBytes, formatDuration, groupPath, profilePath, timeAgo, topicPath } from '../util';
 
@@ -694,7 +695,10 @@ function SuggestDialog({
   const [topics, setTopics] = useState<string[]>(() => [...(view.item?.topics ?? [])]);
   const [topicInput, setTopicInput] = useState('');
   const [thumb, setThumb] = useState<string | undefined>(undefined);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  // The age rating of this content, as the one topic that carries it: the picker edits
+  // it and the suggestion sends the corrected topics list (the old warnings/tags flow
+  // is gone — the rating system is topics all the way down now).
+  const [ratingTopics, setRatingTopics] = useState<string[]>(() => [...(view.item?.topics ?? [])]);
   const media = mediaRef.current;
   const [atTime, setAtTime] = useState(Boolean(media && media.currentTime > 0));
   const time = media?.currentTime ?? 0;
@@ -765,7 +769,12 @@ function SuggestDialog({
           statuses.push(result.status);
         };
         for (const row of sources) await suggest({ kind: 'source', value: row.url.trim(), platform: row.platform }, notes.sources);
-        for (const warning of warnings) await suggest({ kind: 'tag', value: warning }, notes.warnings || `Content warning: ${warning}`);
+        // The chosen age ratings go as a topics correction carrying every rating topic.
+        const pickedRatings = ratingTopics.filter((topic) => isAgeRatingTopic(topic));
+        const currentRatings = (view.item?.topics ?? []).filter((topic) => isAgeRatingTopic(topic));
+        if (pickedRatings.join('|') !== currentRatings.join('|')) {
+          await suggest({ kind: 'topics', value: JSON.stringify(ratingTopics) }, notes.warnings || `Age rating: ${pickedRatings.join(', ') || 'unknown'}`);
+        }
         const correction = correctionValue();
         if (correction !== undefined) {
           await suggest(
@@ -777,7 +786,7 @@ function SuggestDialog({
             notes.meta
           );
         }
-        if (!statuses.length) throw new Error('Add a source, a correction, or a content warning');
+        if (!statuses.length) throw new Error('Add a source, a correction, or an age rating');
         toast(statuses.includes('accepted') ? 'Accepted — thanks! Credits were added to your account.' : 'Sent for review.', 'success');
       }
       onClose();
@@ -1021,11 +1030,11 @@ function SuggestDialog({
             title="Content warnings"
             open={open.warnings ?? false}
             onToggle={fold('warnings')}
-            description="What this content contains that its age rating is about — pick every warning that applies. This is separate from correcting the metadata."
+            description="The age rating of this content — the rating system and its category, an “Other” free-text rating, or Unknown. It is sent as a topics correction adding the age-rating topic."
             note={notes.warnings}
             onNote={(note) => setNote('warnings', note)}
           >
-            <Chips options={RATING_REASONS} selected={warnings} onToggle={(warning) => setWarnings(toggle(warnings, warning))} />
+            <AgeRatingPicker topics={ratingTopics} onChange={setRatingTopics} />
           </SuggestFold>
         </>
       )}

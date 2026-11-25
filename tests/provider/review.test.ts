@@ -285,3 +285,44 @@ describe('trusted algorithm search nodes', async () => {
     await admin(provider.url(), '/v1/admin/config', { method: 'PUT', body: { review: { enabled: true, syncMinutes: 0 } } });
   });
 });
+
+describe('the accept-all toggle', async () => {
+  const provider = await startProvider();
+  after(async () => {
+    await provider.stop();
+  });
+
+  it('takes effect on the next push when flipped at runtime', async () => {
+    // Off (the default): pushed content waits for review.
+    const first = await pushUpload(provider, 'flipped-off.bin', randomBytesOf(3000, 53));
+    assert.equal(first.done.status, 'pending');
+    assert.equal(provider.store.isPending(first.cid), true);
+
+    // The general-settings switch stores the queue as off (review.enabled: false).
+    await admin(provider.url(), '/v1/admin/config', { method: 'PUT', body: { review: { enabled: false, syncMinutes: 0 } } });
+
+    const second = await pushUpload(provider, 'flipped-on.bin', randomBytesOf(3000, 57));
+    assert.equal(second.done.status, 'ready', 'the next push is accepted immediately');
+    assert.equal(provider.store.isPending(second.cid), false);
+    const viewer = clientFor(provider.url());
+    const served = await viewer.json<Manifest>(`/v1/content/${second.cid}`);
+    assert.equal(contentIdOf(served), second.cid, 'served to clients');
+    const list = await admin<{ items: { cid: string }[] }>(provider.url(), '/v1/admin/content?limit=50');
+    assert.equal(list.items.some((item) => item.cid === second.cid), true, 'straight into the catalog');
+    assert.equal(provider.service.jobs().filter((job) => job.cid === second.cid).length > 0, true, 'with its storage job');
+
+    // Flipped back on: the next push waits again — and the toggle never rescues what
+    // is already queued.
+    await admin(provider.url(), '/v1/admin/config', { method: 'PUT', body: { review: { enabled: true, syncMinutes: 0 } } });
+    const third = await pushUpload(provider, 'flipped-back.bin', randomBytesOf(3000, 59));
+    assert.equal(third.done.status, 'pending');
+    assert.equal(provider.store.isPending(first.cid), true);
+  });
+
+  it('rejects a non-boolean value', async () => {
+    await assert.rejects(
+      admin(provider.url(), '/v1/admin/config', { method: 'PUT', body: { review: { enabled: 'yes', syncMinutes: 0 } } }),
+      /review\.enabled/
+    );
+  });
+});

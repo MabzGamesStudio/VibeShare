@@ -1,5 +1,7 @@
 import { ArrowDown, ArrowUp, GalleryVertical, LayoutDashboard, LayoutGrid, List, RotateCcw, Smartphone, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { AgeRatingPicker } from '../AgeRatingPicker';
+import { UNKNOWN_AGE_RATING_TOPIC } from '../../../../src/shared/age-rating';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   METADATA_FIELDS,
@@ -61,7 +63,7 @@ async function resolvePick(kind: 'creator' | 'topic', text: string): Promise<{ i
 
 
 /** A slider for one section's level: only show, strongly suggest, suggest, weakly suggest, ignore. */
-function LevelSlider({ label, value, onChange }: { label: string; value: SuggestLevel; onChange: (level: SuggestLevel) => void }) {
+export function LevelSlider({ label, value, onChange }: { label: string; value: SuggestLevel; onChange: (level: SuggestLevel) => void }) {
   return (
     <label className="field" style={{ marginTop: 10 }}>
       <span>
@@ -79,10 +81,10 @@ function LevelSlider({ label, value, onChange }: { label: string; value: Suggest
   );
 }
 
-type PickEntry = { id: string; label: string; state: 'on' | 'off' | 'block' };
+export type PickEntry = { id: string; label: string; state: 'on' | 'off' | 'block' };
 
 /** The buttons of one pick list: white (on), deselected, or blacklisted (red); each click cycles. */
-function PickButtons({ entries, onCycle }: { entries: PickEntry[]; onCycle: (id: string) => void }) {
+export function PickButtons({ entries, onCycle }: { entries: PickEntry[]; onCycle: (id: string) => void }) {
   return (
     <div className="chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       {entries.map((entry) => (
@@ -101,7 +103,7 @@ function PickButtons({ entries, onCycle }: { entries: PickEntry[]; onCycle: (id:
 }
 
 /** The row that adds one more pick: a name or an id the user types. */
-function AddPickRow({ kind, onAdd }: { kind: 'topic' | 'creator'; onAdd: (pick: { id: string; name: string }) => void }) {
+export function AddPickRow({ kind, onAdd }: { kind: 'topic' | 'creator'; onAdd: (pick: { id: string; name: string }) => void }) {
   const { toast } = useApp();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -442,7 +444,7 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
   const usesColumns = layout === 'grid' || layout === 'masonry';
   const plays = layout === 'shorts' || layout === 'stream';
   const formatLevel: SuggestLevel = draft.filters.formatLevel ?? 'only';
-  const topicLevel: SuggestLevel = draft.filters.topicLevel ?? (draft.filters.onlyTopics ? 'only' : 'ignore');
+  const topicLevel: SuggestLevel = draft.filters.topicLevel ?? (draft.filters.onlyTopics ? 'only' : 'strongly');
   const creatorLevel: SuggestLevel = draft.filters.creatorLevel ?? (draft.filters.onlyCreators ? 'only' : 'ignore');
   const platformLevel: SuggestLevel = draft.filters.platformLevel ?? 'ignore';
   // Platforms (content sources like youtube): whitelist → blacklist → unselected, cycling.
@@ -482,9 +484,9 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
               Title
               <input type="text" value={draft.title} maxLength={40} onChange={(e) => set({ title: e.target.value })} />
             </label>
-            <div className="field">
+            <div className="field switch-row">
               <span>Show in left panel</span>
-              <Switch checked={draft.sidebar} onChange={(sidebar) => set({ sidebar })} label="Listed among the pages on the left" />
+              <Switch checked={draft.sidebar} onChange={(sidebar) => set({ sidebar })} />
             </div>
             <div className="field">
               <span>Icon</span>
@@ -562,6 +564,17 @@ export function PageEditor({ page, isNew = false, onClose }: { page: PageConfig;
                   ))}
                 </select>
               </label>
+              <div className="field">
+                <span>
+                  Rated as <span className="hint">Unknown shows everything</span>
+                </span>
+                {/* The age rating rides along as one age-rating topic, applied like any
+                    other topic filter. Unknown carries no filter at all. */}
+                <AgeRatingPicker
+                  topics={draft.filters.topics ?? []}
+                  onChange={(topics) => setFilters({ topics: topics.filter((topic) => topic !== UNKNOWN_AGE_RATING_TOPIC) })}
+                />
+              </div>
               <div className="field">
                 <span>
                   Disregard <span className="hint">Never show content about these</span>

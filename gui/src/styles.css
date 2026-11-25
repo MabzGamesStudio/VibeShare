@@ -528,10 +528,41 @@ textarea {
   min-height: 80px;
 }
 
+/* The content image full screen: the picture contained inside the whole screen. */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+}
+
+.preview-overlay img {
+  max-width: 100vw;
+  max-height: 100vh;
+  object-fit: contain;
+}
+
 label.field {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+/* A label and its toggle on one line, vertically centred with their own padding (the
+   label.field column styling never reaches a div). */
+.field.switch-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-dim);
@@ -1898,6 +1929,15 @@ a.field-platform:hover {
   gap: 3px;
 }
 
+/* One platform's consent choice in Settings → Privacy: the toggle sits immediately
+   beside its name, one line per platform with room to breathe between them. */
+.platform-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
 .fields-compact .content-title {
   font-size: 14.5px;
 }
@@ -2010,62 +2050,12 @@ img.poster-contain {
   opacity: 0.7;
 }
 
-/* A lovely, animated placeholder for hidden external content: a soft sheen sweeps the
-   gradient, the format icon floats, and the message rises into place. */
-@keyframes placeholderSheen {
-  0% {
-    transform: translateX(-130%) skewX(-18deg);
-  }
-  55%,
-  100% {
-    transform: translateX(230%) skewX(-18deg);
-  }
-}
-
-@keyframes placeholderFloat {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-  50% {
-    transform: translateY(-5px) scale(1.06);
-  }
-}
-
-@keyframes placeholderFadeUp {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
+/* The placeholder for hidden external content: a static gradient, the format icon and
+   the message. Nothing here animates — a moving placeholder reads as "still loading",
+   and the colour comes from the item's id, so it never changes between renders. */
 .poster-empty {
   position: relative;
   overflow: hidden;
-}
-
-.poster-empty::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(100deg, transparent 25%, rgba(255, 255, 255, 0.18) 50%, transparent 75%);
-  transform: translateX(-130%) skewX(-18deg);
-  animation: placeholderSheen 3.6s ease-in-out infinite;
-  pointer-events: none;
-}
-
-.poster-empty svg,
-.embed-placeholder-icon svg {
-  animation: placeholderFloat 3s ease-in-out infinite;
-}
-
-.poster-placeholder,
-.embed-placeholder-text {
-  animation: placeholderFadeUp 0.55s ease both;
 }
 
 .embed-placeholder-icon {
@@ -2097,14 +2087,6 @@ img.poster-contain {
   object-fit: contain;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .poster-empty::after,
-  .poster-empty svg,
-  .embed-placeholder-icon svg,
-  .poster-placeholder,
-  .embed-placeholder-text {
-    animation: none;
-  }
 }
 
 .thumb-actions {

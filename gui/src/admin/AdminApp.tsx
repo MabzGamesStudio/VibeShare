@@ -949,6 +949,8 @@ export interface FieldDef {
   min?: number;
   /** Number fields: whole numbers only (the field rounds to them). */
   integer?: boolean;
+  /** Bool fields whose label is the negation of the stored value: the operator picks Yes and the config stores false. */
+  invert?: boolean;
 }
 
 const COMMON_FIELDS: FieldDef[] = [
@@ -1042,7 +1044,10 @@ function SettingsTab({ groups, only }: { groups: FieldGroup[]; only?: string }) 
               <label key={field.path} className="field">
                 {field.label}
                 {field.type === 'bool' ? (
-                  <select value={String(Boolean(value))} onChange={(e) => commit(e.target.value === 'true')}>
+                  <select
+                    value={String(field.invert ? !Boolean(value) : Boolean(value))}
+                    onChange={(e) => commit(field.invert ? e.target.value !== 'true' : e.target.value === 'true')}
+                  >
                     <option value="true">Yes</option>
                     <option value="false">No</option>
                   </select>
@@ -1751,7 +1756,20 @@ const CREDITS_TRANSFERS_GROUP: FieldGroup = {
 };
 
 const PROVIDER_GROUPS: FieldGroup[] = [
-  { id: 'general', label: 'General', fields: COMMON_FIELDS },
+  {
+    id: 'general',
+    label: 'General',
+    fields: [
+      ...COMMON_FIELDS,
+      {
+        path: 'review.enabled',
+        label: 'Accept all content automatically without reviewing it',
+        type: 'bool',
+        invert: true,
+        hint: 'Pushed content (uploads, peer pushes, vvsh manifests) goes straight into the catalog and is served. Off — the default — keeps it in the Review queue until you accept it or a trusted algorithm search node lists it.',
+      },
+    ],
+  },
   {
     id: 'prices',
     label: 'Prices and storage',
@@ -1811,7 +1829,19 @@ const PROVIDER_GROUPS: FieldGroup[] = [
 ];
 
 const ALGORITHM_GROUPS: FieldGroup[] = [
-  { id: 'general', label: 'General', fields: COMMON_FIELDS },
+  {
+    id: 'general',
+    label: 'General',
+    fields: [
+      ...COMMON_FIELDS,
+      {
+        path: 'policy.autoAccept',
+        label: 'Accept all content automatically without reviewing it',
+        type: 'bool',
+        hint: 'Submissions and corrections are accepted the moment they arrive instead of waiting in the review queues',
+      },
+    ],
+  },
   {
     id: 'ranking',
     label: 'Ranking',

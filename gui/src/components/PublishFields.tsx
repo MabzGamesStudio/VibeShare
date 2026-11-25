@@ -9,13 +9,13 @@ import type { AlgorithmInfo, ProviderInfo } from '../../../src/shared/protocol';
 import {
   FORMAT_LABELS,
   FORMATS,
-  RATING_LABELS,
-  RATINGS,
   TOPICS,
   type CreatorKind,
   type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
+import { legacyRatingOfTopics } from '../../../src/shared/age-rating';
+import { AgeRatingPicker } from './AgeRatingPicker';
 import { useApp } from '../state';
 import { formatBytes, splitList } from '../util';
 import { Chips, Switch, toggle } from './ui';
@@ -141,19 +141,18 @@ export function MetaFields({ meta, setMeta, hideFormat }: { meta: MetaState; set
           </label>
         )}
         <label className="field">
-          Age rating
-          <select value={meta.rating} onChange={(e) => setMeta({ ...meta, rating: e.target.value as Rating })}>
-            {RATINGS.map((r) => (
-              <option key={r} value={r}>
-                {RATING_LABELS[r]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
           Language
           <input type="text" value={meta.language} onChange={(e) => setMeta({ ...meta, language: e.target.value })} placeholder="en" maxLength={16} />
         </label>
+      </div>
+      <div className="field">
+        <span>Age rating</span>
+        {/* The rating lives in the topics (exactly one age-rating topic); the legacy
+            rating the publish body carries is its closest bucket. */}
+        <AgeRatingPicker
+          topics={meta.topics}
+          onChange={(topics) => setMeta({ ...meta, topics, rating: legacyRatingOfTopics(topics) })}
+        />
       </div>
       <div className="field">
         <span>Topics</span>
@@ -249,7 +248,8 @@ export function ThumbPicker({
 
   const paste = async () => {
     setNote('');
-    // The clipboard's own image items first.
+    // The click itself is the user gesture, so the clipboard is read right here — a
+    // browser that lets us read needs no second paste action from the person.
     try {
       const items = await navigator.clipboard.read();
       for (const item of items) {
@@ -259,13 +259,13 @@ export function ThumbPicker({
       setNote('There is no image on the clipboard — copy a picture first.');
       return;
     } catch {
-      // Reads are denied in some browsers: fall back to a copied data: URL…
+      // Reads are denied or the API is missing: try a copied data: URL…
     }
     try {
       const text = (await navigator.clipboard.readText()).trim();
       if (/^data:image\//i.test(text)) return void (await take(await (await fetch(text)).blob()));
     } catch {
-      // …and then to the paste event below.
+      // …and only then fall back to the Ctrl+V prompt below.
     }
     setNote('Clipboard access was denied — allow it in the browser, or press Ctrl+V here to paste the picture.');
     setAwaitPaste(true);
@@ -303,7 +303,7 @@ export function ThumbPicker({
           e.target.value = '';
         }}
       />
-      <div className="row" style={{ gap: 6, alignSelf: 'flex-start' }}>
+      <div className="row" style={{ gap: 6, alignSelf: 'flex-start', marginTop: 12 }}>
         <button type="button" className="small" onClick={() => void paste()}>
           Paste image from clipboard
         </button>

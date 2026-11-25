@@ -95,6 +95,11 @@ export function defaultSettings(): Settings {
       blockedCreators: [],
       creatorKinds: [],
       languages: ['en'],
+      // How the picks weigh in the feed: languages filter hard, topics are favoured and
+      // creators are left to the subscriptions and the node's own mix.
+      languageLevel: 'only',
+      topicLevel: 'strongly',
+      creatorLevel: 'ignore',
     },
     feedMode: 'blend',
     unknownContent: 'warn',
@@ -311,11 +316,15 @@ export function pagePreferences(preferences: Preferences, filters: Partial<PageF
     out.formatLevel = formatLevel;
     if (formatLevel === 'only') out.formats = filters.formats;
   }
+  // Formats a page excludes outright (the tri-state red state) never show on that page.
+  if (filters.blockedFormats?.length) {
+    out.blockedFormats = [...new Set([...(preferences.blockedFormats ?? []), ...filters.blockedFormats])];
+  }
   if (filters.creatorKinds?.length) out.creatorKinds = filters.creatorKinds;
   // Topics (by name or id): the level decides whether they are required, favoured to a
   // degree, or left out; a blacklist always wins over the slider.
   const topicPicks = [...(filters.topics ?? []), ...(filters.topicIds ?? [])];
-  const topicLevel = filters.topicLevel ?? (filters.onlyTopics ? 'only' : topicPicks.length ? 'suggest' : 'ignore');
+  const topicLevel = filters.topicLevel ?? (filters.onlyTopics ? 'only' : topicPicks.length ? 'strongly' : 'ignore');
   if (topicPicks.length && topicLevel !== 'ignore') {
     out.preferredTopics = [...new Set(topicPicks)];
     out.topicLevel = topicLevel;

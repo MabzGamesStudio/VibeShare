@@ -233,6 +233,8 @@ export const SHORT_BUTTON_LABELS: Record<ShortButton, string> = {
 export interface PageFilters {
   /** Only these formats (empty = all). */
   formats: Format[];
+  /** Formats this page excludes outright (the tri-state red state). */
+  blockedFormats?: Format[];
   /** Highest age rating on this page; never above the rating limit in the preferences. */
   maxRating?: Rating;
   /** Topics to favour, or (with onlyTopics) to require. */

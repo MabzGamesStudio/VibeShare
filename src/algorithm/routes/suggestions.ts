@@ -50,7 +50,11 @@ export function suggest(node: AlgorithmNode, account: Account, body: SuggestionR
   }
   node.contributions.changed();
   const needed = node.config.rewards.autoAcceptAgreement;
-  if (needed > 0 && body.kind !== 'report' && suggestion.votes.length >= needed) acceptSuggestion(node, suggestion);
+  // The operator's auto-accept applies the suggestion at once (reports still wait:
+  // accepting one blocks the content, which is not "accepting content").
+  if (body.kind !== 'report' && (node.config.policy.autoAccept || (needed > 0 && suggestion.votes.length >= needed))) {
+    acceptSuggestion(node, suggestion);
+  }
   node.traces.trace('basic', 'algorithm.suggestions', 'function:suggest', {
     message: `${suggestion.kind} ${suggestion.id} · ${suggestion.votes.length} agreeing`,
     data: {

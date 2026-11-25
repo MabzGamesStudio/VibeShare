@@ -20,6 +20,8 @@ export interface CensorshipData {
   words: string[];
   /** Words that only count when they sit within one word of a censored one. */
   adjacent: string[];
+  /** Lookalike spellings kept for matching only, generated from `words` — never listed. */
+  variants?: string[];
 }
 /** Leet-speak and lookalike characters folded to the letters they stand for. */
 export const LEET: Record<string, string> = { '@': 'a', '+': 't', '0': 'o', '1': 'i', '!': 'i', '$': 's', '3': 'e', '4': 'a', '5': 's', '7': 't', '|': 'i' };
@@ -41,6 +43,71 @@ export function censorTokens(text: string): string[] {
     .map((token) => token.replace(/(.)\1+/gu, '$1'))
     .filter(Boolean);
 }
+/** The lookalike characters one letter of a word is spelled with (leet-speak, digits).
+ *  'l' and 'i' share '1' — exactly the ambiguity the stored spellings keep around. */
+const LOOKALIKES: Record<string, string[]> = {
+  a: ['@', '4'],
+  b: ['8'],
+  e: ['3'],
+  g: ['9'],
+  i: ['1', '!', '|'],
+  l: ['1', '|'],
+  o: ['0'],
+  s: ['5', '$'],
+  t: ['+', '7'],
+};
+/** Cap on the lookalikes kept per word: singles and pairs only, never every combination. */
+const MAX_VARIANTS = 64;
+
+/**
+ * The common lookalike spellings of one censored word — generated when the operator adds
+ * the word, stored for matching, and never shown in their list. Deterministic and
+ * bounded: every one- and two-character substitution (the pairs catch evasions like
+ * "8i9" for "big", which fold to no single spelling), then case and zero-width tricks,
+ * capped per word.
+ */
+export function censorVariants(raw: string): string[] {
+  const word = String(raw ?? '').trim().toLowerCase();
+  if (!word || !/^[\p{L}\p{N}]+$/u.test(word)) return [];
+  const letters = [...word];
+  const options = letters.map((letter) => [letter, ...(LOOKALIKES[letter] ?? [])]);
+  const out: string[] = [];
+  const seen = new Set<string>([word]);
+  const emit = (spelling: string) => {
+    if (out.length >= MAX_VARIANTS || seen.has(spelling)) return;
+    seen.add(spelling);
+    out.push(spelling);
+  };
+  // One-character substitutions first…
+  for (let i = 0; i < letters.length; i++) {
+    for (const letter of options[i]) {
+      if (letter !== letters[i]) emit(letters.map((c, at) => (at === i ? letter : c)).join(''));
+    }
+  }
+  // …then pairs, in a fixed order and still bounded by the cap.
+  for (let i = 0; i < letters.length && out.length < MAX_VARIANTS; i++) {
+    for (let j = i + 1; j < letters.length && out.length < MAX_VARIANTS; j++) {
+      for (const a of options[i]) {
+        for (const b of options[j]) {
+          if (a === letters[i] && b === letters[j]) continue;
+          emit(letters.map((c, at) => (at === i ? a : at === j ? b : c)).join(''));
+        }
+      }
+    }
+  }
+  // Case and zero-width tricks last.
+  emit(word[0].toUpperCase() + word.slice(1));
+  emit(letters.map((letter, index) => (index % 2 ? letter.toUpperCase() : letter)).join(''));
+  emit(word.toUpperCase());
+  emit(letters.join('\u200b'));
+  return out;
+}
+
+/** Regenerates the stored lookalikes of the words set — after every change to it. */
+export function rebuildCensorVariants(node: AlgorithmNode): void {
+  node.censorship.data.variants = [...new Set(node.censorship.data.words.flatMap(censorVariants))];
+}
+
 /** Levenshtein distance with an early exit past `max` (words here are short). */
 export function editDistance(a: string, b: string, max: number): number {
   if (Math.abs(a.length - b.length) > max) return max + 1;
@@ -117,11 +184,14 @@ export function sortCensored(node: AlgorithmNode, list: string[]): void {
  * only count when one sits next to (within one word of) a censored word.
  */
 export function censoredIn(node: AlgorithmNode, text: string): 'censored' | 'adjacent' | null {
-  const { words, adjacent } = node.censorship.data;
+  const { words, adjacent, variants } = node.censorship.data;
   if (!words.length && !adjacent.length) return null;
   const tokens = censorTokens(text);
   const hits = (token: string, list: string[]) => list.some((entry) => isCensoredVariant(token, entry));
-  if (tokens.some((token) => hits(token, words))) return 'censored';
+  // The operator's words together with their stored lookalike spellings ("8i9" for
+  // "big"): those live for matching only and never show in the list.
+  const forms = variants?.length ? [...words, ...variants] : words;
+  if (tokens.some((token) => hits(token, forms))) return 'censored';
   for (let i = 0; i < tokens.length; i++) {
     if (!hits(tokens[i], adjacent)) continue;
     const neighbours = [tokens[i - 1], tokens[i + 1]].filter((token): token is string => Boolean(token));
@@ -140,18 +210,56 @@ export function censoredPage(node: AlgorithmNode, set: CensoredSet, cursor: stri
     total: list.length,
   };
 }
-/** Adds a word to a set. A word already there, in any casing, is a friendly no-op. */
+/** Whether two entries are the same word to the filter (any spelling or casing). */
+function sameCensorWord(a: string, b: string): boolean {
+  const na = normalizeCensorWord(a);
+  const nb = normalizeCensorWord(b);
+  return na ? na === nb : a.toLowerCase() === b.toLowerCase();
+}
+
+/** Adds a word to a set. A word already there, in any spelling, is a friendly no-op. */
 export function addCensoredWord(node: AlgorithmNode, set: CensoredSet, raw: string): CensoredWordsChange {
   const word = String(raw ?? '').trim().slice(0, 64);
   if (!word) throw badRequest('A word is required');
   const list = censoredSet(node, set);
-  if (list.some((entry) => entry.toLowerCase() === word.toLowerCase())) {
+  if (list.some((entry) => sameCensorWord(entry, word))) {
     return { set, changed: false, total: list.length, note: `"${word}" is already on the list.` };
   }
   list.push(word);
   sortCensored(node, list);
   node.censorship.changed();
+  rebuildCensorVariants(node);
   return { set, changed: true, total: list.length };
+}
+
+/**
+ * Adds one word or a whole list at once — commas and new lines both separate the
+ * entries. They are trimmed, normalised for comparison and deduped ("@r+" and "art" are
+ * one word), and each is stored exactly as the operator typed it.
+ */
+export function addCensoredWords(node: AlgorithmNode, set: CensoredSet, raw: string): CensoredWordsChange {
+  const entries = String(raw ?? '')
+    .split(/[,\n]/)
+    .map((entry) => entry.trim().slice(0, 64))
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const words = entries.filter((entry) => {
+    const key = normalizeCensorWord(entry) || entry.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!words.length) throw badRequest('A word is required');
+  if (words.length === 1) return addCensoredWord(node, set, words[0]);
+  const before = censoredSet(node, set).length;
+  for (const word of words) addCensoredWord(node, set, word);
+  const added = censoredSet(node, set).length - before;
+  return {
+    set,
+    changed: added > 0,
+    total: censoredSet(node, set).length,
+    note: added ? `Added ${added} word${added === 1 ? '' : 's'}.` : 'Every word on that list is already there.',
+  };
 }
 /** Renames one entry of a set, keeping the set free of repeats. */
 export function renameCensoredWord(node: AlgorithmNode, set: CensoredSet, rawFrom: string, rawTo: string): CensoredWordsChange {
@@ -161,12 +269,13 @@ export function renameCensoredWord(node: AlgorithmNode, set: CensoredSet, rawFro
   const list = censoredSet(node, set);
   const at = list.findIndex((entry) => entry.toLowerCase() === from.toLowerCase());
   if (at < 0) return { set, changed: false, total: list.length, note: 'That word is not on the list.' };
-  if (list.some((entry, index) => index !== at && entry.toLowerCase() === to.toLowerCase())) {
+  if (list.some((entry, index) => index !== at && sameCensorWord(entry, to))) {
     return { set, changed: false, total: list.length, note: `"${to}" is already on the list.` };
   }
   list[at] = to;
   sortCensored(node, list);
   node.censorship.changed();
+  rebuildCensorVariants(node);
   return { set, changed: true, total: list.length };
 }
 /** Drops one entry of a set. */
@@ -177,6 +286,7 @@ export function deleteCensoredWord(node: AlgorithmNode, set: CensoredSet, rawWor
   if (at < 0) return { set, changed: false, total: list.length };
   list.splice(at, 1);
   node.censorship.changed();
+  rebuildCensorVariants(node);
   return { set, changed: true, total: list.length };
 }
 export function commentSection(node: AlgorithmNode, id: string): { key: string; section: CommentSection } {
@@ -639,7 +749,8 @@ export function registerCommentsRoutes(node: AlgorithmNode): void {
     router.post('/v1/admin/censored/:set', async (ctx) => {
       admin(ctx);
       const body = await readJson<{ word?: string }>(ctx.req);
-      return addCensoredWord(node, censoredSetOf(ctx.params.set), String(body.word ?? ''));
+      // One word or a whole list: commas and new lines both separate the entries.
+      return addCensoredWords(node, censoredSetOf(ctx.params.set), String(body.word ?? ''));
     });
     router.put('/v1/admin/censored/:set', async (ctx) => {
       admin(ctx);

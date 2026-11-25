@@ -11,6 +11,8 @@ import {
   type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
+import { isAgeRatingTopic, legacyRatingOfTopics } from '../../../src/shared/age-rating';
+import { AgeRatingPicker } from '../components/AgeRatingPicker';
 import { ContentDataTab } from '../components/AboutContent';
 import { Chips, CopyButton, Loading, Modal, Spinner, toggle } from '../components/ui';
 import { ThumbPicker } from '../components/PublishFields';
@@ -445,9 +447,6 @@ function originLabel(entry: Entry): string {
   }
 }
 
-/** The preset reason tags of an age rating; “other” carries a custom description. */
-const RATING_REASONS = ['violence', 'language', 'sexual content', 'nudity', 'drugs', 'fear', 'gambling', 'hate speech'];
-
 /** The age-rating reason note of an entry, when one is tagged. */
 function ratingReasonOf(entry: { notes?: { kind: string; value: string; reason: string }[] }): { value: string; reason: string } | null {
   return entry.notes?.find((note) => note.kind === 'rating') ?? null;
@@ -488,7 +487,7 @@ function CorrectModal({ entry, onClose, onChanged }: { entry: Entry; onClose: ()
   const topicSuggestions = useTopicSuggestions();
   const [thumbnail, setThumbnail] = useState<string | undefined>(undefined);
   const [format, setFormat] = useState<Format>(entry.format);
-  const [rating, setRating] = useState<Rating>(entry.rating);
+  const [ratingTopics, setRatingTopics] = useState<string[]>(entry.topics ?? []);
   const [creator, setCreator] = useState(entry.creatorId ?? '');
   const [published, setPublished] = useState(entry.publishedAt ? new Date(entry.publishedAt).toISOString().slice(0, 16) : '');
   const [tag, setTag] = useState('');
@@ -527,7 +526,9 @@ function CorrectModal({ entry, onClose, onChanged }: { entry: Entry; onClose: ()
           patch.format = format;
           break;
         case 'rating':
-          patch.rating = rating;
+          // The age ratings are topics; the legacy rating is the strongest of them.
+          patch.topics = ratingTopics;
+          patch.rating = legacyRatingOfTopics(ratingTopics);
           break;
         case 'creator':
           patch.creatorId = creator.trim();
@@ -620,16 +621,10 @@ function CorrectModal({ entry, onClose, onChanged }: { entry: Entry; onClose: ()
           </label>
         )}
         {item === 'rating' && (
-          <label className="field">
-            Rating
-            <select value={rating} onChange={(e) => setRating(e.target.value as Rating)}>
-              {RATINGS.map((x) => (
-                <option key={x} value={x}>
-                  {RATING_LABELS[x]}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="field">
+            <span>Age rating</span>
+            <AgeRatingPicker topics={ratingTopics} onChange={setRatingTopics} />
+          </div>
         )}
         {item === 'creator' && (
           <label className="field">
@@ -693,7 +688,8 @@ function TopicsEditor({
     if (!topics.some((one) => one.toLowerCase() === topic.toLowerCase())) onChange([...topics, topic]);
     setDraft('');
   };
-  const offered = [...topics, ...suggestions.filter((one) => !topics.some((topic) => topic.toLowerCase() === one.toLowerCase()))];
+  // Suggestions stay a nudge, not a wall: five at a time.
+  const offered = [...topics, ...suggestions.filter((one) => !topics.some((topic) => topic.toLowerCase() === one.toLowerCase())).slice(0, 5)];
   return (
     <div className="form-stack" style={{ gap: 8 }}>
       <Chips options={offered} selected={topics} onToggle={(topic) => onChange(toggle(topics, topic))} />
@@ -718,54 +714,53 @@ function TopicsEditor({
 }
 
 /**
- * The topics of one catalog entry and its content warnings: the topics editor, and one
- * row per warning the operator turns on or off. A warning lives twice over — as a topic
- * and as a tag note — so the entry stays consistent however it got there (client
- * suggestions, tag corrections, this toggle); every change saves through the content
- * edit, which keeps the topic ids in step with the names.
+ * The topics of one catalog entry: the topics editor row. The age-rating topic is not
+ * edited here — the age-rating picker owns it — but it is kept in step whenever the
+ * rest of the topics are edited (the content edit keeps the topic ids matching the
+ * names).
  */
-function TopicsWarnings({ entry, onChanged }: { entry: Entry; onChanged?: () => void }) {
-  const suggestions = useTopicSuggestions();
-  const [topics, setTopics] = useState<string[]>(entry.topics ?? []);
-  const [notes, setNotes] = useState(entry.notes ?? []);
-  const [toast, show] = useToast();
-  const active = (warning: string) =>
-    topics.some((topic) => topic.toLowerCase() === warning) || notes.some((note) => note.kind === 'tag' && note.value.toLowerCase() === warning);
-
-  const save = async (nextTopics: string[], nextNotes: NonNullable<Entry['notes']>) => {
-    setTopics(nextTopics);
-    setNotes(nextNotes);
-    await admin('/v1/admin/content', { method: 'PUT', body: { id: entry.id, topics: nextTopics, notes: nextNotes } }).catch((e) => show(message(e)));
-    onChanged?.();
-  };
-
-  // Warnings are topics like any other — shown as their own toggle rows instead of
-  // chips, while the chips row carries the rest of the topics.
-  const isWarning = (topic: string) => RATING_REASONS.some((warning) => warning.toLowerCase() === topic.toLowerCase());
+function TopicsWarnings({
+  topics,
+  notes,
+  onChange,
+  suggestions,
+}: {
+  topics: string[];
+  notes: NonNullable<Entry['notes']>;
+  onChange: (topics: string[], notes: NonNullable<Entry['notes']>) => void;
+  suggestions: string[];
+}) {
+  const isRating = (topic: string) => isAgeRatingTopic(topic);
 
   return (
     <div className="form-stack">
-      <h3>Topics</h3>
-      <TopicsEditor
-        topics={topics.filter((topic) => !isWarning(topic))}
-        onChange={(next) => void save([...next, ...topics.filter(isWarning)], notes)}
-        suggestions={suggestions.filter((topic) => !isWarning(topic))}
-      />
-      <h3 style={{ marginTop: 8 }}>Content warnings</h3>
-      {/* The same chip buttons as the topics: highlighted when the warning is on, and
-          the click flips it — adding or removing the topic and its tag note. */}
-      <Chips
-        options={RATING_REASONS}
-        selected={RATING_REASONS.filter((warning) => active(warning))}
-        onToggle={(warning) => {
-          const on = active(warning);
-          const nextTopics = on ? topics.filter((topic) => topic.toLowerCase() !== warning) : [...topics, warning];
-          const nextNotes = on
-            ? notes.filter((note) => !(note.kind === 'tag' && note.value.toLowerCase() === warning))
-            : [...notes, { kind: 'tag', value: warning, reason: `Content warning: ${warning}` }];
-          void save(nextTopics, nextNotes);
-        }}
-      />
+      <label className="field">
+        Topics
+        <TopicsEditor
+          topics={topics.filter((topic) => !isRating(topic))}
+          onChange={(next) => onChange([...next, ...topics.filter(isRating)], notes)}
+          suggestions={suggestions.filter((topic) => !isRating(topic))}
+        />
+      </label>
+    </div>
+  );
+}
+
+/**
+ * The content image full screen: the picture fills the width or the height, whichever
+ * fits, on a plain dark backdrop. Any click or Escape puts it away.
+ */
+function PreviewOverlay({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="preview-overlay" onClick={onClose}>
+      <img src={src} alt="" />
     </div>
   );
 }
@@ -785,8 +780,10 @@ function EntryDetails({
   const fullId = [entry.id, ...entry.sources].join('~');
   const [toast, show] = useToast();
   const [correcting, setCorrecting] = useState(false);
+  const [preview, setPreview] = useState(false);
   return (
     <>
+      {preview && entry.thumbnail && <PreviewOverlay src={entry.thumbnail} onClose={() => setPreview(false)} />}
       {correcting && <CorrectModal entry={entry} onClose={() => setCorrecting(false)} onChanged={onChanged} />}
     <Modal
       title="Content details"
@@ -842,7 +839,16 @@ function EntryDetails({
       }
     >
       <div className="form-stack">
-        {entry.thumbnail && <img src={entry.thumbnail} alt="Preview image" className="admin-thumb-large" />}
+        {entry.thumbnail && (
+          <img
+            src={entry.thumbnail}
+            alt="Preview image"
+            className="admin-thumb-large"
+            style={{ cursor: 'zoom-in' }}
+            title="Open full screen"
+            onClick={() => setPreview(true)}
+          />
+        )}
         <div>
           <h3>{entry.title}</h3>
           <div className="mono tiny faint">{fullId}</div>
@@ -906,9 +912,8 @@ function EntryDetails({
           </dd>
         </dl>
         {entry.description && <p className="small">{entry.description}</p>}
-        <TopicsWarnings entry={entry} onChanged={onChanged} />
-        <div>
-          <h3>Content data</h3>
+        <div style={{ marginBottom: 24, paddingBottom: 8 }}>
+          <h3 style={{ marginBottom: 8 }}>Content data</h3>
           <ContentDataTab
             data={entry.data}
             onSave={async (next) => {
@@ -927,13 +932,6 @@ const blankEntry = (): Partial<Entry> => ({ id: '', title: '', format: 'video', 
 function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClose: () => void; onSaved: () => void }) {
   const [draft, setDraft] = useState(entry);
   const topicSuggestions = useTopicSuggestions();
-  const ratingNote = (draft.notes ?? []).find((note) => note.kind === 'rating') ?? null;
-  // The age-rating reason: a preset tag from the dropdown, or “other” with a custom text.
-  const setRatingNote = (value: string, reason: string) => {
-    const notes = (draft.notes ?? []).filter((note) => note.kind !== 'rating');
-    if (value) notes.push({ kind: 'rating', value, reason });
-    setDraft({ ...draft, notes });
-  };
   const [idText, setIdText] = useState(entry.id ? [entry.id, ...(entry.sources ?? [])].join('~') : '');
   const [error, setError] = useState<string | null>(null);
   const resolvedId = (() => {
@@ -1013,45 +1011,25 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
             </select>
           </label>
           <label className="field">
-            Rating
-            <select value={draft.rating} onChange={(e) => setDraft({ ...draft, rating: e.target.value as Rating })}>
-              {RATINGS.map((x) => (
-                <option key={x} value={x}>
-                  {RATING_LABELS[x]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            Age rating reason
-            <select
-              value={ratingNote ? (RATING_REASONS.includes(ratingNote.value) ? ratingNote.value : 'other') : ''}
-              onChange={(e) => setRatingNote(e.target.value, e.target.value === 'other' ? (ratingNote?.reason ?? '') : '')}
-            >
-              <option value="">No reason tagged</option>
-              {RATING_REASONS.map((reason) => (
-                <option key={reason} value={reason}>
-                  {reason}
-                </option>
-              ))}
-              <option value="other">Other (custom description)</option>
-            </select>
-          </label>
-          {ratingNote && !RATING_REASONS.includes(ratingNote.value) && (
-            <label className="field">
-              Custom description
-              <input type="text" value={ratingNote.reason} onChange={(e) => setRatingNote('other', e.target.value)} />
-            </label>
-          )}
-          <label className="field">
             Language
             <input type="text" value={draft.language ?? ''} onChange={(e) => setDraft({ ...draft, language: e.target.value || undefined })} />
           </label>
         </div>
-        <label className="field">
-          Topics
-          <TopicsEditor topics={draft.topics ?? []} onChange={(topics) => setDraft({ ...draft, topics })} suggestions={topicSuggestions} />
-        </label>
+        <div className="field">
+          <span>Age rating</span>
+          {/* The rating is one of the topics (age-rating-…); the legacy rating field is
+              derived from it so filtering and older clients keep working. */}
+          <AgeRatingPicker
+            topics={draft.topics ?? []}
+            onChange={(topics) => setDraft({ ...draft, topics, rating: legacyRatingOfTopics(topics) })}
+          />
+        </div>
+        <TopicsWarnings
+          topics={draft.topics ?? []}
+          notes={draft.notes ?? []}
+          onChange={(topics, notes) => setDraft({ ...draft, topics, notes })}
+          suggestions={topicSuggestions}
+        />
         <label className="field">
           Creator id
           <input type="text" value={draft.creatorId ?? ''} onChange={(e) => setDraft({ ...draft, creatorId: e.target.value || undefined })} />
@@ -1090,7 +1068,7 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
         <div className="field">
           <span>Platform metrics</span>
           {Object.entries(draft.platformStats ?? {}).map(([name, value]) => (
-            <div key={name} className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+            <div key={name} className="row" style={{ gap: 6, flexWrap: 'nowrap', marginBottom: 6 }}>
               <input type="text" value={name} disabled style={{ opacity: 0.7 }} />
               <input
                 type="number"
@@ -1111,6 +1089,7 @@ function EntryEditor({ entry, onClose, onSaved }: { entry: Partial<Entry>; onClo
           ))}
           <button
             className="small"
+            style={{ marginTop: 8 }}
             onClick={() => {
               const name = window.prompt('Metric name (views, likes, comments…)');
               if (name?.trim()) setDraft({ ...draft, platformStats: { ...(draft.platformStats ?? {}), [name.trim()]: 0 } });
@@ -1836,14 +1815,13 @@ interface AdminCommentsView {
 }
 
 /**
- * The censored words card at the top of the comments page: two sets the operator keeps —
- * "censored words" (a comment carrying one, or a close variant of one, is hidden) and
- * "adjacent words" (counted only next to a censored one). Both are sets — adding a word
- * already on the list is a friendly no-op — and each is managed here: inline renaming,
- * deleting, and its own little pager.
+ * The censored words card at the top of the comments page: the one set the operator
+ * keeps — a comment carrying one of these words, or a close lookalike of one, is hidden.
+ * Adding a word already on the list is a friendly no-op; the node keeps the lookalike
+ * spellings itself (they are for matching and never shown here). Inline renaming,
+ * deleting, and its own little pager live here too.
  */
 function CensoredWordsCard() {
-  const [set, setSet] = useState<CensoredSet>('words');
   const [page, setPage] = useState<CensoredWordsPage | null>(null);
   const [offset, setOffset] = useState(0);
   const [word, setWord] = useState('');
@@ -1865,60 +1843,54 @@ function CensoredWordsCard() {
     [show]
   );
   useEffect(() => {
-    load(set, 0);
-  }, [load, set]);
+    load('words', 0);
+  }, [load]);
 
-  // Every change goes through the same path: a friendly note when nothing changed.
+  // Every change goes through the same path: a friendly note when nothing changed, and
+  // the note of a whole-list add ("Added 5 words.") over the plain one-word message.
   const change = async (call: Promise<CensoredWordsChange>, done: string) => {
     try {
       const result = await call;
-      show(result.changed ? done : (result.note ?? 'Nothing changed.'));
+      show(result.note ?? done);
       setEdit(null);
-      load(set, offset);
+      load('words', offset);
     } catch (e) {
       show(message(e));
     }
   };
 
   const add = () => {
+    // One word or a paste of many: the node splits on commas and new lines itself.
     const value = word.trim();
     if (!value) return;
     setWord('');
-    void change(admin<CensoredWordsChange>(`/v1/admin/censored/${set}`, { body: { word: value } }), `"${value}" is on the list.`);
+    void change(
+      admin<CensoredWordsChange>(`/v1/admin/censored/words`, { body: { word: value } }),
+      `"${value.split(/[,\n]/)[0]?.trim()}" is on the list.`
+    );
   };
 
   const rename = (from: string, to: string) => {
     if (!to.trim()) return;
-    void change(admin<CensoredWordsChange>(`/v1/admin/censored/${set}`, { method: 'PUT', body: { from, to: to.trim() } }), 'Saved.');
+    void change(admin<CensoredWordsChange>(`/v1/admin/censored/words`, { method: 'PUT', body: { from, to: to.trim() } }), 'Saved.');
   };
 
   const total = page?.total ?? 0;
 
   return (
-    <div className="card">
+    <div className="card form-stack">
       <h3>Censored words</h3>
       <p className="small muted">
         A comment carrying one of these words is hidden (its block header stays) and a new one is refused. Evading with
-        lookalikes or leet-speak does not help: close variants are filtered too. Adjacent words only count when they sit
-        next to a censored word.
+        lookalikes or leet-speak does not help: the node keeps the lookalike spellings of every word and filters close
+        variants of them too.
       </p>
-      <div className="row" style={{ gap: 8 }}>
-        <button className={set === 'words' ? 'primary' : ''} onClick={() => setSet('words')}>
-          Censored words
-        </button>
-        <button className={set === 'adjacent' ? 'primary' : ''} onClick={() => setSet('adjacent')}>
-          Adjacent words
-        </button>
-      </div>
-      <div className="row" style={{ gap: 8 }}>
-        <input
-          type="text"
+      <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+        <textarea
           value={word}
-          placeholder={set === 'words' ? 'A word that hides a comment' : 'A word that only counts next to a censored one'}
+          placeholder="A word that hides a comment — or a whole list: commas or new lines both work"
           onChange={(e) => setWord(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') add();
-          }}
+          rows={3}
           style={{ flex: 1 }}
         />
         <button className="primary" disabled={!word.trim()} onClick={add}>
@@ -1975,7 +1947,7 @@ function CensoredWordsCard() {
                           className="small"
                           onClick={() =>
                             void change(
-                              admin<CensoredWordsChange>(`/v1/admin/censored/${set}/${encodeURIComponent(entry)}`, { method: 'DELETE' }),
+                              admin<CensoredWordsChange>(`/v1/admin/censored/words/${encodeURIComponent(entry)}`, { method: 'DELETE' }),
                               `"${entry}" is gone.`
                             )
                           }
@@ -1994,10 +1966,10 @@ function CensoredWordsCard() {
       <div className="row between">
         <span className="tiny faint">{total === 0 ? 'Nothing yet' : `${offset + 1}–${Math.min(offset + perPage, total)} of ${total}`}</span>
         <div className="row" style={{ gap: 6 }}>
-          <button className="small" disabled={offset === 0} onClick={() => load(set, Math.max(0, offset - perPage))}>
+          <button className="small" disabled={offset === 0} onClick={() => load('words', Math.max(0, offset - perPage))}>
             Previous
           </button>
-          <button className="small" disabled={offset + perPage >= total} onClick={() => load(set, offset + perPage)}>
+          <button className="small" disabled={offset + perPage >= total} onClick={() => load('words', offset + perPage)}>
             Next
           </button>
         </div>

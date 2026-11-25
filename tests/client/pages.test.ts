@@ -210,3 +210,19 @@ describe('a client paying for search', async () => {
   });
 });
 
+
+describe('the preferences mapping', () => {
+  it('carries the per-system age-rating maximums into the settings and the requests', () => {
+    const maxima = [
+      { system: 'mpa', category: 'PG' },
+      { system: 'classind', category: '14' },
+    ];
+    const settings = applySettingsPatch(defaultSettings(), { preferences: { ageRatingMaxima: maxima } });
+    assert.deepEqual(settings.preferences.ageRatingMaxima, maxima, 'the settings patch keeps the maximums');
+    assert.deepEqual(
+      pagePreferences(settings.preferences, { formats: ['video'] }).ageRatingMaxima,
+      maxima,
+      'the preferences sent to algorithm nodes carry them along'
+    );
+  });
+});

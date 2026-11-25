@@ -1,34 +1,30 @@
 import { ArrowDown, ArrowUp, Copy, Eye, KeyRound, Lock, Pencil, Plus, RotateCcw, Share2, Shield, ShieldAlert, Trash2, UserRound } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { PAGE_LAYOUT_LABELS, type AuthMode, type PageConfig, type ProfileSummary, type Settings, type ToastMessage, type TorSettings } from '../../../src/shared/clientapi';
 import { DEFAULT_SHARE_BASE_URL, newPageId, presetPage, shareLink } from '../../../src/shared/clientdefaults';
 import { LANGUAGES } from '../../../src/shared/language';
+import { AGE_RATING_SYSTEMS, ageRatingSystem } from '../../../src/shared/age-rating';
 import {
-  CREATOR_KIND_LABELS,
-  CREATOR_KINDS,
   FORMAT_LABELS,
   FORMATS,
-  RATING_LABELS,
-  RATINGS,
   TOPICS,
-  type CreatorKind,
+  type Format,
   type Rating,
 } from '../../../src/shared/taxonomy';
 import { api, errorMessage, IS_STATIC } from '../api';
 import { PageIconView } from '../components/feed/icons';
-import { PageEditor } from '../components/feed/PageEditor';
+import { AddPickRow, LevelSlider, PageEditor, PickButtons, type PickEntry } from '../components/feed/PageEditor';
 import { SeenFiltersSection } from '../components/SeenFilters';
 import { pageShareBase } from '../components/Share';
 import { TraceSettingsForm } from '../components/Tracing';
-import { Chips, CodeBox, Modal, Switch, toggle } from '../components/ui';
+import { CodeBox, Modal, Switch } from '../components/ui';
 import { HOSTING_PLATFORMS } from '../earn/hosting';
 import { useApp } from '../state';
 import { chooseConsent, choosePlatform, loadConsent, platformChoices } from '../consent';
 import { clearLogs, logLines, setDebugLogs, subscribeLogs } from '../log';
 import { HistorySection } from './History';
 import { TracingSection } from './Tracing';
-import { splitList } from '../util';
 import { AUTH_LABELS } from './Nodes';
 
 const SOURCE_SHORT: Record<PageConfig['source'], string> = {
@@ -270,41 +266,98 @@ function TorCard() {
 /** The most common choices; the rest show on request (selected ones always show). */
 const COMMON_LANGUAGES = ['en', 'es', 'pt', 'fr', 'de', 'it', 'ru', 'ar', 'hi', 'zh', 'ja', 'ko'];
 
-function LanguagePicker({ selected, onChange }: { selected: string[]; onChange: (languages: string[]) => void }) {
-  const [all, setAll] = useState(false);
-  const shown = LANGUAGES.filter((language) => all || COMMON_LANGUAGES.includes(language.code) || selected.includes(language.code));
+/**
+ * One pick list in the tri-state look of the customization modal: selected (active),
+ * off (no effect), or excluded (red); each click cycles to the next state, and an input
+ * adds one more entry. The two stored lists are "kept" and "excluded"; entries the user
+ * deselected stay visible (dimmed) so a click can still cycle them.
+ */
+function PickList({
+  title,
+  hint,
+  kind,
+  labelOf,
+  fillers = [],
+  on,
+  block,
+  set,
+  twoState = false,
+  addAs = 'on',
+  addPlaceholder,
+}: {
+  title: ReactNode;
+  hint?: ReactNode;
+  /** How the add row takes a typed entry: a topic name, a creator id, or a plain id. */
+  kind: 'topic' | 'creator' | 'code';
+  labelOf: (id: string) => string;
+  /** Entries shown unselected after the picked ones (a catalogue to pick from). */
+  fillers?: string[];
+  /** Kept (active) and excluded (red) entries — the two lists this writes. */
+  on: string[];
+  block: string[];
+  set: (next: { on: string[]; block: string[] }) => void;
+  /** Some lists have no excluded state (languages): they cycle kept/off only. */
+  twoState?: boolean;
+  /** Where a freshly added entry starts: kept (active) or excluded (red). */
+  addAs?: 'on' | 'block';
+  addPlaceholder?: string;
+}) {
+  const [dropped, setDropped] = useState<string[]>([]);
+  const [names, setNames] = useState<Record<string, string>>({});
+  const label = (id: string) => names[id] ?? labelOf(id);
+  const stateOf = (id: string): PickEntry['state'] => (on.includes(id) ? 'on' : block.includes(id) ? 'block' : 'off');
+  const entries: PickEntry[] = [
+    ...on.map((id) => ({ id, label: label(id), state: 'on' as const })),
+    ...dropped.filter((id) => !on.includes(id) && !block.includes(id)).map((id) => ({ id, label: label(id), state: 'off' as const })),
+    ...block.map((id) => ({ id, label: label(id), state: 'block' as const })),
+    ...fillers.filter((id) => !on.includes(id) && !block.includes(id) && !dropped.includes(id)).map((id) => ({ id, label: label(id), state: 'off' as const })),
+  ];
+  // One click cycles: selected → deselected → excluded → selected (kept → kept when the
+  // list has no excluded state).
+  const cycle = (id: string) => {
+    const remove = (list: string[]) => list.filter((value) => value !== id);
+    const now = stateOf(id);
+    if (now === 'on') {
+      setDropped((current) => [...new Set([...current, id])]);
+      set({ on: remove(on), block });
+    } else if (now === 'off') {
+      setDropped((current) => remove(current));
+      set(twoState ? { on: [...new Set([...on, id])], block } : { on, block: [...new Set([...block, id])] });
+    } else {
+      set({ on: [...new Set([...on, id])], block: remove(block) });
+    }
+  };
+  const add = (pick: { id: string; name: string }) => {
+    // Topics are stored by name (what the node matches), creators and codes by id.
+    const value = kind === 'topic' ? pick.name : pick.id;
+    setNames((current) => ({ ...current, [value]: pick.name }));
+    setDropped((current) => current.filter((entry) => entry !== value));
+    if (addAs === 'block') set({ on: on.filter((entry) => entry !== value), block: [...new Set([...block, value])] });
+    else set({ on: [...new Set([...on, value])], block: block.filter((entry) => entry !== value) });
+  };
   return (
     <div className="field">
       <span>
-        Languages{' '}
-        <span className="hint">
-          Titles are checked by the letters they use: content shows when its title could be in one of these languages. None selected = all.
-        </span>
+        {title} <span className="hint">{hint}</span>
       </span>
-      <Chips
-        options={shown.map((language) => language.code)}
-        selected={selected}
-        labels={Object.fromEntries(LANGUAGES.map((language) => [language.code, language.name]))}
-        onToggle={(code) => onChange(toggle(selected, code))}
-      />
-      <div className="row" style={{ gap: 8 }}>
-        <button type="button" className="small" onClick={() => setAll(!all)}>
-          {all ? 'Fewer languages' : `All ${LANGUAGES.length} languages`}
-        </button>
-        {selected.length > 0 && (
-          <button type="button" className="small" onClick={() => onChange([])}>
-            Allow every language
-          </button>
-        )}
-      </div>
+      <PickButtons entries={entries} onCycle={cycle} />
+      {kind === 'code' ? (
+        <div className="row" style={{ gap: 6, marginTop: 10, alignSelf: 'flex-start' }}>
+          <input
+            type="text"
+            placeholder={addPlaceholder}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              const code = e.currentTarget.value.trim().toLowerCase();
+              if (code) add({ id: code, name: code });
+              e.currentTarget.value = '';
+            }}
+          />
+        </div>
+      ) : (
+        <AddPickRow kind={kind} onAdd={add} />
+      )}
     </div>
-  );
-}
-
-function ListInput({ value, onChange, placeholder }: { value: string[]; onChange: (list: string[]) => void; placeholder?: string }) {
-  const [text, setText] = useState(value.join(', '));
-  return (
-    <input type="text" value={text} placeholder={placeholder} onChange={(e) => setText(e.target.value)} onBlur={() => onChange(splitList(text))} />
   );
 }
 
@@ -858,9 +911,33 @@ function NodesSection() {
   const shown = state?.settings.hostingTabs ?? [];
   const toggleTab = (id: string) =>
     void updateSettings({ hostingTabs: shown.includes(id) ? shown.filter((entry) => entry !== id) : [...shown, id] });
+  if (!state) return null;
+  const s = state.settings;
   return (
-    <div className="card form-stack">
-      <h2>Provider node</h2>
+    <>
+      <div className="card form-stack">
+        <h2>Nodes and accounts</h2>
+        <label className="field">
+          Account for new nodes
+          <select value={s.defaultAuth} onChange={(e) => void updateSettings({ defaultAuth: e.target.value as AuthMode })}>
+            {(Object.keys(AUTH_LABELS) as AuthMode[]).map((mode) => (
+              <option key={mode} value={mode}>
+                {AUTH_LABELS[mode].label}
+              </option>
+            ))}
+          </select>
+          <span className="hint">{AUTH_LABELS[s.defaultAuth].help}</span>
+        </label>
+        <label className="field">
+          Feeds
+          <select value={s.feedMode} onChange={(e) => void updateSettings({ feedMode: e.target.value as Settings['feedMode'] })}>
+            <option value="blend">Blend every enabled algorithm node</option>
+            <option value="primary">Only the first algorithm node that answers</option>
+          </select>
+        </label>
+      </div>
+      <div className="card form-stack">
+        <h2>Provider node</h2>
       <p className="instructions muted">
         The hosting platforms the provider jobs instructions walk through. A ticked platform shows as a tab under Earn → Provider
         jobs; the others stay hidden until you tick them here.
@@ -875,7 +952,8 @@ function NodesSection() {
           </label>
         ))}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -1009,17 +1087,17 @@ function EmbedsCard() {
       </span>
       <div className="field">
         <span>Per platform</span>
-        <span className="hint">The switch above decides for every platform; a switch below overrides it for that one alone.</span>
         {platformChoices().map((platform) => (
-          <Switch
-            key={platform.id}
-            checked={overrides[platform.id] ?? choice === 'accepted'}
-            onChange={(allow) => {
-              choosePlatform(platform.id, allow);
-              setOverrides(loadConsent()?.platforms ?? {});
-            }}
-            label={platform.label}
-          />
+          <div key={platform.id} className="platform-choice">
+            <span>{platform.label}</span>
+            <Switch
+              checked={overrides[platform.id] ?? choice === 'accepted'}
+              onChange={(allow) => {
+                choosePlatform(platform.id, allow);
+                setOverrides(loadConsent()?.platforms ?? {});
+              }}
+            />
+          </div>
         ))}
       </div>
     </div>
@@ -1074,11 +1152,25 @@ export function SettingsPage() {
     const id = params.get('tab') ?? location.hash.slice(1);
     if (id && state) document.getElementById(id)?.scrollIntoView({ block: 'start' });
   }, [params, location.hash, Boolean(state), tab]);
+  // A handful of creators the creators list offers as picks (the customization modal
+  // looks them up the same way): shown unhighlighted until the user clicks one.
+  const [suggested, setSuggested] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let live = true;
+    api<{ creators: { id: string; name: string }[] }>('/api/creators?q=')
+      .then((result) => {
+        if (!live) return;
+        setSuggested(Object.fromEntries(result.creators.slice(0, 5).map((creator) => [creator.id, creator.name])));
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
   if (!state) return null;
   const s = state.settings;
   const prefs = s.preferences;
   const setPrefs = (patch: Partial<Settings['preferences']>) => void updateSettings({ preferences: { ...prefs, ...patch } });
-
   return (
     <div className="page page-narrow">
       <div className="page-header">
@@ -1118,49 +1210,122 @@ export function SettingsPage() {
           label="Show content previews"
         />
         <span className="hint">Off asks algorithm nodes not to send preview images and hides previews already on the page. Opening and playing content still works.</span>
-        <div className="form-grid">
-          <label className="field">
-            Highest age rating
-            <select value={prefs.maxRating ?? '16+'} onChange={(e) => setPrefs({ maxRating: e.target.value as Rating })}>
-              {RATINGS.map((r) => (
-                <option key={r} value={r}>
-                  {RATING_LABELS[r]}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <LanguagePicker selected={prefs.languages ?? []} onChange={(languages) => setPrefs({ languages })} />
         <div className="field">
-          <span>
-            Formats <span className="hint">None selected = all</span>
+          <span>Age rating maximums</span>
+          {(prefs.ageRatingMaxima ?? []).map((row, at) => {
+            const system = ageRatingSystem(row.system);
+            const custom = !system;
+            const update = (patch: { system?: string; category?: string }) =>
+              setPrefs({ ageRatingMaxima: (prefs.ageRatingMaxima ?? []).map((entry, index) => (index === at ? { ...entry, ...patch } : entry)) });
+            return (
+              <div key={at} className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <select
+                  aria-label="Age-rating system"
+                  value={custom ? 'custom' : row.system}
+                  onChange={(e) => update({ system: e.target.value === 'custom' ? '' : e.target.value, category: '' })}
+                >
+                  {AGE_RATING_SYSTEMS.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.label}
+                    </option>
+                  ))}
+                  <option value="custom">Custom…</option>
+                </select>
+                {custom ? (
+                  <>
+                    <input type="text" placeholder="System name" value={row.system} onChange={(e) => update({ system: e.target.value })} />
+                    <input type="text" placeholder="Maximum category" value={row.category} onChange={(e) => update({ category: e.target.value })} />
+                  </>
+                ) : system.categories.length ? (
+                  <select aria-label="Maximum category" value={row.category} onChange={(e) => update({ category: e.target.value })}>
+                    <option value="">Choose…</option>
+                    {system.categories.map((entry) => (
+                      <option key={entry.slug} value={entry.slug}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="Maximum category (free text)"
+                    value={row.category}
+                    onChange={(e) => update({ category: e.target.value })}
+                  />
+                )}
+                <button
+                  className="small danger"
+                  onClick={() => setPrefs({ ageRatingMaxima: (prefs.ageRatingMaxima ?? []).filter((_, index) => index !== at) })}
+                >
+                  Remove
+                </button>
+              </div>
+            );
+          })}
+          <button
+            className="small"
+            style={{ alignSelf: 'flex-start' }}
+            onClick={() => setPrefs({ ageRatingMaxima: [...(prefs.ageRatingMaxima ?? []), { system: AGE_RATING_SYSTEMS[0]?.id ?? 'mpa', category: '' }] })}
+          >
+            Add age rating maximum
+          </button>
+          <span className="hint">
+            The highest category to show per rating system — content rated above it in its own system is hidden. Content with no rating
+            for that system is kept, like every unknown rating.
           </span>
-          <Chips options={FORMATS} selected={prefs.formats ?? []} labels={FORMAT_LABELS} onToggle={(f) => setPrefs({ formats: toggle(prefs.formats, f) })} />
         </div>
-        <div className="field">
-          <span>Favourite topics</span>
-          <Chips options={TOPICS} selected={prefs.topics ?? []} onToggle={(t) => setPrefs({ topics: toggle(prefs.topics, t) })} />
-          <Switch checked={Boolean(prefs.onlyTopics)} onChange={(onlyTopics) => setPrefs({ onlyTopics })} label="Only show these topics" />
-        </div>
-        <div className="field">
-          <span>
-            Creators <span className="hint">None selected = all</span>
-          </span>
-          <Chips
-            options={CREATOR_KINDS.filter((k) => k !== 'unknown')}
-            selected={prefs.creatorKinds ?? []}
-            labels={CREATOR_KIND_LABELS}
-            onToggle={(k) => setPrefs({ creatorKinds: toggle(prefs.creatorKinds, k as CreatorKind) })}
-          />
-        </div>
-        <label className="field">
-          Hide topics <span className="hint">Topic names, comma separated</span>
-          <ListInput value={prefs.blockedTopics ?? []} onChange={(blockedTopics) => setPrefs({ blockedTopics })} placeholder="spoilers, jump-scares" />
-        </label>
-        <label className="field">
-          Hide creators <span className="hint">Creator ids, comma separated</span>
-          <ListInput value={prefs.blockedCreators ?? []} onChange={(blockedCreators) => setPrefs({ blockedCreators })} />
-        </label>
+        <PickList
+          title="Languages"
+          hint="Active = content in these languages shows (with none active, all do); off = no effect. Languages have no excluded list, so they cycle kept/off."
+          kind="code"
+          labelOf={(code) => LANGUAGES.find((language) => language.code === code)?.name ?? code}
+          fillers={LANGUAGES.map((language) => language.code)}
+          on={prefs.languages ?? []}
+          block={[]}
+          twoState
+          set={({ on: languages }) => setPrefs({ languages })}
+          addPlaceholder="Language code (fr, de, …) — Enter to add"
+        />
+        <LevelSlider
+          label="Weigh the chosen languages"
+          value={prefs.languageLevel ?? 'only'}
+          onChange={(languageLevel) => setPrefs({ languageLevel })}
+        />
+        <PickList
+          title="Formats"
+          hint="Active = favoured in your feed, red = never shown, off = no effect."
+          kind="code"
+          labelOf={(id) => FORMAT_LABELS[id as keyof typeof FORMAT_LABELS] ?? id}
+          fillers={[...FORMATS]}
+          on={prefs.formats ?? []}
+          block={prefs.blockedFormats ?? []}
+          set={({ on, block }) => setPrefs({ formats: on as Format[], preferredFormats: on as Format[], blockedFormats: block as Format[] })}
+          addPlaceholder="A format (music, video, …) — Enter to add"
+        />
+        <PickList
+          title="Topics"
+          hint="Active = favoured in your feed, red = never shown, off = no effect."
+          kind="topic"
+          labelOf={(id) => id}
+          fillers={[...TOPICS]}
+          on={prefs.topics ?? []}
+          block={prefs.blockedTopics ?? []}
+          set={({ on: topics, block: blockedTopics }) => setPrefs({ topics, preferredTopics: topics, blockedTopics })}
+          addPlaceholder="A topic name"
+        />
+        <LevelSlider label="Weigh the chosen topics" value={prefs.topicLevel ?? 'strongly'} onChange={(topicLevel) => setPrefs({ topicLevel })} />
+        <PickList
+          title="Creators"
+          hint="Active = your creators, red = never shown, off = no effect. 'Only show' turns the active ones into the only creators."
+          kind="creator"
+          labelOf={(id) => suggested[id] ?? id}
+          fillers={Object.keys(suggested)}
+          on={prefs.creatorIds ?? []}
+          block={prefs.blockedCreators ?? []}
+          set={({ on: creatorIds, block: blockedCreators }) => setPrefs({ creatorIds, preferredCreators: creatorIds, blockedCreators })}
+          addPlaceholder="A creator name or id"
+        />
+        <LevelSlider label="Weigh the chosen creators" value={prefs.creatorLevel ?? 'ignore'} onChange={(creatorLevel) => setPrefs({ creatorLevel })} />
         <label className="field">
           Subscriptions carousel order
           <select
@@ -1180,28 +1345,6 @@ export function SettingsPage() {
             <option value="warn">Show it with a warning</option>
             <option value="hide">Hide it until I choose to see it</option>
             <option value="allow">Show it normally</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="card form-stack">
-        <h2>Nodes and accounts</h2>
-        <label className="field">
-          Account for new nodes
-          <select value={s.defaultAuth} onChange={(e) => void updateSettings({ defaultAuth: e.target.value as AuthMode })}>
-            {(Object.keys(AUTH_LABELS) as AuthMode[]).map((mode) => (
-              <option key={mode} value={mode}>
-                {AUTH_LABELS[mode].label}
-              </option>
-            ))}
-          </select>
-          <span className="hint">{AUTH_LABELS[s.defaultAuth].help}</span>
-        </label>
-        <label className="field">
-          Feeds
-          <select value={s.feedMode} onChange={(e) => void updateSettings({ feedMode: e.target.value as Settings['feedMode'] })}>
-            <option value="blend">Blend every enabled algorithm node</option>
-            <option value="primary">Only the first algorithm node that answers</option>
           </select>
         </label>
       </div>

@@ -242,12 +242,22 @@ export interface Preferences {
   formatLevel?: SuggestLevel;
   topicLevel?: SuggestLevel;
   creatorLevel?: SuggestLevel;
+  /** How strongly the language picks weigh (see SuggestLevel); "only" is the hard filter. */
+  languageLevel?: SuggestLevel;
   /** The picks those levels refer to (they are only required at the "only show" level). */
   preferredFormats?: Format[];
   preferredTopics?: string[];
   preferredCreators?: string[];
+  /** Formats never to show (the excluded side of the format picks). */
+  blockedFormats?: Format[];
   /** Age-rating reasons (violence, language, …) whose content to leave out entirely. */
   disregard?: string[];
+  /**
+   * The highest allowed rating per age-rating system ("MPA ≤ PG", "ClassInd ≤ 14", …).
+   * Content rated stricter than a maximum in its own system is hidden; content with no
+   * rating for that system is kept, like every unknown rating.
+   */
+  ageRatingMaxima?: { system: string; category: string }[];
   /** Platforms (content sources like youtube) to favour or exclude, and how strongly. */
   preferredPlatforms?: string[];
   blockedPlatforms?: string[];

@@ -60,6 +60,8 @@ export interface AlgorithmConfig extends BaseConfig {
     defaultMaxRating: Rating;
     /** List submissions without review (the creator's metadata is trusted). */
     autoListSubmissions: boolean;
+    /** Accept every submission and suggestion the moment it arrives (default off). */
+    autoAccept: boolean;
   };
   /** Topics offered to clients. */
   topics: string[];
@@ -168,7 +170,7 @@ export function algorithmDefaults(): AlgorithmConfig {
       halfLifeHours: 72,
       gravity: 1.5,
     },
-    policy: { maxRating: 'nsfw', defaultMaxRating: '18+', autoListSubmissions: false },
+    policy: { maxRating: 'nsfw', defaultMaxRating: '18+', autoListSubmissions: false, autoAccept: false },
     topics: [...TOPICS],
     pageSize: 24,
     maxCreatorAccounts: 8,

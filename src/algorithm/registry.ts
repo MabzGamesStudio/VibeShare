@@ -21,6 +21,7 @@ import {
 import { wilson, quality, seededRandom } from './ranking.js';
 import { formatsCovering } from './support.js';
 import { matchesLanguages } from '../shared/language.js';
+import { ageRatingSystem, legacyRatingOf, parseAgeRating, UNKNOWN_AGE_RATING } from '../shared/age-rating.js';
 
 /** What the node knows about one content. Every entry has a content id, a link, or both — they are separate. */
 export interface Entry {
@@ -162,6 +163,39 @@ function words(text: string): string[] {
 }
 
 /** Metadata of an algorithm node: whitelist (listed), blacklist (blocked), creators and thumbnails. */
+/**
+ * Whether the entry's age rating sits at or under every configured per-system maximum.
+ * The systems order their categories mild → strict, so "under the maximum" is an earlier
+ * spot in that order. A rating a maximum does not name — another system, or none at all
+ * (unknown) — passes: unknown stays allowed, exactly as it always has.
+ */
+function ageRatingWithinMaxima(maxima: { system: string; category: string }[] | undefined, topics: readonly string[]): boolean {
+  const rating = parseAgeRating(topics);
+  if (!rating || rating.category === UNKNOWN_AGE_RATING) return true;
+  for (const max of maxima ?? []) {
+    if (max.system.trim().toLowerCase() !== rating.system) continue;
+    const categories = ageRatingSystem(max.system)?.categories ?? [];
+    const entryAt = categories.findIndex((entry) => categoryMatches(entry, rating.category));
+    const maxAt = categories.findIndex((entry) => categoryMatches(entry, max.category));
+    if (entryAt >= 0 && maxAt >= 0) {
+      // Later in the system's order means stricter: past the maximum is hidden.
+      if (entryAt > maxAt) return false;
+    } else if (
+      // No category order to compare (a free-text rating): the legacy buckets decide.
+      RATINGS.indexOf(legacyRatingOf(rating)) > RATINGS.indexOf(legacyRatingOf({ system: max.system, category: max.category }))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Whether a category of a system is the one named (its slug or its label). */
+function categoryMatches(category: { slug: string; label: string }, value: string): boolean {
+  const wanted = String(value ?? '').trim().toLowerCase();
+  return Boolean(wanted) && (category.slug === wanted || category.label.toLowerCase() === wanted);
+}
+
 export class Registry {
   private store: JsonFile<RegistryData>;
   private thumbs = new Map<string, Buffer>();
@@ -557,6 +591,11 @@ export class Registry {
     const blockedCreators = new Set(preferences.blockedCreators ?? []);
     const kinds = preferences.creatorKinds?.length ? new Set(preferences.creatorKinds) : null;
     const languages = preferences.languages?.length ? preferences.languages : null;
+    // A language list is a hard filter only when the slider says "only show" (or the
+    // preference predates the slider): weaker levels are ranking hints, not exclusions.
+    const languageFilter = preferences.languageLevel && preferences.languageLevel !== 'only' ? null : languages;
+    // Formats the reader excluded outright (the tri-state list) are never shown.
+    const blockedFormats = preferences.blockedFormats?.length ? new Set(formatsCovering(preferences.blockedFormats)) : null;
     // A blocked group blocks everyone in it, not only the group's own page; a whitelisted
     // creator or group keeps that creator, and every member of that group.
     const blockedMembers = new Set<string>();
@@ -569,7 +608,9 @@ export class Registry {
     return this.all().filter((entry) => {
       if (entry.status !== 'listed') return false;
       if (!ratingAllowed(entry.rating, limit)) return false;
+      if (!ageRatingWithinMaxima(preferences.ageRatingMaxima, [...(entry.topics ?? []), ...(entry.topicIds ?? [])])) return false;
       if (formats && !formats.has(entry.format)) return false;
+      if (blockedFormats && blockedFormats.has(entry.format)) return false;
       // Topics match by name or by topic id: a page filter may carry either.
       if (topics && !entry.topics.some((topic) => topics.has(topic)) && !(entry.topicIds ?? []).some((id) => topics.has(id))) return false;
       if (
@@ -583,7 +624,7 @@ export class Registry {
       const creator = this.creator(entry.creatorId);
       if (creator?.status === 'blocked') return false;
       if (kinds && !kinds.has(creator?.kind ?? 'unknown')) return false;
-      if (languages && !matchesLanguages(entry, languages)) return false;
+      if (languageFilter && !matchesLanguages(entry, languageFilter)) return false;
       return true;
     });
   }
